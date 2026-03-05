@@ -72,11 +72,26 @@ uv run python .claude/skills/survey-expert/search_survey.py --search <keyword>
 
 Key output fields:
 - `sentinels` — all negative codes (-99, -88, -98, etc.) extracted from choices or constraint; use for recode decisions
-- `why asked` — shown when `--context N` is set; resolves every `${gate_var}` in the relevance expression
-- Adjacent questions block — N questions before/after in survey order with their relevance conditions
+- `*** REPEAT GROUP ***` block — shown when the variable is from a repeat group:
+  - `repeat: iteration N of M (max observed)` — which iteration this Stata variable is, and the maximum seen in data
+  - `repeat_grp: base  (count var: base_count)` — the repeat group name and its count variable
+  - `pos_vs_code: VERIFY ...` — reminder to check if position == choice code; run `tabulate base_count` in Stata to see if the count is constant across HHs
+  - **If count is constant** (same value for all HHs): position == code, safe to index by position
+  - **If count varies** (select_multiple-gated repeat, one iteration per selected item): position ≠ code, need the routing variable to map iteration positions to choice codes
+- `why asked` — shown when `--context N` is set; resolves every `${gate_var}` in the relevance expression, printing the gate question text, its own choices/constraint, and what controls it
+- Adjacent questions block — N questions before/after in survey order with their relevance conditions; reveals structurally related questions (follow-ups, units, other-specify, poly variants)
 
 Use `--context 3` whenever you need to understand skip logic or what surrounds a variable.
 Fall back to Grep / Read only for structure files or section files.
+
+## Search Strategy
+
+**IMPORTANT**: Always use the most efficient search approach:
+1. **Structure questions**: Read the structure.txt file first
+2. **Variable name lookups**: Use the search script (fastest)
+3. **Question text searches**: Use `--search` keyword
+4. **Section exploration**: Use Glob to find section files, then Read specific sections
+5. **Multiple variables**: Search efficiently in parallel
 
 ## How to Help
 
@@ -90,6 +105,11 @@ Fall back to Grep / Read only for structure files or section files.
 2. Provide the question metadata (type, choices, skip logic, group path)
 3. Explain any relevance conditions or constraints
 
+### When asked about specific survey sections:
+1. List available sections from the `sections/` directory using Glob
+2. Read the relevant section JSON file
+3. Explain the questions in that section
+
 ### When asked about Stata variables:
 1. **Run `search_survey.py --var <name>`** via Bash — returns type, constraint, sentinels, choices, skip logic in one call
 2. Explain:
@@ -98,6 +118,12 @@ Fall back to Grep / Read only for structure files or section files.
    - If it's a select_multiple choice (check `is_select_multiple` and `choice_code`)
    - Any skip logic that applies
 3. For repeat variables, explain both the template logic and iteration-specific logic
+
+### When debugging SurveyCTO issues:
+1. Look up the question in questions.json
+2. Examine the relevance conditions and constraints
+3. Explain SurveyCTO syntax (${variable}, index(), choice lists, etc.)
+4. Help translate between SurveyCTO and Stata logic
 
 ### When debugging Stata code issues:
 1. Understand what variables are being used
@@ -111,6 +137,13 @@ Fall back to Grep / Read only for structure files or section files.
 - Variables from repeat groups get numeric suffixes: `variable_1`, `variable_2`, etc.
 - The iteration number indicates which repeat instance
 - Count variables track iterations: `groupname_count`
+- **Critical: position ≠ choice code in variable-count repeats.** When a repeat group runs
+  once per selected item in a prior `select_multiple`, iteration j=1 is the 1st selected item,
+  NOT the item with choice code 1. Use the routing variable to map iteration positions to choice
+  codes. In fixed-count repeats (repeat always runs N times, one slot per option), position == code.
+- **How to detect**: `tabulate groupname_count` in Stata. If count is always the same for all
+  observations, it is fixed (position == code). If it varies, it is select_multiple-gated
+  (position != code).
 
 ### Select_Multiple Questions
 - Create binary variables for each choice: 1 if selected, 0 if not
@@ -143,6 +176,20 @@ Fall back to Grep / Read only for structure files or section files.
 - In Stata, these become conditional statements
 - Variables may be missing (.) if skip logic prevented the question
 - `skip_logic_iteration_specific` field in the variable dictionary has `index()` already replaced with the literal iteration number — prefer this over `stata_skip_logic` for repeat variables
+
+## Example Interactions
+
+**Q: What does variable `hh_size_3` represent?**
+A: Run `search_survey.py --var hh_size_3`. This is iteration 3 of a repeat group variable — it records the household size for the 3rd repeat instance. Check `is_repeat` and `repeat_group` fields for context, and look at the count variable to understand how many iterations are expected.
+
+**Q: Which variables capture food sources?**
+A: Run `search_survey.py --search food_source`. This returns all variables with "food_source" in the name or question text, along with their choice lists, skip logic, and repeat group membership.
+
+**Q: Why is `income_1` missing for some observations?**
+A: Run `search_survey.py --var income_1 --context 3`. Check the `relevance` field — the question is likely gated by a prior `select_multiple` or yes/no question. The surrounding context will show the gate variable and its skip logic.
+
+**Q: What sections does this survey have?**
+A: Use Glob to list `sections/*.json`, then read the structure.txt file for the hierarchy. Each section file contains the questions for that survey group.
 
 ## Response Style
 
