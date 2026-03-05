@@ -57,6 +57,7 @@ DATASETS = {
     #     "questions_json": OUTPUT_DIR / "my_survey" / "my_survey_questions.json",   # Phase 1-3 output
     #     "output_json": OUTPUT_DIR / "my_survey" / "my_survey_variable_dictionary.json",
     #     "output_xlsx": OUTPUT_DIR / "my_survey" / "my_survey_variable_dictionary.xlsx",
+    #     # "skip_ord_dta": True,  # set True to skip _ord.dta (e.g. underscore-prefix vars or very wide datasets)
     # },
 }
 

@@ -421,13 +421,17 @@ def save_ord_dta(var_dict: pd.DataFrame, df: pd.DataFrame, cfg: Dict, meta=None)
         print("  [SKIP] pyreadstat not available -- skipping _ord.dta generation")
         return None
 
+    if cfg.get('skip_ord_dta'):
+        print("  [SKIP] skip_ord_dta=True in config -- skipping _ord.dta generation")
+        return None
+
     data_path = Path(cfg.get('data', ''))
     if not data_path.name:
         print("  [SKIP] no 'data' key in config -- skipping _ord.dta generation")
         return None
     ord_path = data_path.parent / (data_path.stem + '_ord.dta')
 
-    ordered_cols = [v for v in var_dict['variable_name'] if v in df.columns]
+    ordered_cols = [v for v in var_dict['variable_name'] if v in df.columns and v[:1].isalpha()]
     df_ord = df[ordered_cols].copy()
 
     # Coerce object columns that actually contain numerics (pyreadstat read artifact
