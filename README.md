@@ -36,7 +36,7 @@ training dataset.
 | `*_create_seed.do` | `main.py --phases seed` | Stata do-file that builds a 1-row schema dataset — run this before your real data arrives to test your cleaning pipeline |
 | `*_variable_dictionary.json` | `create_variable_dictionaries.py` | Maps every Stata variable to its source question, skip logic, and choice list — in form order, not dataset column order |
 | `*_variable_dictionary.xlsx` | `create_variable_dictionaries.py --xlsx` | Same dictionary as a spreadsheet for sharing with field teams or PIs |
-| `*_data_ord.dta` | `create_variable_dictionaries.py` | Column-reordered dataset following form structure (requires `pyreadstat`) |
+| `*_data_ord.dta` | `create_variable_dictionaries.py` | Column-reordered dataset following form structure |
 | `*_summary_stats.do` | `create_summary_stats_dofile.py` | Stata do-file with `tabstat` calls grouped by skip condition + Excel export |
 
 ---
@@ -64,7 +64,6 @@ my_project/
 
 ```bash
 pip install -r surveycto_extractor/requirements.txt
-# pyreadstat is optional but recommended — enables _ord.dta and repeat-count inference
 ```
 
 ### 3. Configure `config.py`
