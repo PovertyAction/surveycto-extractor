@@ -714,16 +714,11 @@ def filter_truly_numeric(
 
 if __name__ == "__main__":
     import sys
-    json_path = (
-        sys.argv[1]
-        if len(sys.argv) > 1
-        else "docs/ltfu/survey_documentation/ltfu_hh/ltfu_hh_variable_dictionary.json"
-    )
-    dta_path = (
-        sys.argv[2]
-        if len(sys.argv) > 2
-        else "data/ltfu/raw_nopii/ugs_ltfu_hh_checked.dta"
-    )
+    if len(sys.argv) < 3:
+        print("Usage: python load_survey_metadata.py <variable_dictionary.json> <dataset.dta>")
+        sys.exit(1)
+    json_path = sys.argv[1]
+    dta_path = sys.argv[2]
     df = load_survey_metadata(json_path)
     numeric_df = get_numeric_universe(df)
     convertible, non_convertible = filter_truly_numeric(numeric_df, dta_path)
