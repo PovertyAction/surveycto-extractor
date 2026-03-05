@@ -1,0 +1,92 @@
+# ============================================================
+# CRITICAL: never commit project-specific config
+# ============================================================
+# config.py is copied from config.template.py and contains
+# project-specific file paths. It must NEVER be committed.
+config.py
+
+# ============================================================
+# Survey data — potentially contains PII
+# ============================================================
+*.dta
+*.dta.gz
+
+# Survey instrument XLSX files (contain project-specific content)
+# The tool reads these at runtime; they should live outside this repo.
+# Uncomment the line below if you want to also block XLSX entirely.
+# *.xlsx
+
+# Generated outputs from the tool
+*_questions.json
+*_variable_dictionary.json
+*_variable_dictionary.xlsx
+*_structure.txt
+*_create_seed.do
+*_summary_stats.do
+*_survey.csv
+*_choices.csv
+sections/
+
+# ============================================================
+# Python
+# ============================================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.pyd
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+.installed.cfg
+*.manifest
+*.spec
+pip-log.txt
+pip-delete-this-directory.txt
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+coverage.xml
+*.cover
+*.py,cover
+htmlcov/
+.hypothesis/
+.pytest_cache/
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pytype/
+.pyre/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# ============================================================
+# OS / IDE
+# ============================================================
+.DS_Store
+Thumbs.db
+desktop.ini
+
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ============================================================
+# Environment / secrets
+# ============================================================
+.env
+.env.*
+*.local
