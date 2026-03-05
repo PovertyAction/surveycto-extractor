@@ -1,4 +1,39 @@
-# SurveyCTO Extractor — Setup & Usage
+# SurveyCTO Extractor
+
+A Python toolkit for extracting SurveyCTO instrument structure and generating
+Stata-ready outputs: survey documentation (JSON, section files), seed datasets (`.do`),
+variable dictionaries, and summary-stats do-files.
+
+---
+
+## Quick start with the sample
+
+A sample instrument and dataset are included so you can run the full pipeline
+before connecting your own files.
+
+```bash
+git clone https://github.com/PovertyAction/surveycto-extractor.git
+cd surveycto-extractor
+
+pip install -r requirements.txt
+
+# Use the pre-filled sample config
+cp sample/config.example.py config.py
+
+# Phase 1-3: extract structure, questions JSON, section files + seed do-file
+python main.py --survey household_survey
+
+# Phase 4: variable dictionary (requires pyreadstat)
+python create_variable_dictionaries.py --survey household_survey --xlsx
+```
+
+Outputs land in `sample/output/`. The sample uses the
+[IPA High Frequency Checks](https://github.com/PovertyAction/high-frequency-checks)
+training dataset (public domain).
+
+---
+
+## Setting up for your own project
 
 This guide walks you through copying the surveycto_extractor engine into a new project
 and configuring it to generate survey documentation, variable dictionaries, seed datasets,
