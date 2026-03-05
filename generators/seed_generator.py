@@ -137,6 +137,9 @@ def _max_iterations_from_data(data_path: "Path") -> Dict[str, int]:
     base_max: Dict[str, int] = {}
     for col in col_set:
         m = re.match(r'^(.+?)_(\d+)$', col)
+        # Also handle digit appended directly without underscore (e.g. "f_hr_fn_r1")
+        if not m:
+            m = re.match(r'^(.+?)(\d+)$', col)
         if not m:
             continue
         base, num = m.group(1), int(m.group(2))

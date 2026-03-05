@@ -76,10 +76,20 @@ def find_question_for_variable(var_name: str, questions: List[Dict]) -> Optional
         if q['variable_name'] == var_name:
             return q
 
-    # Try matching base name (remove numeric suffix)
+    # Try matching base name (remove numeric suffix with underscore: var_1, var_2)
     match = re.match(r'(.+?)_(\d+)$', var_name)
     if match:
         base_name = match.group(1)
+        for q in questions:
+            if q['variable_name'] == base_name:
+                return q
+
+    # Try matching base name (digit appended directly without underscore: var_r1, var_r2)
+    # Handles SurveyCTO repeat variables whose names end in a non-digit character,
+    # e.g. form variable "f_hr_fn_r" → Stata columns "f_hr_fn_r1", "f_hr_fn_r2"
+    match_direct = re.match(r'^(.+?)(\d+)$', var_name)
+    if match_direct:
+        base_name = match_direct.group(1)
         for q in questions:
             if q['variable_name'] == base_name:
                 return q
@@ -233,8 +243,11 @@ def determine_variable_source(var_name: str, questions: List[Dict]) -> Dict:
             result['choice_index'] = choice_values.index(choice_num) if choice_num in choice_values else None
         else:
             match = re.match(rf'{re.escape(base_name)}_(\d+)$', var_name)
-            if match:
-                suffix_num = match.group(1)
+            # Fallback: digit appended directly without underscore (e.g. base "f_hr_fn_r" → "f_hr_fn_r1")
+            match_direct = re.match(rf'{re.escape(base_name)}(\d+)$', var_name) if not match else None
+            active_match = match or match_direct
+            if active_match:
+                suffix_num = active_match.group(1)
                 if question['type'] == 'select_multiple':
                     choice_values = [str(c.get('value', '')) for c in (question.get('choices') or [])]
                     if str(suffix_num) in choice_values:
