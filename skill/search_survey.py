@@ -221,6 +221,19 @@ def print_question(q: dict, survey_label: str, stata_name: str = None,
     non_null = q.get("_non_null_count")
     if non_null is not None:
         print(f"  non_null   : {non_null:,}")
+
+    # Repeat group summary — ALWAYS shown first if applicable; critical for position-vs-code decisions
+    ri = q.get("_repeat_info")
+    if ri is not None:
+        max_s = f"of {ri['max_iter']} (max observed)" if ri["max_iter"] else "of ?"
+        print(f"  *** REPEAT GROUP ***")
+        print(f"  repeat     : iteration {ri['iteration']} {max_s}")
+        print(f"  repeat_grp : {ri['base']}  (count var: {ri['count_key']})")
+        print(f"  pos_vs_code: VERIFY -- if count is constant across HHs: position==code (safe).")
+        print(f"               If count varies by HH (select_multiple-gated repeat): position!=code")
+        print(f"               (need routing variable to map position -> choice code).")
+        print(f"               Check: tabulate {ri['count_key']} to see if count varies.")
+
     print(f"  form_type  : {q.get('type', '?')}")
     print(f"  question   : {(q.get('question_text') or '').strip()}")
     print(f"  choice_list: {q.get('choice_list') or 'none'}")
@@ -267,10 +280,11 @@ def search_var(stata_name: str, context: int = 0) -> bool:
         q_index   = _questions_by_name(questions)
 
         # Pass 1: variable_dictionary lookup
-        original_name = stata_name
-        stata_type    = None
-
+        original_name  = stata_name
+        stata_type     = None
         non_null_count = None
+        repeat_info    = None   # filled below if variable is from a repeat group
+
         if vpath.exists():
             vardict = load_json(vpath).get("variables", {})
             entry   = vardict.get(stata_name)
@@ -280,6 +294,68 @@ def search_var(stata_name: str, context: int = 0) -> bool:
                 orig           = entry.get("survey", {}).get("original_variable_name")
                 if orig:
                     original_name = orig
+
+                # Repeat group detection — surface position-vs-code info prominently
+                repeat_iter = entry.get("repeat_iteration")
+                if repeat_iter is not None:
+                    # Derive max iteration from all variables sharing the same form name
+                    sibling_iters = [
+                        v.get("repeat_iteration")
+                        for k, v in vardict.items()
+                        if isinstance(v, dict)
+                        and v.get("survey", {}).get("original_variable_name") == original_name
+                        and isinstance(v.get("repeat_iteration"), int)
+                    ]
+                    max_iter = max(sibling_iters) if sibling_iters else None
+
+                    # Find the _count variable: search all vardict entries with
+                    # type=="repeat_count" and a repeat_group_base that appears in
+                    # the target variable's group_path.
+                    gpath = entry.get("survey", {}).get("group_path", "") or ""
+                    gpath_str = gpath if isinstance(gpath, str) else "/".join(gpath)
+                    gpath_parts = [p.strip() for p in gpath_str.replace("/", " ").split()]
+
+                    count_key   = None
+                    count_entry = {}
+                    for ck, cv in vardict.items():
+                        if not isinstance(cv, dict):
+                            continue
+                        if cv.get("survey", {}).get("type") == "repeat_count":
+                            base = cv.get("repeat_metadata", {}).get("repeat_group_base", "")
+                            if base and base in gpath_parts:
+                                count_key   = ck
+                                count_entry = cv
+                                break
+                    # Fallback: walk group_path from innermost outward, try <part>_count
+                    if count_key is None:
+                        for part in reversed(gpath_parts):
+                            candidate = f"{part}_count"
+                            if candidate in vardict:
+                                count_key   = candidate
+                                count_entry = vardict[candidate]
+                                break
+
+                    # A FIXED repeat count means the count var is non-null for ALL HHs
+                    # (i.e. the repeat always runs the same number of times).
+                    # VARIABLE count = the repeat is driven by a prior select_multiple.
+                    total_obs     = load_json(vpath).get("dataset", {}).get("n_observations")
+                    count_nonnull = count_entry.get("non_null_count") if count_entry else None
+                    fixed = (
+                        count_nonnull is not None
+                        and total_obs is not None
+                        and count_nonnull == total_obs
+                    )
+                    base_display = (
+                        count_entry.get("repeat_metadata", {}).get("repeat_group_base")
+                        or (count_key.replace("_count", "") if count_key else "?")
+                    )
+                    repeat_info = {
+                        "iteration": repeat_iter,
+                        "max_iter":  max_iter,
+                        "base":      base_display,
+                        "count_key": count_key or "?",
+                        "fixed":     fixed,
+                    }
 
         # Pass 2: questions.json lookup by original SurveyCTO name
         q = q_index.get(original_name)
@@ -299,6 +375,8 @@ def search_var(stata_name: str, context: int = 0) -> bool:
             q = dict(q, _stata_type=stata_type)
         if non_null_count is not None:
             q = dict(q, _non_null_count=non_null_count)
+        if repeat_info is not None:
+            q = dict(q, _repeat_info=repeat_info)
 
         print_question(
             q, label,
