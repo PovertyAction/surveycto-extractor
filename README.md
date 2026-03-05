@@ -56,8 +56,7 @@ my_project/
     ├── main.py
     ├── create_variable_dictionaries.py
     ├── create_summary_stats_dofile.py
-    ├── check_missing_cond_vars.py
-    ├── check_string_conditions.py
+    ├── load_survey_metadata.py      ← required by create_summary_stats_dofile.py
     └── ...
 ```
 
@@ -150,14 +149,6 @@ Generates a Stata do-file with `tabstat` calls for all numeric variables, groupe
 skip condition. Merges with survey metadata and exports to Excel. Check the preamble —
 it uses `${input_data}` and a `sumstats_dir` global; customize via `output_do` and
 `sumstats_dir_stata` in your DATASETS config entry.
-
-### Diagnostics
-
-```bash
-python check_missing_cond_vars.py    # variables referenced in skip logic but absent from data
-python check_string_conditions.py    # untranslated SurveyCTO syntax remaining in skip logic
-python scan_skip_logic_funcs.py      # SurveyCTO functions: pulldata(), once(), jr:choice-name
-```
 
 ---
 
