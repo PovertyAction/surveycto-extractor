@@ -11,6 +11,11 @@ config.py
 *.dta
 *.dta.gz
 
+# Allow the bundled sample files (public IPA HFC training data)
+!sample/household_survey.dta
+!sample/Household_Survey.xlsx
+!sample/config.example.py
+
 # Survey instrument XLSX files (contain project-specific content)
 # The tool reads these at runtime; they should live outside this repo.
 # Uncomment the line below if you want to also block XLSX entirely.
@@ -25,7 +30,9 @@ config.py
 *_summary_stats.do
 *_survey.csv
 *_choices.csv
+*_ord.dta
 sections/
+sample/output/
 
 # ============================================================
 # Python
