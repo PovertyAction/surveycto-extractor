@@ -154,9 +154,11 @@ python create_summary_stats_dofile.py --survey my_survey
 ```
 
 Generates a Stata do-file with `tabstat` calls for all numeric variables, grouped by
-skip condition. Merges with survey metadata and exports to Excel. Check the preamble —
-it uses `${input_data}` and a `sumstats_dir` global; customize via `output_do` and
-`sumstats_dir_stata` in your DATASETS config entry.
+skip condition. Groups with zero observations in the dataset are automatically detected
+and commented out to prevent Stata `r(2000)` errors at runtime. Merges with survey
+metadata and exports to Excel. Check the preamble — it uses `${input_data}` and a
+`sumstats_dir` global; customize via `output_do` and `sumstats_dir_stata` in your
+DATASETS config entry.
 
 ---
 

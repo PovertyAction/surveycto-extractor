@@ -35,9 +35,12 @@ Config
 
 import argparse
 import io
+import re
 import sys
+import warnings
 from pathlib import Path
 
+import pandas as pd
 import pyreadstat
 
 # Pull DATASETS from this project's config.py (same directory as this script)
@@ -102,6 +105,54 @@ def _section(title: str) -> str:
     return f"\n{bar}\n* {title}\n{bar}\n\n"
 
 
+def identify_zero_obs_groups(groups: dict, dta_path: str,
+                             parquet_path: str = None) -> set:
+    """
+    Load the dataset and count observations matching each group condition.
+    Returns a set of condition strings that match zero observations.
+
+    Uses parquet sidecar when available (faster columnar access).
+    """
+    try:
+        if parquet_path:
+            df = pd.read_parquet(parquet_path)
+        else:
+            df, _ = pyreadstat.read_dta(dta_path)
+    except Exception as e:
+        print(f"  WARNING: could not load dataset for zero-obs check: {e}")
+        return set()
+
+    zero_groups: set = set()
+
+    for cond in groups:
+        if not cond:
+            continue
+
+        # Translate Stata missing() syntax to pandas-compatible expressions
+        expr = cond
+        expr = re.sub(r'!missing\((\w+)\)', r'(\1 == \1)', expr)
+        expr = re.sub(r'missing\((\w+)\)', r'(\1 != \1)', expr)
+
+        # Check that at least one referenced variable exists in the dataset
+        var_names = {v for v in re.findall(r'\b([a-zA-Z_]\w*)\b', expr)
+                     if v in df.columns}
+        if not var_names:
+            print(f"  UNEVALUABLE (no matching cols): if {cond[:80]}...")
+            continue
+
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                mask = df[list(var_names)].eval(expr, engine='python')
+            n_obs = int(mask.sum())
+            if n_obs == 0:
+                zero_groups.add(cond)
+        except Exception as exc:
+            print(f"  UNEVALUABLE ({exc.__class__.__name__}): if {cond[:80]}...")
+
+    return zero_groups
+
+
 def generate(survey_key: str) -> None:
     if survey_key not in DATASETS:
         print(f"ERROR: '{survey_key}' not found in config.DATASETS. "
@@ -161,6 +212,15 @@ def generate(survey_key: str) -> None:
     string_cols = raw_str_cols - frozenset(convertible)
     groups = build_relevance_groups(stats_df, valid_cols=valid_cols, string_cols=string_cols)
 
+    print(f"\n=== Step 4.5: Identify zero-observation groups ===")
+    zero_groups = identify_zero_obs_groups(groups, dta_path, parquet_path=pq_arg)
+    if zero_groups:
+        print(f"  {len(zero_groups)} group(s) with 0 observations — will be commented out:")
+        for cond in sorted(zero_groups):
+            print(f"    if {cond[:100]}...")
+    else:
+        print("  All groups have observations — none skipped")
+
     print(f"\n=== Step 5: Save survey_metadata.dta ===")
     save_survey_metadata_dta(df, meta_dta)
 
@@ -171,7 +231,7 @@ def generate(survey_key: str) -> None:
     buf = io.StringIO()
     sys.stdout = buf
     destring_code = write_destring_block(destring_df, mvdecode_universe=stats_df)
-    stats_code    = write_stats_blocks(groups)
+    stats_code    = write_stats_blocks(groups, zero_groups=zero_groups)
     merge_code    = write_merge_and_export()
     sys.stdout = sys.__stdout__
 

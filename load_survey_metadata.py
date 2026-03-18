@@ -470,7 +470,7 @@ _STATS_CMD  = "stat(n mean sd min p25 p50 p75 max) columns(stat)"
 _STAT_KEEP  = "variable_name N Mean SD Min p25 p50 p75 Max"
 
 
-def write_stats_blocks(relevance_groups: dict) -> str:
+def write_stats_blocks(relevance_groups: dict, zero_groups: set | None = None) -> str:
     """
     Generate Stata code that collects tabstat summary statistics for every
     relevance group and saves sumstats_raw.dta.
@@ -491,6 +491,9 @@ def write_stats_blocks(relevance_groups: dict) -> str:
         relevance_groups: output of build_relevance_groups — key is the
             stata_skip_logic condition string ("" = unconditional), value is
             space-separated variable names.
+        zero_groups: optional set of condition strings that matched zero
+            observations in the dataset.  Groups in this set are commented
+            out in the generated do-file to prevent Stata r(2000) errors.
 
     Returns:
         Generated Stata code as a string.  Also prints diagnostics and the
@@ -544,12 +547,38 @@ def write_stats_blocks(relevance_groups: dict) -> str:
         "",
     ]
 
+    n_skipped = 0
     for gi, (cond, chunks) in enumerate(group_data):
         n_vars  = sum(len(c) for c in chunks)
         n_chnks = len(chunks)
         cond_label = "(unconditional)" if cond == "" else f"if {cond}"
+        is_zero = bool(zero_groups) and cond in zero_groups
 
         lines.append(f"* --- Group {gi}: {cond_label} | {n_vars} vars, {n_chnks} chunk(s) ---")
+
+        if is_zero:
+            n_skipped += 1
+            lines.append("* SKIPPED: 0 observations matched this condition in the dataset.")
+            lines.append("* Uncomment below if data changes and this group gains observations.")
+            for ci, chunk in enumerate(chunks, 1):
+                lines.append(f"* local g{gi}_c{ci} {' '.join(chunk)}")
+            for ci in range(1, len(chunks) + 1):
+                if_clause = f" if {cond}" if cond else ""
+                lines.append(
+                    f"* tabstat `g{gi}_c{ci}'{if_clause}, save {_STATS_CMD}"
+                )
+                if ci == 1:
+                    lines.append("* matrix _grp = r(StatTotal)'")
+                else:
+                    lines.append("* matrix _grp = _grp \\\\ r(StatTotal)'")
+            lines += [
+                "* local _rn : rownames _grp",
+                "* local _nr = rowsof(_grp)",
+                "* forvalues _i = 1/`_nr' { ... post ... }",
+                "* matrix drop _grp",
+                "",
+            ]
+            continue
 
         # chunk locals
         for ci, chunk in enumerate(chunks, 1):
@@ -592,6 +621,8 @@ def write_stats_blocks(relevance_groups: dict) -> str:
 
     # --- diagnostics + preview -----------------------------------------------
     print(f"Total relevance groups : {n_groups}")
+    if n_skipped:
+        print(f"Zero-obs groups skipped: {n_skipped}")
     print(f"Total tabstat calls    : {total_tabstat}")
 
     code_lines = code.split("\n")
