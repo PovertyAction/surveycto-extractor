@@ -10,6 +10,7 @@ config.py
 # ============================================================
 *.dta
 *.dta.gz
+*.parquet
 
 # Allow the bundled sample files (public IPA HFC training data)
 !sample/household_survey.dta

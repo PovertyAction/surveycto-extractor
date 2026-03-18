@@ -22,10 +22,12 @@ Config:
 """
 
 import pandas as pd
+import numpy as np
 import json
 import re
 import argparse
 import sys
+import time
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -35,30 +37,248 @@ try:
 except ImportError:
     _PYREADSTAT_AVAILABLE = False
 
+try:
+    import pyarrow  # noqa: F401 — presence check; pandas uses it via engine="pyarrow"
+    _PYARROW_AVAILABLE = True
+except ImportError:
+    _PYARROW_AVAILABLE = False
+
 # Pull DATASETS from this project's config.py (same directory as this script)
 sys.path.insert(0, str(Path(__file__).parent))
 from config import DATASETS
 
 
+def _write_parquet_sidecar(df: pd.DataFrame, dta_path: Path) -> Optional[Path]:
+    """Write a parquet sidecar next to the .dta.  Returns the path, or None."""
+    if not _PYARROW_AVAILABLE:
+        return None
+    pq_path = dta_path.with_suffix('.parquet')
+    t0 = time.perf_counter()
+    df.to_parquet(pq_path, engine='pyarrow')
+    elapsed = time.perf_counter() - t0
+    size_mb = pq_path.stat().st_size / (1024 * 1024)
+    print(f"  Wrote parquet sidecar: {pq_path.name} "
+          f"({size_mb:.1f} MB, {elapsed:.1f}s)")
+    return pq_path
+
+
+def _scan_extended_missings(df: pd.DataFrame) -> Dict[str, Dict[str, int]]:
+    """Scan a user_missing=True DataFrame for extended missing letter tags.
+
+    Returns {var_name: {"d": 5, "r": 2, ...}} for every column that has at
+    least one extended missing value.
+    """
+    t0 = time.perf_counter()
+    result: Dict[str, Dict[str, int]] = {}
+    # Extended missings from pyreadstat show up as single-letter strings a-z
+    ext_letters = set('abcdefghijklmnopqrstuvwxyz')
+
+    for col in df.columns:
+        if df[col].dtype != object:
+            continue
+        # Fast check: are there any strings at all in this column?
+        str_mask = df[col].apply(lambda x: isinstance(x, str) and x in ext_letters)
+        n_ext = str_mask.sum()
+        if n_ext > 0:
+            counts = df[col][str_mask].value_counts()
+            result[col] = {str(k): int(v) for k, v in counts.items()}
+
+    elapsed = time.perf_counter() - t0
+    n_vars = len(result)
+    n_total = sum(sum(v.values()) for v in result.values())
+    print(f"  Extended missing scan: {n_vars} vars with {n_total:,} "
+          f"extended missing values ({elapsed:.1f}s)")
+    return result
+
+
+def _clean_extended_missings(df: pd.DataFrame) -> pd.DataFrame:
+    """Replace extended missing letter tags with NaN and coerce back to numeric.
+
+    After pyreadstat reads with user_missing=True, columns that had extended
+    missings become object dtype (mixed floats + letter strings).  This
+    restores them to clean numeric columns matching user_missing=False output.
+    """
+    ext_letters = set('abcdefghijklmnopqrstuvwxyz')
+    for col in df.columns:
+        if df[col].dtype != object:
+            continue
+        # Check if this column has any letter tags
+        has_letters = df[col].apply(
+            lambda x: isinstance(x, str) and x in ext_letters
+        ).any()
+        if has_letters:
+            # Replace letter tags with NaN
+            df[col] = df[col].apply(
+                lambda x: np.nan if isinstance(x, str) and x in ext_letters else x
+            )
+            # Try to coerce back to numeric
+            try:
+                df[col] = pd.to_numeric(df[col])
+            except (ValueError, TypeError):
+                pass  # leave as object — was a genuine string column
+    return df
+
+
 def load_data(dataset_name: str):
-    """Load Stata dataset and JSON metadata."""
+    """Load Stata dataset and JSON metadata.
+
+    Reads with user_missing=True to capture extended missing counts (.d, .r,
+    etc.), then cleans the DataFrame back to standard NaN representation.
+    When pyarrow is available a parquet sidecar is written from the cleaned
+    data for fast columnar access downstream.
+    """
     cfg = DATASETS[dataset_name]
     # Support both 'json' key (old style) and 'questions_json' key (template style)
     json_key = 'questions_json' if 'questions_json' in cfg else 'json'
 
+    dta_path = Path(cfg['data'])
+
     print(f"Loading {dataset_name} data...")
+    t0 = time.perf_counter()
+    ext_missing_counts = {}
     if _PYREADSTAT_AVAILABLE:
-        df, meta = pyreadstat.read_dta(str(cfg['data']))
+        df, meta = pyreadstat.read_dta(str(dta_path), user_missing=True)
+        elapsed = time.perf_counter() - t0
+        print(f"  Loaded {len(df)} obs x {len(df.columns)} vars "
+              f"from .dta ({elapsed:.1f}s)")
+
+        # Scan for extended missings before cleaning them away
+        ext_missing_counts = _scan_extended_missings(df)
+
+        # Clean letter tags back to NaN so downstream code sees normal numerics
+        t1 = time.perf_counter()
+        df = _clean_extended_missings(df)
+        print(f"  Cleaned extended missings -> NaN ({time.perf_counter() - t1:.1f}s)")
     else:
         df = pd.read_stata(cfg['data'])
         meta = None
-    print(f"  Loaded {len(df)} observations, {len(df.columns)} variables")
+        elapsed = time.perf_counter() - t0
+        print(f"  Loaded {len(df)} obs x {len(df.columns)} vars "
+              f"from .dta ({elapsed:.1f}s)")
+
+    # Write parquet sidecar for fast columnar access downstream
+    pq_path = _write_parquet_sidecar(df, dta_path)
 
     with open(cfg[json_key], 'r', encoding='utf-8') as f:
         questions = json.load(f)
     print(f"  Loaded {len(questions)} questions from JSON")
 
-    return df, questions, cfg, meta
+    return df, questions, cfg, meta, pq_path, ext_missing_counts
+
+
+SENTINEL_CODES_LIST = [-99, -88, -98, -77, -66, -55]
+SENTINEL_STRINGS_SET = {"-99", "-88", "-98", "-77", "-66", "-55"}
+
+
+def batch_sentinel_scan(
+    df: pd.DataFrame,
+    var_dict_df: pd.DataFrame,
+    ext_missing_counts: Optional[Dict[str, Dict[str, int]]] = None,
+) -> pd.DataFrame:
+    """Vectorized sentinel scan across all columns at once.
+
+    Detects four sentinel states:
+      1. Raw integer: -99, -88 etc. as numeric values
+      2. String sentinel: "-99", "-88" as text in string columns
+      3. Extended missing: .d, .r etc. (from HFC recoding) — requires
+         ext_missing_counts from a user_missing=True read
+      4. Type mismatch: form says integer/decimal but Stata has string
+      5. Calculate risk: calculate field with unexplained negative values
+
+    Returns var_dict_df with sentinel columns added.
+    """
+    t0 = time.perf_counter()
+    if ext_missing_counts is None:
+        ext_missing_counts = {}
+
+    # Initialize sentinel columns
+    var_dict_df['sentinel_raw_int'] = 0
+    var_dict_df['sentinel_raw_detail'] = None
+    var_dict_df['sentinel_string'] = 0
+    var_dict_df['sentinel_string_detail'] = None
+    var_dict_df['sentinel_ext_missing'] = 0
+    var_dict_df['sentinel_ext_missing_detail'] = None
+    var_dict_df['sentinel_type_mismatch'] = False
+    var_dict_df['sentinel_calculate_risk'] = False
+
+    # Build index: variable_name -> row position in var_dict_df
+    var_to_idx = {v: i for i, v in enumerate(var_dict_df['variable_name'])}
+
+    # --- State 1: vectorized numeric sentinel scan ---
+    numeric_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c]) and c in var_to_idx]
+    if numeric_cols:
+        sentinel_counts = df[numeric_cols].isin(SENTINEL_CODES_LIST).sum()
+        for col, cnt in sentinel_counts[sentinel_counts > 0].items():
+            idx = var_to_idx[col]
+            var_dict_df.iat[idx, var_dict_df.columns.get_loc('sentinel_raw_int')] = int(cnt)
+            detail = df[col][df[col].isin(SENTINEL_CODES_LIST)].value_counts()
+            var_dict_df.iat[idx, var_dict_df.columns.get_loc('sentinel_raw_detail')] = json.dumps(
+                {str(int(k)): int(v) for k, v in detail.items()}
+            )
+    t1 = time.perf_counter()
+
+    # --- State 3: vectorized string sentinel scan ---
+    string_cols = [c for c in df.columns
+                   if (pd.api.types.is_string_dtype(df[c]) or pd.api.types.is_object_dtype(df[c]))
+                   and c in var_to_idx]
+    if string_cols:
+        # Process in chunks to limit memory (20k string cols * 10k rows is large)
+        chunk_size = 500
+        for start in range(0, len(string_cols), chunk_size):
+            chunk_cols = string_cols[start:start + chunk_size]
+            chunk_df = df[chunk_cols].fillna('').astype(str)
+            sentinel_mask = chunk_df.isin(SENTINEL_STRINGS_SET)
+            counts = sentinel_mask.sum()
+            for col, cnt in counts[counts > 0].items():
+                idx = var_to_idx[col]
+                var_dict_df.iat[idx, var_dict_df.columns.get_loc('sentinel_string')] = int(cnt)
+                vals = chunk_df[col][sentinel_mask[col]].value_counts()
+                var_dict_df.iat[idx, var_dict_df.columns.get_loc('sentinel_string_detail')] = json.dumps(
+                    {str(k): int(v) for k, v in vals.items()}
+                )
+    t2 = time.perf_counter()
+
+    # --- State 3: extended missings (.d, .r, etc. from HFC recoding) ---
+    if ext_missing_counts:
+        for col, counts in ext_missing_counts.items():
+            if col in var_to_idx:
+                idx = var_to_idx[col]
+                total = sum(counts.values())
+                var_dict_df.iat[idx, var_dict_df.columns.get_loc('sentinel_ext_missing')] = total
+                var_dict_df.iat[idx, var_dict_df.columns.get_loc('sentinel_ext_missing_detail')] = json.dumps(counts)
+    t2b = time.perf_counter()
+
+    # --- Type mismatch: form says numeric but Stata has string ---
+    for idx, row in var_dict_df.iterrows():
+        qtype = row.get('question_type')
+        stype = row.get('stata_type', '')
+        if qtype in ('integer', 'decimal') and ('str' in str(stype) or 'object' in str(stype)):
+            var_dict_df.at[idx, 'sentinel_type_mismatch'] = True
+
+    # --- State 4: calculate fields with unexplained negatives ---
+    calc_vars = var_dict_df[var_dict_df['question_type'] == 'calculate']['variable_name'].tolist()
+    calc_numeric = [c for c in calc_vars if c in df.columns and pd.api.types.is_numeric_dtype(df[c])]
+    if calc_numeric:
+        for col in calc_numeric:
+            neg_count = int((df[col] < 0).sum())
+            if neg_count > 0:
+                idx = var_to_idx[col]
+                var_dict_df.iat[idx, var_dict_df.columns.get_loc('sentinel_calculate_risk')] = True
+    t3 = time.perf_counter()
+
+    # Summary
+    n_raw = int((var_dict_df['sentinel_raw_int'] > 0).sum())
+    n_str = int((var_dict_df['sentinel_string'] > 0).sum())
+    n_ext = int((var_dict_df['sentinel_ext_missing'] > 0).sum())
+    n_mismatch = int(var_dict_df['sentinel_type_mismatch'].sum())
+    n_calc = int(var_dict_df['sentinel_calculate_risk'].sum())
+    print(f"  Sentinel scan ({t3-t0:.1f}s): "
+          f"{n_raw} raw int, {n_str} string, {n_ext} ext missing, "
+          f"{n_mismatch} type mismatch, {n_calc} calculate risk")
+    print(f"    Timing: numeric {t1-t0:.1f}s, string {t2-t1:.1f}s, "
+          f"ext {t2b-t2:.1f}s, calc {t3-t2b:.1f}s")
+
+    return var_dict_df
 
 
 def find_question_for_variable(var_name: str, questions: List[Dict]) -> Optional[Dict]:
@@ -297,7 +517,12 @@ def enrich_count_variables(var_dict_df: pd.DataFrame, df: pd.DataFrame) -> pd.Da
     return var_dict_df
 
 
-def create_variable_dictionary(df: pd.DataFrame, questions: List[Dict], dataset_name: str) -> pd.DataFrame:
+def create_variable_dictionary(
+    df: pd.DataFrame,
+    questions: List[Dict],
+    dataset_name: str,
+    ext_missing_counts: Optional[Dict[str, Dict[str, int]]] = None,
+) -> pd.DataFrame:
     """Create comprehensive variable dictionary."""
     print(f"\nCreating {dataset_name} variable dictionary...")
     records = []
@@ -309,6 +534,8 @@ def create_variable_dictionary(df: pd.DataFrame, questions: List[Dict], dataset_
         var_type = str(df[var_name].dtype)
         non_null_count = int(df[var_name].notna().sum())
         metadata = determine_variable_source(var_name, questions)
+
+        # Sentinel fields added in batch after dictionary is built (batch_sentinel_scan)
 
         record = {
             'variable_name': var_name,
@@ -344,6 +571,9 @@ def create_variable_dictionary(df: pd.DataFrame, questions: List[Dict], dataset_
     print(f"  Processed {len(records)} variables")
     var_dict_df = pd.DataFrame(records)
     var_dict_df = enrich_count_variables(var_dict_df, df)
+
+    # Batch sentinel scan (vectorized across all columns)
+    var_dict_df = batch_sentinel_scan(df, var_dict_df, ext_missing_counts)
 
     # Sort by form position.
     #
@@ -415,7 +645,8 @@ def create_variable_dictionary(df: pd.DataFrame, questions: List[Dict], dataset_
     return var_dict_df
 
 
-def save_ord_dta(var_dict: pd.DataFrame, df: pd.DataFrame, cfg: Dict, meta=None) -> Optional[Path]:
+def save_ord_dta(var_dict: pd.DataFrame, df: pd.DataFrame, cfg: Dict, meta=None,
+                 parquet_path: Optional[Path] = None) -> Optional[Path]:
     """Save a column-reordered *_ord.dta alongside the original dataset."""
     if not _PYREADSTAT_AVAILABLE:
         print("  [SKIP] pyreadstat not available -- skipping _ord.dta generation")
@@ -432,7 +663,13 @@ def save_ord_dta(var_dict: pd.DataFrame, df: pd.DataFrame, cfg: Dict, meta=None)
     ord_path = data_path.parent / (data_path.stem + '_ord.dta')
 
     ordered_cols = [v for v in var_dict['variable_name'] if v in df.columns and v[:1].isalpha()]
-    df_ord = df[ordered_cols].copy()
+
+    # Read selected columns from parquet (columnar, skips unneeded cols) or
+    # fall back to subsetting the in-memory DataFrame.
+    if parquet_path and Path(parquet_path).exists():
+        df_ord = pd.read_parquet(str(parquet_path), columns=ordered_cols)
+    else:
+        df_ord = df[ordered_cols].copy()
 
     # Coerce object columns that actually contain numerics (pyreadstat read artifact
     # for sparse repeat-group columns -- stored as object with int/float values).
@@ -466,7 +703,8 @@ def save_ord_dta(var_dict: pd.DataFrame, df: pd.DataFrame, cfg: Dict, meta=None)
     return ord_path
 
 
-def export_dictionary(var_dict: pd.DataFrame, df: pd.DataFrame, cfg: Dict, dataset_name: str, meta=None):
+def export_dictionary(var_dict: pd.DataFrame, df: pd.DataFrame, cfg: Dict, dataset_name: str, meta=None,
+                      parquet_path: Optional[Path] = None):
     """Export variable dictionary to JSON."""
     print(f"\n{dataset_name.title()} Variable Dictionary Summary:")
     print(f"  Total variables: {len(var_dict)}")
@@ -483,7 +721,7 @@ def export_dictionary(var_dict: pd.DataFrame, df: pd.DataFrame, cfg: Dict, datas
             print(f"    {qtype}: {count}")
 
     # Save form-ordered dataset
-    save_ord_dta(var_dict, df, cfg, meta)
+    save_ord_dta(var_dict, df, cfg, meta, parquet_path=parquet_path)
 
     print(f"\nExporting to JSON: {cfg['output_json']}")
     Path(cfg['output_json']).parent.mkdir(parents=True, exist_ok=True)
@@ -541,6 +779,27 @@ def export_dictionary(var_dict: pd.DataFrame, df: pd.DataFrame, cfg: Dict, datas
             var_metadata['is_synthetic'] = True
             if repeat_metadata:
                 var_metadata['repeat_metadata'] = repeat_metadata
+
+        # Sentinel counts — only include keys with non-zero values
+        sentinels = {}
+        if int(row.get('sentinel_raw_int', 0)) > 0:
+            sentinels['raw_int'] = int(row['sentinel_raw_int'])
+            if pd.notna(row.get('sentinel_raw_detail')):
+                sentinels['raw_int_detail'] = json.loads(row['sentinel_raw_detail'])
+        if int(row.get('sentinel_string', 0)) > 0:
+            sentinels['string'] = int(row['sentinel_string'])
+            if pd.notna(row.get('sentinel_string_detail')):
+                sentinels['string_detail'] = json.loads(row['sentinel_string_detail'])
+        if int(row.get('sentinel_ext_missing', 0)) > 0:
+            sentinels['ext_missing'] = int(row['sentinel_ext_missing'])
+            if pd.notna(row.get('sentinel_ext_missing_detail')):
+                sentinels['ext_missing_detail'] = json.loads(row['sentinel_ext_missing_detail'])
+        if row.get('sentinel_type_mismatch', False):
+            sentinels['type_mismatch'] = True
+        if row.get('sentinel_calculate_risk', False):
+            sentinels['calculate_risk'] = True
+        if sentinels:
+            var_metadata['sentinels'] = sentinels
 
         variables_dict[var_name] = var_metadata
 
@@ -688,9 +947,9 @@ def main():
         print(f"\n{'='*70}")
         print(f"Processing {dataset_name.upper()}")
         print(f"{'='*70}")
-        df, questions, cfg, meta = load_data(dataset_name)
-        var_dict = create_variable_dictionary(df, questions, dataset_name)
-        export_dictionary(var_dict, df, cfg, dataset_name, meta)
+        df, questions, cfg, meta, pq_path, ext_missing_counts = load_data(dataset_name)
+        var_dict = create_variable_dictionary(df, questions, dataset_name, ext_missing_counts)
+        export_dictionary(var_dict, df, cfg, dataset_name, meta, parquet_path=pq_path)
 
         if args.xlsx:
             from generators.xlsx_exporter import XLSXExporter

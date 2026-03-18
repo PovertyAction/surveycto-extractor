@@ -140,7 +140,10 @@ def generate(survey_key: str) -> None:
     numeric_df = get_numeric_universe(df)
 
     print("\n=== Step 3: filter_truly_numeric (scan dataset) ===")
-    convertible, non_convertible = filter_truly_numeric(numeric_df, dta_path)
+    # Use parquet sidecar if create_variable_dictionaries.py already wrote one
+    pq_path = Path(dta_path).with_suffix('.parquet')
+    pq_arg = str(pq_path) if pq_path.exists() else None
+    convertible, non_convertible = filter_truly_numeric(numeric_df, dta_path, parquet_path=pq_arg)
 
     stats_df    = numeric_df.drop(index=non_convertible, errors="ignore")
     destring_df = numeric_df.loc[numeric_df.index.isin(convertible)]

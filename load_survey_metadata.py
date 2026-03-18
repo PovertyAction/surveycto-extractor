@@ -627,6 +627,7 @@ _NUMERIC_RE = re.compile(r"^-?\d+(\.\d+)?$")
 def filter_truly_numeric(
     numeric_universe: pd.DataFrame,
     dta_path: str,
+    parquet_path: str = None,
 ) -> tuple[list[str], list[str]]:
     """
     Scan the actual Stata dataset to determine which variables in
@@ -639,6 +640,9 @@ def filter_truly_numeric(
     Args:
         numeric_universe: output of get_numeric_universe, indexed by variable_name.
         dta_path:         path to the .dta file (e.g. ugs_ltfu_hh_checked.dta).
+        parquet_path:     optional path to a parquet sidecar.  When provided,
+                          string columns are read from parquet (columnar, fast)
+                          instead of re-reading the .dta.
 
     Returns:
         convertible     — str-typed vars whose non-null values are all numeric-looking.
@@ -671,9 +675,16 @@ def filter_truly_numeric(
     # -----------------------------------------------------------------------
     # 2. Load only the string-typed columns from the dataset
     # -----------------------------------------------------------------------
-    print(f"\nLoading {len(str_vars):,} string columns from dataset …")
-    df = pd.read_stata(dta_path, columns=str_vars, convert_categoricals=False)
-    print(f"  Loaded: {df.shape[0]:,} obs × {df.shape[1]:,} cols")
+    import time
+    t0 = time.perf_counter()
+    if parquet_path:
+        print(f"\nLoading {len(str_vars):,} string columns from parquet ...")
+        df = pd.read_parquet(parquet_path, columns=str_vars)
+    else:
+        print(f"\nLoading {len(str_vars):,} string columns from .dta ...")
+        df = pd.read_stata(dta_path, columns=str_vars, convert_categoricals=False)
+    elapsed = time.perf_counter() - t0
+    print(f"  Loaded: {df.shape[0]:,} obs x {df.shape[1]:,} cols ({elapsed:.1f}s)")
 
     # -----------------------------------------------------------------------
     # 3. For each string column, check whether every non-null value is numeric

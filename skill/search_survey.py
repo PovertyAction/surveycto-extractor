@@ -98,6 +98,16 @@ def load_json(path: Path):
         return json.load(f)
 
 
+MAX_DISPLAY_LEN = 200  # cap long text (consent relevance, group_relevances, etc.)
+
+
+def _truncate(text: str, limit: int = MAX_DISPLAY_LEN) -> str:
+    """Truncate text with a character count suffix if it exceeds limit."""
+    if not text or len(text) <= limit:
+        return text
+    return text[:limit] + f" [...{len(text) - limit} more chars]"
+
+
 def sentinel_note(choices, constraint):
     """Extract sentinel codes from choices list (negative values) or constraint string."""
     sentinels = []
@@ -155,7 +165,7 @@ def fmt_gate_summary(gate_q: dict) -> str:
     else:
         gate_note = "always asked"
 
-    return f"    {qt}\n      {type_note}\n      {gate_note}"
+    return f"    {_truncate(qt)}\n      {type_note}\n      {gate_note}"
 
 
 def print_why_asked(q: dict, q_index: dict) -> None:
@@ -201,7 +211,7 @@ def print_context(questions: list, target_idx: int, n: int) -> None:
         print(f"  {marker} [{i:4d}] {vn}")
         print(f"           Q: {qt}")
         if rel:
-            print(f"           relevance: {rel}")
+            print(f"           relevance: {_truncate(rel)}")
 
 
 def print_question(q: dict, survey_label: str, stata_name: str = None,
