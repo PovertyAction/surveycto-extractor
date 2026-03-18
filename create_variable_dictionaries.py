@@ -527,12 +527,16 @@ def create_variable_dictionary(
     # Build question index once — O(1) lookups instead of O(N) linear scans
     q_index = _build_question_index(questions)
 
+    # Pre-compute per-column stats in two vectorized calls instead of 2*N individual ones
+    all_dtypes = df.dtypes.astype(str)
+    all_non_null = df.notna().sum()
+
     for i, var_name in enumerate(df.columns, 1):
         if i % 100 == 0:
             print(f"  Processing variable {i}/{len(df.columns)}...")
 
-        var_type = str(df[var_name].dtype)
-        non_null_count = int(df[var_name].notna().sum())
+        var_type = all_dtypes[var_name]
+        non_null_count = int(all_non_null[var_name])
         metadata = determine_variable_source(var_name, questions, _index=q_index)
 
         # Sentinel fields added in batch after dictionary is built (batch_sentinel_scan)
