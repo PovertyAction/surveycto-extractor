@@ -62,61 +62,51 @@ def _write_parquet_sidecar(df: pd.DataFrame, dta_path: Path) -> Optional[Path]:
     return pq_path
 
 
-def _scan_extended_missings(df: pd.DataFrame) -> Dict[str, Dict[str, int]]:
-    """Scan a user_missing=True DataFrame for extended missing letter tags.
+_EXT_MISSING_LETTERS = set('abcdefghijklmnopqrstuvwxyz')
 
-    Returns {var_name: {"d": 5, "r": 2, ...}} for every column that has at
-    least one extended missing value.
+
+def _scan_and_clean_extended_missings(
+    df: pd.DataFrame,
+) -> tuple[pd.DataFrame, Dict[str, Dict[str, int]]]:
+    """Scan for extended missing letter tags and clean them in one pass.
+
+    pyreadstat with user_missing=True returns extended missings (.d, .r, etc.)
+    as single-letter strings mixed into object columns.  This function:
+      1. Detects which object columns contain letter tags (vectorized isin)
+      2. Counts them per variable (for the sentinel scan)
+      3. Replaces them with NaN and coerces back to numeric
+
+    Returns (cleaned_df, {var_name: {"d": 5, "r": 2, ...}}).
     """
     t0 = time.perf_counter()
     result: Dict[str, Dict[str, int]] = {}
-    # Extended missings from pyreadstat show up as single-letter strings a-z
-    ext_letters = set('abcdefghijklmnopqrstuvwxyz')
 
-    for col in df.columns:
-        if df[col].dtype != object:
-            continue
-        # Fast check: are there any strings at all in this column?
-        str_mask = df[col].apply(lambda x: isinstance(x, str) and x in ext_letters)
-        n_ext = str_mask.sum()
+    obj_cols = [c for c in df.columns if df[c].dtype == object]
+    if not obj_cols:
+        print(f"  Extended missing scan+clean: 0 object cols, skipped ({time.perf_counter() - t0:.1f}s)")
+        return df, result
+
+    for col in obj_cols:
+        # Vectorized check: isin is C-level, much faster than .apply(lambda)
+        mask = df[col].isin(_EXT_MISSING_LETTERS)
+        n_ext = mask.sum()
         if n_ext > 0:
-            counts = df[col][str_mask].value_counts()
+            # Count by letter
+            counts = df[col][mask].value_counts()
             result[col] = {str(k): int(v) for k, v in counts.items()}
+            # Replace in-place and coerce back to numeric
+            df.loc[mask, col] = np.nan
+            try:
+                df[col] = pd.to_numeric(df[col])
+            except (ValueError, TypeError):
+                pass  # genuine string column — leave as object
 
     elapsed = time.perf_counter() - t0
     n_vars = len(result)
     n_total = sum(sum(v.values()) for v in result.values())
-    print(f"  Extended missing scan: {n_vars} vars with {n_total:,} "
-          f"extended missing values ({elapsed:.1f}s)")
-    return result
-
-
-def _clean_extended_missings(df: pd.DataFrame) -> pd.DataFrame:
-    """Replace extended missing letter tags with NaN and coerce back to numeric.
-
-    After pyreadstat reads with user_missing=True, columns that had extended
-    missings become object dtype (mixed floats + letter strings).  This
-    restores them to clean numeric columns matching user_missing=False output.
-    """
-    ext_letters = set('abcdefghijklmnopqrstuvwxyz')
-    for col in df.columns:
-        if df[col].dtype != object:
-            continue
-        # Check if this column has any letter tags
-        has_letters = df[col].apply(
-            lambda x: isinstance(x, str) and x in ext_letters
-        ).any()
-        if has_letters:
-            # Replace letter tags with NaN
-            df[col] = df[col].apply(
-                lambda x: np.nan if isinstance(x, str) and x in ext_letters else x
-            )
-            # Try to coerce back to numeric
-            try:
-                df[col] = pd.to_numeric(df[col])
-            except (ValueError, TypeError):
-                pass  # leave as object — was a genuine string column
-    return df
+    print(f"  Extended missing scan+clean: {n_vars} vars with {n_total:,} "
+          f"ext missing values, {len(obj_cols)} object cols checked ({elapsed:.1f}s)")
+    return df, result
 
 
 def load_data(dataset_name: str):
@@ -142,13 +132,8 @@ def load_data(dataset_name: str):
         print(f"  Loaded {len(df)} obs x {len(df.columns)} vars "
               f"from .dta ({elapsed:.1f}s)")
 
-        # Scan for extended missings before cleaning them away
-        ext_missing_counts = _scan_extended_missings(df)
-
-        # Clean letter tags back to NaN so downstream code sees normal numerics
-        t1 = time.perf_counter()
-        df = _clean_extended_missings(df)
-        print(f"  Cleaned extended missings -> NaN ({time.perf_counter() - t1:.1f}s)")
+        # Scan + clean extended missings in one fused pass (vectorized isin)
+        df, ext_missing_counts = _scan_and_clean_extended_missings(df)
     else:
         df = pd.read_stata(cfg['data'])
         meta = None
