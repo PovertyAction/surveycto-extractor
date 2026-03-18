@@ -34,9 +34,10 @@ training dataset.
 | `*_structure.txt` | `main.py` | Human-readable group hierarchy of the form |
 | `sections/*.json` | `main.py` | Per-section slices of the question JSON |
 | `*_create_seed.do` | `main.py --phases seed` | Stata do-file that builds a 1-row schema dataset — run this before your real data arrives to test your cleaning pipeline |
-| `*_variable_dictionary.json` | `create_variable_dictionaries.py` | Maps every Stata variable to its source question, skip logic, and choice list — in form order, not dataset column order |
+| `*_variable_dictionary.json` | `create_variable_dictionaries.py` | Maps every Stata variable to its source question, skip logic, choice list, and sentinel counts — in form order, not dataset column order |
 | `*_variable_dictionary.xlsx` | `create_variable_dictionaries.py --xlsx` | Same dictionary as a spreadsheet for sharing with field teams or PIs |
 | `*_data_ord.dta` | `create_variable_dictionaries.py` | Column-reordered dataset following form structure |
+| `*.parquet` | `create_variable_dictionaries.py` | Parquet sidecar written next to the `.dta` — used internally for fast columnar access; also available for downstream analysis |
 | `*_summary_stats.do` | `create_summary_stats_dofile.py` | Stata do-file with `tabstat` calls grouped by skip condition + Excel export |
 
 ---
@@ -134,9 +135,17 @@ python create_variable_dictionaries.py --survey my_survey --xlsx
 ```
 
 Maps every Stata variable to its source question, Stata skip logic, choice list, and
-form position. Exports to both JSON (machine-readable) and XLSX (for sharing).
+form position. Includes a per-variable **sentinel scan** that detects:
+- Raw integer sentinels (`-99`, `-88`, etc.) still in numeric columns
+- String sentinels (`"-99"`, `"-88"`) in unconverted text columns
+- Extended missing values (`.d`, `.r`, etc.) already recoded by HFC
+- Type mismatches (form says integer but Stata has string)
+- Calculate fields with unexplained negative values
+
+Exports to both JSON (machine-readable) and XLSX (for sharing).
 Also saves `*_data_ord.dta` — a copy of your dataset with columns reordered to match
-form structure rather than submission order.
+form structure rather than submission order. A parquet sidecar is written next to the
+`.dta` for fast columnar access by downstream scripts.
 
 ### Summary stats do-file
 

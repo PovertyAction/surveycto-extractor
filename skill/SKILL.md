@@ -80,6 +80,7 @@ Key output fields:
   - **If count varies** (select_multiple-gated repeat, one iteration per selected item): position ≠ code, need the routing variable to map iteration positions to choice codes
 - `why asked` — shown when `--context N` is set; resolves every `${gate_var}` in the relevance expression, printing the gate question text, its own choices/constraint, and what controls it
 - Adjacent questions block — N questions before/after in survey order with their relevance conditions; reveals structurally related questions (follow-ups, units, other-specify, poly variants)
+- Long text is truncated in context output (adjacent questions' relevance, gate variable question text) to 200 chars — the target question always shows full text
 
 Use `--context 3` whenever you need to understand skip logic or what surrounds a variable.
 Fall back to Grep / Read only for structure files or section files.
@@ -112,12 +113,19 @@ Fall back to Grep / Read only for structure files or section files.
 
 ### When asked about Stata variables:
 1. **Run `search_survey.py --var <name>`** via Bash — returns type, constraint, sentinels, choices, skip logic in one call
-2. Explain:
+2. **Check the variable dictionary JSON** for sentinel counts (under the `sentinels` key):
+   - `raw_int` / `raw_int_detail`: raw sentinel codes (-99, -88, etc.) still as numeric values
+   - `string` / `string_detail`: string sentinels ("-99", "-88") in unconverted text columns
+   - `ext_missing` / `ext_missing_detail`: extended missing values (.d, .r) already recoded by HFC
+   - `type_mismatch`: form says integer/decimal but Stata stores as string
+   - `calculate_risk`: calculate field with unexplained negative values
+   **Always mention sentinel counts when present** — they tell the user what cleaning is still needed for each variable.
+3. Explain:
    - The source survey question
    - If it's from a repeat group (check `is_repeat` and `repeat_iteration`)
    - If it's a select_multiple choice (check `is_select_multiple` and `choice_code`)
    - Any skip logic that applies
-3. For repeat variables, explain both the template logic and iteration-specific logic
+4. For repeat variables, explain both the template logic and iteration-specific logic
 
 ### When debugging SurveyCTO issues:
 1. Look up the question in questions.json
