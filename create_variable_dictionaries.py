@@ -266,7 +266,13 @@ def batch_sentinel_scan(
     return var_dict_df
 
 
-def find_question_for_variable(var_name: str, questions: List[Dict]) -> Optional[Dict]:
+def _build_question_index(questions: List[Dict]) -> Dict[str, Dict]:
+    """Build a {variable_name: question} dict for O(1) lookups."""
+    return {q['variable_name']: q for q in questions if 'variable_name' in q}
+
+
+def find_question_for_variable(var_name: str, questions: List[Dict],
+                               _index: Dict[str, Dict] = None) -> Optional[Dict]:
     """
     Find the source question for a given variable.
 
@@ -275,37 +281,40 @@ def find_question_for_variable(var_name: str, questions: List[Dict]) -> Optional
     - Repeat group iterations (var_1, var_2, etc.)
     - Select_multiple choices (var_1, var_2, var_97, etc.)
     - Double-suffix (var_1_2 = repeat 1, choice 2)
+
+    When _index is provided (a {variable_name: question} dict), all lookups
+    are O(1) instead of O(N) linear scans.  Build it once with
+    _build_question_index() and pass to all calls.
     """
+    if _index is None:
+        _index = _build_question_index(questions)
+
     # First try exact match
-    for q in questions:
-        if q['variable_name'] == var_name:
-            return q
+    if var_name in _index:
+        return _index[var_name]
 
     # Try matching base name (remove numeric suffix with underscore: var_1, var_2)
     match = re.match(r'(.+?)_(\d+)$', var_name)
     if match:
         base_name = match.group(1)
-        for q in questions:
-            if q['variable_name'] == base_name:
-                return q
+        if base_name in _index:
+            return _index[base_name]
 
     # Try matching base name (digit appended directly without underscore: var_r1, var_r2)
     # Handles SurveyCTO repeat variables whose names end in a non-digit character,
-    # e.g. form variable "f_hr_fn_r" → Stata columns "f_hr_fn_r1", "f_hr_fn_r2"
+    # e.g. form variable "f_hr_fn_r" -> Stata columns "f_hr_fn_r1", "f_hr_fn_r2"
     match_direct = re.match(r'^(.+?)(\d+)$', var_name)
     if match_direct:
         base_name = match_direct.group(1)
-        for q in questions:
-            if q['variable_name'] == base_name:
-                return q
+        if base_name in _index:
+            return _index[base_name]
 
     # Try even longer base names (for nested structures)
     parts = var_name.split('_')
     for i in range(len(parts) - 1, 0, -1):
         potential_base = '_'.join(parts[:i])
-        for q in questions:
-            if q['variable_name'] == potential_base:
-                return q
+        if potential_base in _index:
+            return _index[potential_base]
 
     return None
 
@@ -320,7 +329,8 @@ def get_choice_label(question: Dict, choice_code: str) -> Optional[str]:
     return None
 
 
-def adjust_variable_refs(logic_str: str, repeat_group: str, iteration: int, questions: List[Dict]) -> str:
+def adjust_variable_refs(logic_str: str, repeat_group: str, iteration: int,
+                         questions: List[Dict], _index: Dict[str, Dict] = None) -> str:
     """Adjust variable references in skip logic for repeat iteration."""
     if not logic_str:
         return logic_str
@@ -328,7 +338,7 @@ def adjust_variable_refs(logic_str: str, repeat_group: str, iteration: int, ques
     var_refs = re.findall(r'\$\{([^}]+)\}', logic_str)
     result = logic_str
     for var_ref in var_refs:
-        question = find_question_for_variable(var_ref, questions)
+        question = find_question_for_variable(var_ref, questions, _index=_index)
         if question:
             var_group_path = '/'.join(question.get('group_path', []))
             if repeat_group in var_group_path:
@@ -347,7 +357,8 @@ def replace_index_function(logic_str: str, iteration: int) -> str:
     return re.sub(r'index\(\)', str(iteration), logic_str)
 
 
-def adjust_skip_logic_for_repeats(metadata: Dict, var_name: str, questions: List[Dict]) -> Dict:
+def adjust_skip_logic_for_repeats(metadata: Dict, var_name: str, questions: List[Dict],
+                                  _index: Dict[str, Dict] = None) -> Dict:
     """Generate both template and iteration-specific skip logic for repeat variables."""
     if not metadata['is_repeat']:
         return metadata
@@ -360,7 +371,7 @@ def adjust_skip_logic_for_repeats(metadata: Dict, var_name: str, questions: List
 
     if metadata['stata_skip_logic']:
         adjusted_logic = adjust_variable_refs(
-            metadata['stata_skip_logic'], group_path, iteration, questions
+            metadata['stata_skip_logic'], group_path, iteration, questions, _index=_index
         )
         adjusted_logic = replace_index_function(adjusted_logic, iteration)
         metadata['skip_logic_iteration_specific'] = adjusted_logic
@@ -368,7 +379,7 @@ def adjust_skip_logic_for_repeats(metadata: Dict, var_name: str, questions: List
     if metadata['group_relevances']:
         adjusted_relevances = []
         for relevance in metadata['group_relevances']:
-            adjusted = adjust_variable_refs(relevance, group_path, iteration, questions)
+            adjusted = adjust_variable_refs(relevance, group_path, iteration, questions, _index=_index)
             adjusted = replace_index_function(adjusted, iteration)
             adjusted = adjusted.replace('${', '').replace('}', '').replace('=', '==')
             adjusted_relevances.append(adjusted)
@@ -387,7 +398,8 @@ def get_special_code_meaning(choice_code: str) -> Optional[str]:
     return special_codes.get(str(choice_code))
 
 
-def determine_variable_source(var_name: str, questions: List[Dict]) -> Dict:
+def determine_variable_source(var_name: str, questions: List[Dict],
+                              _index: Dict[str, Dict] = None) -> Dict:
     """Determine the source and metadata for a variable."""
     result = {
         'variable_name': var_name,
@@ -415,7 +427,7 @@ def determine_variable_source(var_name: str, questions: List[Dict]) -> Dict:
         'choice_index': None,
     }
 
-    question = find_question_for_variable(var_name, questions)
+    question = find_question_for_variable(var_name, questions, _index=_index)
     if not question:
         return result
 
@@ -469,7 +481,7 @@ def determine_variable_source(var_name: str, questions: List[Dict]) -> Dict:
                     result['repeat_iteration'] = int(suffix_num)
 
     if result['is_repeat']:
-        result = adjust_skip_logic_for_repeats(result, var_name, questions)
+        result = adjust_skip_logic_for_repeats(result, var_name, questions, _index=_index)
 
     return result
 
@@ -512,13 +524,16 @@ def create_variable_dictionary(
     print(f"\nCreating {dataset_name} variable dictionary...")
     records = []
 
+    # Build question index once — O(1) lookups instead of O(N) linear scans
+    q_index = _build_question_index(questions)
+
     for i, var_name in enumerate(df.columns, 1):
         if i % 100 == 0:
             print(f"  Processing variable {i}/{len(df.columns)}...")
 
         var_type = str(df[var_name].dtype)
         non_null_count = int(df[var_name].notna().sum())
-        metadata = determine_variable_source(var_name, questions)
+        metadata = determine_variable_source(var_name, questions, _index=q_index)
 
         # Sentinel fields added in batch after dictionary is built (batch_sentinel_scan)
 
