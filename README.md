@@ -185,6 +185,48 @@ The skill auto-discovers all surveys under `DOCS` by scanning for `*_variable_di
 
 ---
 
+## MCP server add-on (optional)
+
+The `mcp/` directory contains an optional MCP server that keeps variable dictionaries
+in memory for instant lookups. This is the high-performance alternative to the skill
+for sessions with heavy query volume (10–50+ variable lookups per cleaning module).
+
+| | `skill/search_survey.py` | `mcp/survey_server.py` |
+|---|---|---|
+| Loads JSON | Every call | Once at startup |
+| Dependencies | None (stdlib) | `mcp[cli]` |
+| Setup | Copy to `.claude/skills/` | Add to `.mcp.json` |
+| Best for | Occasional lookups | Cleaning sessions (10–50+ lookups) |
+| Batch queries | Not supported | `lookup_variables` tool |
+| Multi-survey filter | `--survey KEY` flag | `survey` parameter on every tool |
+
+### Setup
+
+```bash
+pip install "mcp[cli]"
+```
+
+Add to your project's `.mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "survey-expert": {
+      "command": "python",
+      "args": ["path/to/surveycto_extractor/mcp/survey_server.py"]
+    }
+  }
+}
+```
+
+The server finds `config.py` in its parent directory automatically (override with
+`SURVEY_CONFIG` env var). It degrades gracefully — if config or JSON files are missing,
+tools return setup instructions instead of crashing.
+
+See `mcp/README.md` for full details.
+
+---
+
 ## Coding guidelines for agents
 
 The `coding_guidelines/` directory contains project-agnostic standards for Stata cleaning
