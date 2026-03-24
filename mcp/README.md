@@ -65,10 +65,11 @@ To override, set `SURVEY_CONFIG` env var:
 
 | Tool | Purpose | When to use |
 |------|---------|-------------|
-| `lookup_variable` | Full metadata for one variable | Deep investigation of a specific variable |
-| `lookup_variables` | Compact metadata for many variables | Batch-checking a cleaning module (10-50 vars) |
+| `lookup_variable` | Full metadata for one variable (includes data range) | Deep investigation of a specific variable |
+| `lookup_variables` | Compact metadata for many variables (includes data range) | Batch-checking a cleaning module (10-50 vars) |
 | `search_questions` | Keyword search across names and question text | Discovering related variables |
 | `get_choice_list` | All choices + variables using a list | Understanding categorical domains, verifying sentinels |
+| `get_gate_chain` | Full composed skip logic tree for a variable | Understanding why a variable has missing/zero values |
 | `get_survey_info` | Dataset overview | Getting oriented before diving in |
 
 ## How it works
@@ -96,5 +97,8 @@ python mcp/survey_server.py
 | Setup | Copy to .claude/skills/ | Add to .mcp.json |
 | Best for | Occasional lookups | Cleaning sessions (10-50+ lookups) |
 | Batch queries | Not supported | `lookup_variables` tool |
+| Gate chain | `--gate-chain` flag | `get_gate_chain` tool |
+| Data range | Shown in output (from vardict) | Shown in lookup tools (from vardict) |
+| Survey filter | `--survey KEY` flag | `survey` parameter on every tool |
 
 Both can coexist. The skill is the default; the MCP is the add-on for heavy use.

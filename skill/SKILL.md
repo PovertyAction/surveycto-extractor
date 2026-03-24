@@ -68,9 +68,16 @@ uv run python .claude/skills/survey-expert/search_survey.py --choice-list <list_
 
 # Search question text or variable names by keyword
 uv run python .claude/skills/survey-expert/search_survey.py --search <keyword>
+
+# Show the full composed skip logic tree for a variable (why is it asked?)
+uv run python .claude/skills/survey-expert/search_survey.py --gate-chain <variable_name>
+
+# Filter any of the above to a specific survey (partial match on survey key)
+uv run python .claude/skills/survey-expert/search_survey.py --var <variable_name> --survey <key>
 ```
 
 Key output fields:
+- `data_range` — min and max values from the actual data (shown for integer, decimal, calculate, date, datetime, and time variables only; omitted for select_one/select_multiple whose ranges are just choice codes or 0/1 indicators)
 - `sentinels` — all negative codes (-99, -88, -98, etc.) extracted from choices or constraint; use for recode decisions
 - `*** REPEAT GROUP ***` block — shown when the variable is from a repeat group:
   - `repeat: iteration N of M (max observed)` — which iteration this Stata variable is, and the maximum seen in data
@@ -83,6 +90,16 @@ Key output fields:
 - Long text is truncated in context output (adjacent questions' relevance, gate variable question text) to 200 chars — the target question always shows full text
 
 Use `--context 3` whenever you need to understand skip logic or what surrounds a variable.
+
+Use `--gate-chain` when you need to understand the **full composed skip logic tree** for a variable — it walks from outermost group relevance through the variable's own relevance, resolving each `${ref}` to its question text, choices, and own gate condition. Output shows:
+- `[GROUP]` conditions — from enclosing groups (outermost first)
+- `[VAR]` conditions — the variable's own relevance
+- For each referenced variable: question text, choice list (first 6 choices), and what controls it (`asked when:` or `always asked`)
+- `>>> variable: question text` — the target variable at the bottom
+- `non_null: N / total` — how many observations actually reached this variable
+
+Use `--survey KEY` to filter to a specific survey when your project has multiple instruments. Partial match on the survey key (e.g., `--survey ltfu` matches `ltfu_hh` and `ltfu_adult`).
+
 Fall back to Grep / Read only for structure files or section files.
 
 ## Search Strategy

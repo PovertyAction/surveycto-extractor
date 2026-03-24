@@ -135,7 +135,9 @@ python create_variable_dictionaries.py --survey my_survey --xlsx
 ```
 
 Maps every Stata variable to its source question, Stata skip logic, choice list, and
-form position. Includes a per-variable **sentinel scan** that detects:
+form position. Includes per-variable **data range** (min/max from parquet row-group
+metadata for integer, decimal, calculate, and date/time variables) and a **sentinel scan**
+that detects:
 - Raw integer sentinels (`-99`, `-88`, etc.) still in numeric columns
 - String sentinels (`"-99"`, `"-88"`) in unconverted text columns
 - Extended missing values (`.d`, `.r`, etc.) already recoded by HFC
@@ -170,9 +172,11 @@ metadata during cleaning** — faster and more reliable than asking Claude to re
 from a spreadsheet or description.
 
 The skill answers questions like:
-- "What is the skip condition for `hh_size`?"
-- "What are the valid choices for `asset_type`?"
-- "Which variables belong to the household roster repeat group?"
+- "What is the skip condition for `hh_size`?" (`--var`)
+- "What are the valid choices for `asset_type`?" (`--choice-list`)
+- "Which variables belong to the household roster repeat group?" (`--search`)
+- "Why is `income_1` missing for some observations?" (`--gate-chain`)
+- "What's the observed range of `hh_age`?" (shown automatically via `data_range`)
 
 ### Setup
 
@@ -196,8 +200,10 @@ for sessions with heavy query volume (10–50+ variable lookups per cleaning mod
 | Loads JSON | Every call | Once at startup |
 | Dependencies | None (stdlib) | `mcp[cli]` |
 | Setup | Copy to `.claude/skills/` | Add to `.mcp.json` |
-| Best for | Occasional lookups | Cleaning sessions (10–50+ lookups) |
+| Best for | Occasional lookups | Cleaning sessions (10-50+ lookups) |
 | Batch queries | Not supported | `lookup_variables` tool |
+| Gate chain | `--gate-chain` flag | `get_gate_chain` tool |
+| Data range | Shown in output | Shown in lookup tools |
 | Multi-survey filter | `--survey KEY` flag | `survey` parameter on every tool |
 
 ### Setup

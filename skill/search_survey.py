@@ -231,6 +231,10 @@ def print_question(q: dict, survey_label: str, stata_name: str = None,
     non_null = q.get("_non_null_count")
     if non_null is not None:
         print(f"  non_null   : {non_null:,}")
+    d_min = q.get("_data_min")
+    d_max = q.get("_data_max")
+    if d_min is not None and d_max is not None:
+        print(f"  data_range : {d_min} to {d_max}")
 
     # Repeat group summary — ALWAYS shown first if applicable; critical for position-vs-code decisions
     ri = q.get("_repeat_info")
@@ -272,7 +276,19 @@ def _questions_by_name(questions: list) -> dict:
     return {q["variable_name"]: q for q in questions if "variable_name" in q}
 
 
-def search_var(stata_name: str, context: int = 0) -> bool:
+def _filter_surveys(survey_filter: str = None) -> dict:
+    """Return SURVEY_FILES filtered by --survey flag. Supports partial match."""
+    if not survey_filter:
+        return SURVEY_FILES
+    matched = {k: v for k, v in SURVEY_FILES.items()
+               if survey_filter in k}
+    if not matched:
+        print(f"WARNING: --survey '{survey_filter}' matched no surveys. "
+              f"Available: {', '.join(SURVEY_FILES.keys())}", file=sys.stderr)
+    return matched
+
+
+def search_var(stata_name: str, context: int = 0, survey_filter: str = None) -> bool:
     """
     Two-pass lookup:
       Pass 1 — variable_dictionary (Stata name -> original SurveyCTO name + Stata type)
@@ -280,7 +296,7 @@ def search_var(stata_name: str, context: int = 0) -> bool:
     Falls back to direct questions.json search if variable_dictionary is missing.
     """
     found = False
-    for label, files in SURVEY_FILES.items():
+    for label, files in _filter_surveys(survey_filter).items():
         qpath = files["questions"]
         vpath = files["vardict"]
         if not qpath.exists():
@@ -293,6 +309,8 @@ def search_var(stata_name: str, context: int = 0) -> bool:
         original_name  = stata_name
         stata_type     = None
         non_null_count = None
+        data_min       = None
+        data_max       = None
         repeat_info    = None   # filled below if variable is from a repeat group
 
         if vpath.exists():
@@ -301,6 +319,8 @@ def search_var(stata_name: str, context: int = 0) -> bool:
             if entry:
                 stata_type     = entry.get("stata", {}).get("type")
                 non_null_count = entry.get("non_null_count")
+                data_min       = entry.get("data_min")
+                data_max       = entry.get("data_max")
                 orig           = entry.get("survey", {}).get("original_variable_name")
                 if orig:
                     original_name = orig
@@ -385,6 +405,8 @@ def search_var(stata_name: str, context: int = 0) -> bool:
             q = dict(q, _stata_type=stata_type)
         if non_null_count is not None:
             q = dict(q, _non_null_count=non_null_count)
+        if data_min is not None and data_max is not None:
+            q = dict(q, _data_min=data_min, _data_max=data_max)
         if repeat_info is not None:
             q = dict(q, _repeat_info=repeat_info)
 
@@ -401,9 +423,9 @@ def search_var(stata_name: str, context: int = 0) -> bool:
     return found
 
 
-def search_choice_list(list_name: str, context: int = 0) -> bool:
+def search_choice_list(list_name: str, context: int = 0, survey_filter: str = None) -> bool:
     found = False
-    for label, files in SURVEY_FILES.items():
+    for label, files in _filter_surveys(survey_filter).items():
         qpath = files["questions"]
         if not qpath.exists():
             continue
@@ -417,10 +439,10 @@ def search_choice_list(list_name: str, context: int = 0) -> bool:
     return found
 
 
-def search_text(text: str, context: int = 0) -> bool:
+def search_text(text: str, context: int = 0, survey_filter: str = None) -> bool:
     text_lower = text.lower()
     found = False
-    for label, files in SURVEY_FILES.items():
+    for label, files in _filter_surveys(survey_filter).items():
         qpath = files["questions"]
         if not qpath.exists():
             continue
@@ -436,6 +458,148 @@ def search_text(text: str, context: int = 0) -> bool:
     return found
 
 
+def gate_chain(stata_name: str, survey_filter: str = None) -> bool:
+    """Build the full composed gate chain for a variable.
+
+    Walks from group-level relevances (outermost) through the variable's
+    own relevance, recursively resolving each ${ref} to its question text,
+    choice list, and own gate condition.  Returns an indented tree.
+    """
+    found = False
+    for label, files in _filter_surveys(survey_filter).items():
+        qpath = files["questions"]
+        vpath = files["vardict"]
+        if not qpath.exists():
+            continue
+
+        questions = load_json(qpath)
+        q_index = _questions_by_name(questions)
+
+        # Find variable in vardict
+        original_name = stata_name
+        vardict = {}
+        entry = {}
+        if vpath.exists():
+            raw = load_json(vpath)
+            vardict = raw.get("variables", {})
+            entry = vardict.get(stata_name, {})
+            orig = entry.get("survey", {}).get("original_variable_name")
+            if orig:
+                original_name = orig
+
+        # Get question from questions.json
+        q = q_index.get(original_name)
+        if q is None and original_name != stata_name:
+            q = q_index.get(stata_name)
+        if q is None and not entry:
+            continue
+
+        found = True
+
+        # Collect all conditions: group relevances (outer->inner) + own
+        grp_rels = []
+        own_rel = ""
+        if q:
+            grp_rels = q.get("group_relevances") or []
+            own_rel = q.get("relevance") or ""
+        else:
+            grp_rels = entry.get("survey", {}).get("group_relevances") or []
+
+        all_conditions = list(grp_rels) + ([own_rel] if own_rel else [])
+
+        lines = [f"[{label}] Gate chain for: {stata_name}"]
+
+        if not all_conditions:
+            lines.append("  (always asked -- no skip logic)")
+            print("\n".join(lines))
+            continue
+
+        # Cache for resolved gate variables
+        resolved_cache = {}
+
+        def _resolve_var(vname):
+            if vname in resolved_cache:
+                return resolved_cache[vname]
+            gq = q_index.get(vname)
+            info = {"name": vname}
+            if gq:
+                info["question"] = (gq.get("question_text") or "").strip()[:80]
+                info["type"] = gq.get("type") or "?"
+                gchoices = gq.get("choices") or []
+                gcl = gq.get("choice_list") or ""
+                if gchoices:
+                    cstr = ", ".join(
+                        f"{c['value']}={c['label'].strip()}"
+                        for c in gchoices[:6]
+                    )
+                    info["choices"] = f"{gcl}: {cstr}"
+                else:
+                    info["choices"] = ""
+                info["own_relevance"] = gq.get("relevance") or ""
+            else:
+                # Try vardict
+                ve = vardict.get(vname, {})
+                if ve:
+                    sd = ve.get("survey", {})
+                    info["question"] = (sd.get("question_text") or "").strip()[:80]
+                    info["type"] = sd.get("type") or "?"
+                    info["choices"] = ""
+                    info["own_relevance"] = ""
+                else:
+                    info["question"] = "(not found in survey)"
+                    info["type"] = "?"
+                    info["choices"] = ""
+                    info["own_relevance"] = ""
+            resolved_cache[vname] = info
+            return info
+
+        indent = 0
+        for i, cond in enumerate(all_conditions):
+            is_group = i < len(grp_rels)
+            prefix = "  " * indent
+            source = "GROUP" if is_group else "VAR"
+
+            refs = re.findall(r"\$\{([^}]+)\}", cond)
+            display_cond = re.sub(r"\$\{([^}]+)\}", r"\1", cond)
+
+            lines.append(f"{prefix}[{source}] {display_cond}")
+
+            for ref in refs:
+                rinfo = _resolve_var(ref)
+                qt = rinfo.get("question", "")
+                choices = rinfo.get("choices", "")
+                own = rinfo.get("own_relevance", "")
+
+                lines.append(f"{prefix}  ^ {ref}: {qt}")
+                if choices:
+                    lines.append(f"{prefix}    [{choices}]")
+                if own:
+                    own_display = re.sub(r"\$\{([^}]+)\}", r"\1", own)
+                    lines.append(f"{prefix}    asked when: {own_display}")
+                else:
+                    lines.append(f"{prefix}    always asked")
+
+            indent += 1
+
+        # Final line: the target variable itself
+        prefix = "  " * indent
+        survey_data = entry.get("survey", {}) if entry else {}
+        qt = (survey_data.get("question_text") or (q.get("question_text") if q else "") or "").strip()[:80]
+        lines.append(f"{prefix}>>> {stata_name}: {qt}")
+
+        # Non-null vs total
+        non_null = entry.get("non_null_count")
+        total = None
+        if vpath.exists():
+            total = load_json(vpath).get("dataset", {}).get("n_observations")
+        if non_null is not None and total is not None:
+            lines.append(f"{prefix}    non_null: {non_null:,} / {total:,}")
+
+        print("\n".join(lines))
+
+    return found
+
+
 def main():
     if not SURVEY_FILES:
         print(f"WARNING: No survey files found under {DOCS}", file=sys.stderr)
@@ -446,16 +610,21 @@ def main():
     grp.add_argument("--var",         metavar="NAME", help="Look up a Stata variable by exact name")
     grp.add_argument("--choice-list", metavar="LIST", help="List all variables using a choice list")
     grp.add_argument("--search",      metavar="TEXT", help="Search question text or variable names")
+    grp.add_argument("--gate-chain",  metavar="NAME", help="Show full composed skip logic tree for a variable")
     parser.add_argument("--context", metavar="N", type=int, default=0,
                         help="Show N adjacent questions on each side + resolve relevance gate (default: 0)")
+    parser.add_argument("--survey", metavar="KEY", default=None,
+                        help="Filter to surveys whose key contains KEY (e.g. 'endline', 'ltfu', 'c2')")
     args = parser.parse_args()
 
     if args.var:
-        ok = search_var(args.var, context=args.context)
+        ok = search_var(args.var, context=args.context, survey_filter=args.survey)
     elif args.choice_list:
-        ok = search_choice_list(args.choice_list, context=args.context)
+        ok = search_choice_list(args.choice_list, context=args.context, survey_filter=args.survey)
+    elif args.gate_chain:
+        ok = gate_chain(args.gate_chain, survey_filter=args.survey)
     else:
-        ok = search_text(args.search, context=args.context)
+        ok = search_text(args.search, context=args.context, survey_filter=args.survey)
 
     if not ok:
         print("No matches found.", file=sys.stderr)

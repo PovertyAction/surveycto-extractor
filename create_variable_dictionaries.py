@@ -39,8 +39,10 @@ except ImportError:
 
 try:
     import pyarrow  # noqa: F401 — presence check; pandas uses it via engine="pyarrow"
+    import pyarrow.parquet as _pq
     _PYARROW_AVAILABLE = True
 except ImportError:
+    _pq = None
     _PYARROW_AVAILABLE = False
 
 # Pull DATASETS from this project's config.py (same directory as this script)
@@ -61,6 +63,78 @@ def _write_parquet_sidecar(df: pd.DataFrame, dta_path: Path) -> Optional[Path]:
           f"({size_mb:.1f} MB, {elapsed:.1f}s)")
     return pq_path
 
+
+def _read_parquet_minmax(pq_path: Optional[Path]) -> Dict[str, Dict]:
+    """Read per-column min/max from parquet row-group statistics.
+
+    Returns {col_name: {"min": value, "max": value}} for columns that have
+    numeric or date/time statistics.  Reads only file metadata — no data scan.
+    """
+    if not _PYARROW_AVAILABLE or not pq_path or not Path(pq_path).exists():
+        return {}
+
+    t0 = time.perf_counter()
+    pf = _pq.ParquetFile(str(pq_path))
+    meta = pf.metadata
+    schema = pf.schema_arrow
+
+    # Map column index -> (name, arrow_type)
+    n_fields = len(schema)
+    col_names = [schema.field(i).name for i in range(n_fields)]
+    col_types = [schema.field(i).type for i in range(n_fields)]
+
+    # Only collect stats for numeric and temporal types (skip strings/binary)
+    _numeric_or_temporal = set()
+    for i, t in enumerate(col_types):
+        import pyarrow.types as _pat
+        if (_pat.is_integer(t) or _pat.is_floating(t) or _pat.is_decimal(t)
+                or _pat.is_date(t) or _pat.is_timestamp(t) or _pat.is_time(t)):
+            _numeric_or_temporal.add(i)
+
+    # Aggregate min/max across all row groups
+    col_min: Dict[int, object] = {}
+    col_max: Dict[int, object] = {}
+
+    for rg_idx in range(meta.num_row_groups):
+        rg = meta.row_group(rg_idx)
+        for col_idx in range(rg.num_columns):
+            if col_idx not in _numeric_or_temporal:
+                continue
+            col = rg.column(col_idx)
+            stats = col.statistics
+            if stats is None or not stats.has_min_max:
+                continue
+            lo, hi = stats.min, stats.max
+            if col_idx not in col_min or lo < col_min[col_idx]:
+                col_min[col_idx] = lo
+            if col_idx not in col_max or hi > col_max[col_idx]:
+                col_max[col_idx] = hi
+
+    result: Dict[str, Dict] = {}
+    for col_idx in col_min:
+        name = col_names[col_idx]
+        mn = col_min[col_idx]
+        mx = col_max[col_idx]
+        if mn is None or mx is None:
+            continue
+        # Convert numpy/pyarrow scalars to Python natives
+        mn = mn.item() if hasattr(mn, 'item') else mn
+        mx = mx.item() if hasattr(mx, 'item') else mx
+        # Dates/datetimes -> ISO strings
+        if hasattr(mn, 'isoformat'):
+            mn = mn.isoformat()
+            mx = mx.isoformat()
+        result[name] = {"min": mn, "max": mx}
+
+    elapsed = time.perf_counter() - t0
+    print(f"  Parquet min/max stats: {len(result)} columns ({elapsed:.1f}s)")
+    return result
+
+
+# Question types where data_min/data_max is informative (not select_one/
+# select_multiple whose range is just choice codes or 0/1 binary indicators)
+_MINMAX_QUESTION_TYPES = {'integer', 'decimal', 'calculate', 'calculate_here',
+                          'date', 'datetime', 'time'}
 
 _EXT_MISSING_LETTERS = set('abcdefghijklmnopqrstuvwxyz')
 
@@ -144,11 +218,14 @@ def load_data(dataset_name: str):
     # Write parquet sidecar for fast columnar access downstream
     pq_path = _write_parquet_sidecar(df, dta_path)
 
+    # Read per-column min/max from parquet row-group statistics (metadata only)
+    minmax = _read_parquet_minmax(pq_path)
+
     with open(cfg[json_key], 'r', encoding='utf-8') as f:
         questions = json.load(f)
     print(f"  Loaded {len(questions)} questions from JSON")
 
-    return df, questions, cfg, meta, pq_path, ext_missing_counts
+    return df, questions, cfg, meta, pq_path, ext_missing_counts, minmax
 
 
 SENTINEL_CODES_LIST = [-99, -88, -98, -77, -66, -55]
@@ -519,10 +596,13 @@ def create_variable_dictionary(
     questions: List[Dict],
     dataset_name: str,
     ext_missing_counts: Optional[Dict[str, Dict[str, int]]] = None,
+    minmax: Optional[Dict[str, Dict]] = None,
 ) -> pd.DataFrame:
     """Create comprehensive variable dictionary."""
     print(f"\nCreating {dataset_name} variable dictionary...")
     records = []
+    if minmax is None:
+        minmax = {}
 
     # Build question index once — O(1) lookups instead of O(N) linear scans
     q_index = _build_question_index(questions)
@@ -541,11 +621,16 @@ def create_variable_dictionary(
 
         # Sentinel fields added in batch after dictionary is built (batch_sentinel_scan)
 
+        # Min/max from parquet metadata (numeric/date columns only)
+        mm = minmax.get(var_name)
+
         record = {
             'variable_name': var_name,
             'variable_order': i,
             'stata_type': var_type,
             'non_null_count': non_null_count,
+            'data_min': mm['min'] if mm else None,
+            'data_max': mm['max'] if mm else None,
             'original_variable_name': metadata['original_variable_name'],
             'question_text': metadata['question_text'],
             'question_type': metadata['question_type'],
@@ -805,6 +890,23 @@ def export_dictionary(var_dict: pd.DataFrame, df: pd.DataFrame, cfg: Dict, datas
         if sentinels:
             var_metadata['sentinels'] = sentinels
 
+        # Data range from parquet metadata — only for types where range is
+        # informative (not select_one/select_multiple whose range is just
+        # choice codes or 0/1 binary indicators)
+        qtype = row.get('question_type')
+        d_min = row.get('data_min')
+        d_max = row.get('data_max')
+        if (d_min is not None and d_max is not None
+                and qtype in _MINMAX_QUESTION_TYPES):
+            try:
+                # Guard against NaN (float columns with all-NaN produce NaN stats)
+                if not (isinstance(d_min, float) and np.isnan(d_min)):
+                    var_metadata['data_min'] = d_min
+                    var_metadata['data_max'] = d_max
+            except (TypeError, ValueError):
+                var_metadata['data_min'] = d_min
+                var_metadata['data_max'] = d_max
+
         variables_dict[var_name] = var_metadata
 
     output_structure = {
@@ -951,8 +1053,8 @@ def main():
         print(f"\n{'='*70}")
         print(f"Processing {dataset_name.upper()}")
         print(f"{'='*70}")
-        df, questions, cfg, meta, pq_path, ext_missing_counts = load_data(dataset_name)
-        var_dict = create_variable_dictionary(df, questions, dataset_name, ext_missing_counts)
+        df, questions, cfg, meta, pq_path, ext_missing_counts, minmax = load_data(dataset_name)
+        var_dict = create_variable_dictionary(df, questions, dataset_name, ext_missing_counts, minmax)
         export_dictionary(var_dict, df, cfg, dataset_name, meta, parquet_path=pq_path)
 
         if args.xlsx:

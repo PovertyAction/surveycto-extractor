@@ -482,6 +482,13 @@ class SurveyStore:
             nn_str = f"{non_null:,}" if isinstance(non_null, int) else str(non_null)
             lines.append(f"  stata_type   : {stata_type}")
             lines.append(f"  non_null     : {nn_str}")
+
+            # Data range (integer/decimal/calculate/date only)
+            d_min = entry.get("data_min")
+            d_max = entry.get("data_max")
+            if d_min is not None and d_max is not None:
+                lines.append(f"  data_range   : {d_min} to {d_max}")
+
             lines.append(f"  form_type    : {survey_data.get('type', '?')}")
             lines.append(f"  question     : {(survey_data.get('question_text') or '').strip()}")
 
@@ -659,13 +666,19 @@ class SurveyStore:
                 if form_name != name:
                     header += f"  (form: {form_name})"
 
+                range_str = ""
+                d_min = entry.get("data_min")
+                d_max = entry.get("data_max")
+                if d_min is not None and d_max is not None:
+                    range_str = f"\n  range: {d_min} to {d_max}"
+
                 block = (
                     f"{header}\n"
                     f"  {form_type} | stata:{stata_type} | non_null:{non_null}\n"
                     f"  Q: {qt}\n"
                     f"  skip: {_trunc(skip, 120)}\n"
                     f"  sentinels: {sent_str}"
-                    f"{repeat_str}{sm_str}"
+                    f"{range_str}{repeat_str}{sm_str}"
                 )
                 blocks.append(block)
                 break  # first matching survey in scope
@@ -846,6 +859,153 @@ class SurveyStore:
 
         return "\n".join(lines)
 
+    def get_gate_chain(self, stata_name: str,
+                       survey: str | None = None) -> str:
+        """Build the full composed gate chain for a variable.
+
+        Walks from group-level relevances (outermost) through the variable's
+        own relevance, recursively resolving each ${ref} to its question text,
+        choice list, and own gate chain.  Returns an indented tree.
+        """
+        self._check_reload()
+        if self.is_empty:
+            return self._empty_message()
+
+        labels = self._filtered_labels(survey)
+        if survey and not labels:
+            return self._no_survey_match_msg(survey)
+
+        results = []
+        for label in labels:
+            entry = self._vardicts.get(label, {}).get(stata_name)
+            if entry is None:
+                continue
+
+            survey_data = entry.get("survey", {})
+            form_name = survey_data.get("original_variable_name", stata_name)
+            q = self._q_index.get(label, {}).get(form_name)
+            q_index = self._q_index.get(label, {})
+
+            # Collect all conditions: group relevances (outer->inner) + own
+            grp_rels = []
+            if q:
+                grp_rels = q.get("group_relevances") or []
+            else:
+                grp_rels = survey_data.get("group_relevances") or []
+
+            own_rel = ""
+            if q:
+                own_rel = q.get("relevance") or ""
+
+            all_conditions = list(grp_rels) + ([own_rel] if own_rel else [])
+
+            # Build tree lines
+            lines = [f"[{label}] Gate chain for: {stata_name}"]
+            if not all_conditions:
+                lines.append("  (always asked — no skip logic)")
+                results.append("\n".join(lines))
+                continue
+
+            # Track resolved vars to avoid cycles
+            resolved_cache: dict[str, dict] = {}
+
+            def _resolve_var(vname: str) -> dict:
+                """Resolve a gate variable to its metadata."""
+                if vname in resolved_cache:
+                    return resolved_cache[vname]
+                gq = q_index.get(vname)
+                info: dict = {"name": vname}
+                if gq:
+                    info["question"] = (gq.get("question_text") or "").strip()[:80]
+                    info["type"] = gq.get("type") or "?"
+                    gchoices = gq.get("choices") or []
+                    gcl = gq.get("choice_list") or ""
+                    if gchoices:
+                        cstr = ", ".join(
+                            f"{c['value']}={c['label'].strip()}"
+                            for c in gchoices[:6]
+                        )
+                        info["choices"] = f"{gcl}: {cstr}"
+                    else:
+                        info["choices"] = ""
+                    own = gq.get("relevance") or ""
+                    info["own_relevance"] = own
+                    info["group_relevances"] = gq.get("group_relevances") or []
+                else:
+                    # Try vardict
+                    ve = self._vardicts.get(label, {}).get(vname, {})
+                    if ve:
+                        sd = ve.get("survey", {})
+                        info["question"] = (sd.get("question_text") or "").strip()[:80]
+                        info["type"] = sd.get("type") or "?"
+                        info["choices"] = ""
+                        info["own_relevance"] = ""
+                        info["group_relevances"] = []
+                    else:
+                        info["question"] = "(not found in survey)"
+                        info["type"] = "?"
+                        info["choices"] = ""
+                        info["own_relevance"] = ""
+                        info["group_relevances"] = []
+                resolved_cache[vname] = info
+                return info
+
+            indent = 0
+            for i, cond in enumerate(all_conditions):
+                is_group = i < len(grp_rels)
+                prefix = "  " * indent
+                source = "GROUP" if is_group else "VAR"
+
+                # Extract referenced variables from condition
+                refs = re.findall(r"\$\{([^}]+)\}", cond)
+                # Clean condition for display (replace ${x} with x)
+                display_cond = re.sub(r"\$\{([^}]+)\}", r"\1", cond)
+
+                lines.append(f"{prefix}[{source}] {display_cond}")
+
+                for ref in refs:
+                    rinfo = _resolve_var(ref)
+                    qt = rinfo.get("question", "")
+                    choices = rinfo.get("choices", "")
+                    own = rinfo.get("own_relevance", "")
+
+                    lines.append(f"{prefix}  ^ {ref}: {qt}")
+                    if choices:
+                        lines.append(f"{prefix}    [{choices}]")
+                    if own:
+                        own_display = re.sub(r"\$\{([^}]+)\}", r"\1", own)
+                        lines.append(f"{prefix}    asked when: {own_display}")
+                    else:
+                        lines.append(f"{prefix}    always asked")
+
+                indent += 1
+
+            # Final line: the target variable itself
+            prefix = "  " * indent
+            qt = (survey_data.get("question_text") or "").strip()[:80]
+            lines.append(f"{prefix}>>> {stata_name}: {qt}")
+
+            # Non-null vs total
+            non_null = entry.get("non_null_count")
+            total = None
+            meta = self._dataset_meta.get(label, {})
+            total = meta.get("dataset", {}).get("n_observations")
+            if non_null is not None and total is not None:
+                nn = f"{non_null:,}" if isinstance(non_null, int) else str(non_null)
+                tt = f"{total:,}" if isinstance(total, int) else str(total)
+                lines.append(f"{prefix}    non_null: {nn} / {tt}")
+
+            results.append("\n".join(lines))
+
+        if not results:
+            suggestions = self._suggest_similar(stata_name, survey)
+            scope = f" in survey '{survey}'" if survey else " in any loaded survey"
+            msg = f"No match for '{stata_name}'{scope}."
+            if suggestions:
+                msg += f"\n  Did you mean: {', '.join(suggestions[:5])}"
+            return msg
+        return "\n\n".join(results)
+
     def _suggest_similar(self, name: str, survey: str | None = None,
                          max_suggestions: int = 5) -> list[str]:
         """Find variables with similar names (prefix/substring match)."""
@@ -877,6 +1037,8 @@ server = FastMCP(
         "Use lookup_variables for batch checks (e.g., all variables in a cleaning module). "
         "Use search_questions to discover variables by keyword. "
         "Use get_choice_list to see all choices and variables sharing a choice list. "
+        "Use get_gate_chain to see the full composed skip logic tree for a variable "
+        "(critical for verifying zeroing/missing logic in cleaning code). "
         "Use get_survey_info for a dataset overview before diving in. "
         "All tools accept an optional 'survey' parameter to filter by survey key "
         "(partial match, e.g., survey='ltfu' matches 'ltfu_hh' and 'ltfu_adult')."
@@ -988,6 +1150,24 @@ def get_choice_list(list_name: str, survey: str = "") -> str:
     """
     return _get_store().get_choice_list(
         list_name, survey=survey or None
+    )
+
+
+@server.tool()
+def get_gate_chain(name: str, survey: str = "") -> str:
+    """Show the full composed skip logic tree for a variable.
+
+    Walks from outermost group relevance through the variable's own
+    relevance condition, resolving each referenced variable to its
+    question text, choice list, and own gate condition.
+
+    Use this to understand WHY a variable has missing/zero values —
+    critical for verifying zeroing and missing-value logic in cleaning code.
+
+    Use the survey parameter to filter to a specific survey (partial match).
+    """
+    return _get_store().get_gate_chain(
+        name, survey=survey or None
     )
 
 
