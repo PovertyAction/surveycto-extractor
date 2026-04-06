@@ -64,70 +64,114 @@ def _write_parquet_sidecar(df: pd.DataFrame, dta_path: Path) -> Optional[Path]:
     return pq_path
 
 
-def _read_parquet_minmax(pq_path: Optional[Path]) -> Dict[str, Dict]:
-    """Read per-column min/max from parquet row-group statistics.
+def _read_parquet_column_stats(pq_path: Optional[Path]) -> Dict[str, Dict]:
+    """Read per-column statistics from parquet row-group metadata.
 
-    Returns {col_name: {"min": value, "max": value}} for columns that have
-    numeric or date/time statistics.  Reads only file metadata — no data scan.
+    For numeric/date columns collects min/max.  For ALL columns collects
+    null_count and num_values (non-null count), derived from row-group stats.
+    Reads only file metadata — no data scan.
+
+    Returns {col_name: {
+        "min": value, "max": value,      # numeric/date only
+        "null_count": int,               # total nulls across all row groups
+        "num_values": int,               # total non-null values
+        "missing_rate": float,           # null_count / total_rows
+        "is_all_missing": bool,          # True when num_values == 0
+    }}
     """
     if not _PYARROW_AVAILABLE or not pq_path or not Path(pq_path).exists():
         return {}
 
     t0 = time.perf_counter()
     pf = _pq.ParquetFile(str(pq_path))
-    meta = pf.metadata
+    file_meta = pf.metadata
     schema = pf.schema_arrow
 
-    # Map column index -> (name, arrow_type)
     n_fields = len(schema)
     col_names = [schema.field(i).name for i in range(n_fields)]
     col_types = [schema.field(i).type for i in range(n_fields)]
 
-    # Only collect stats for numeric and temporal types (skip strings/binary)
-    _numeric_or_temporal = set()
-    for i, t in enumerate(col_types):
-        import pyarrow.types as _pat
+    # Identify numeric/temporal columns for min/max collection;
+    # also identify null-typed columns (all-missing by definition — pyarrow
+    # stores fully-null columns as 'null' type and emits no row-group stats).
+    import pyarrow.types as _pat
+    _numeric_or_temporal = {
+        i for i, t in enumerate(col_types)
         if (_pat.is_integer(t) or _pat.is_floating(t) or _pat.is_decimal(t)
-                or _pat.is_date(t) or _pat.is_timestamp(t) or _pat.is_time(t)):
-            _numeric_or_temporal.add(i)
+                or _pat.is_date(t) or _pat.is_timestamp(t) or _pat.is_time(t))
+    }
+    _null_typed = {i for i, t in enumerate(col_types) if _pat.is_null(t)}
 
-    # Aggregate min/max across all row groups
     col_min: Dict[int, object] = {}
     col_max: Dict[int, object] = {}
+    col_null: Dict[int, int] = {}
+    col_vals: Dict[int, int] = {}
 
-    for rg_idx in range(meta.num_row_groups):
-        rg = meta.row_group(rg_idx)
+    total_rows = file_meta.num_rows
+
+    for rg_idx in range(file_meta.num_row_groups):
+        rg = file_meta.row_group(rg_idx)
         for col_idx in range(rg.num_columns):
-            if col_idx not in _numeric_or_temporal:
-                continue
             col = rg.column(col_idx)
             stats = col.statistics
-            if stats is None or not stats.has_min_max:
+            if stats is None:
                 continue
-            lo, hi = stats.min, stats.max
-            if col_idx not in col_min or lo < col_min[col_idx]:
-                col_min[col_idx] = lo
-            if col_idx not in col_max or hi > col_max[col_idx]:
-                col_max[col_idx] = hi
+
+            # Null/value counts — available for all column types
+            if stats.null_count is not None:
+                col_null[col_idx] = col_null.get(col_idx, 0) + stats.null_count
+            if stats.num_values is not None:
+                col_vals[col_idx] = col_vals.get(col_idx, 0) + stats.num_values
+
+            # Min/max — numeric/temporal only
+            if col_idx in _numeric_or_temporal and stats.has_min_max:
+                lo, hi = stats.min, stats.max
+                if col_idx not in col_min or lo < col_min[col_idx]:
+                    col_min[col_idx] = lo
+                if col_idx not in col_max or hi > col_max[col_idx]:
+                    col_max[col_idx] = hi
 
     result: Dict[str, Dict] = {}
-    for col_idx in col_min:
-        name = col_names[col_idx]
-        mn = col_min[col_idx]
-        mx = col_max[col_idx]
-        if mn is None or mx is None:
-            continue
-        # Convert numpy/pyarrow scalars to Python natives
-        mn = mn.item() if hasattr(mn, 'item') else mn
-        mx = mx.item() if hasattr(mx, 'item') else mx
-        # Dates/datetimes -> ISO strings
-        if hasattr(mn, 'isoformat'):
-            mn = mn.isoformat()
-            mx = mx.isoformat()
-        result[name] = {"min": mn, "max": mx}
+    for col_idx, name in enumerate(col_names):
+        entry: Dict = {}
+
+        # Min/max
+        if col_idx in col_min:
+            mn = col_min[col_idx]
+            mx = col_max[col_idx]
+            if mn is not None and mx is not None:
+                mn = mn.item() if hasattr(mn, 'item') else mn
+                mx = mx.item() if hasattr(mx, 'item') else mx
+                if hasattr(mn, 'isoformat'):
+                    mn = mn.isoformat()
+                    mx = mx.isoformat()
+                entry['min'] = mn
+                entry['max'] = mx
+
+        # Missing stats — from row-group statistics or from null schema type
+        if col_idx in _null_typed:
+            # null-typed columns have no row-group statistics; they are all-missing
+            entry['null_count'] = total_rows
+            entry['num_values'] = 0
+            entry['missing_rate'] = 1.0
+            entry['is_all_missing'] = True
+        else:
+            null_count = col_null.get(col_idx)
+            num_values = col_vals.get(col_idx)
+            if null_count is not None or num_values is not None:
+                null_count = null_count or 0
+                num_values = num_values or 0
+                entry['null_count'] = null_count
+                entry['num_values'] = num_values
+                entry['missing_rate'] = round(null_count / total_rows, 6) if total_rows > 0 else 0.0
+                entry['is_all_missing'] = (num_values == 0)
+
+        if entry:
+            result[name] = entry
 
     elapsed = time.perf_counter() - t0
-    print(f"  Parquet min/max stats: {len(result)} columns ({elapsed:.1f}s)")
+    n_minmax = sum(1 for v in result.values() if 'min' in v)
+    print(f"  Parquet column stats: {len(result)} columns, {n_minmax} with min/max ({elapsed:.1f}s)")
     return result
 
 
@@ -195,6 +239,15 @@ def load_data(dataset_name: str):
     # Support both 'json' key (old style) and 'questions_json' key (template style)
     json_key = 'questions_json' if 'questions_json' in cfg else 'json'
 
+    # Validate the bridge file exists before doing expensive .dta load
+    questions_path = Path(cfg[json_key])
+    if not questions_path.exists():
+        raise FileNotFoundError(
+            f"Bridge file not found: {questions_path}\n"
+            f"  This file is produced by Phase 2 (JSON extraction) for the '{dataset_name}' survey.\n"
+            f"  Run: python main.py --survey {dataset_name} --phases json"
+        )
+
     dta_path = Path(cfg['data'])
 
     print(f"Loading {dataset_name} data...")
@@ -218,8 +271,8 @@ def load_data(dataset_name: str):
     # Write parquet sidecar for fast columnar access downstream
     pq_path = _write_parquet_sidecar(df, dta_path)
 
-    # Read per-column min/max from parquet row-group statistics (metadata only)
-    minmax = _read_parquet_minmax(pq_path)
+    # Read per-column stats from parquet row-group metadata (no data scan)
+    minmax = _read_parquet_column_stats(pq_path)
 
     with open(cfg[json_key], 'r', encoding='utf-8') as f:
         questions = json.load(f)
@@ -597,6 +650,7 @@ def create_variable_dictionary(
     dataset_name: str,
     ext_missing_counts: Optional[Dict[str, Dict[str, int]]] = None,
     minmax: Optional[Dict[str, Dict]] = None,
+    meta=None,
 ) -> pd.DataFrame:
     """Create comprehensive variable dictionary."""
     print(f"\nCreating {dataset_name} variable dictionary...")
@@ -607,21 +661,28 @@ def create_variable_dictionary(
     # Build question index once — O(1) lookups instead of O(N) linear scans
     q_index = _build_question_index(questions)
 
-    # Pre-compute per-column stats in two vectorized calls instead of 2*N individual ones
-    all_dtypes = df.dtypes.astype(str)
+    # Use readstat variable types when available (preserves Stata types like
+    # "double", "str244", "long") — falls back to pandas dtype strings when meta
+    # is absent (pd.read_stata path).
+    readstat_types = meta.readstat_variable_types if meta else None
+
     all_non_null = df.notna().sum()
 
     for i, var_name in enumerate(df.columns, 1):
         if i % 100 == 0:
             print(f"  Processing variable {i}/{len(df.columns)}...")
 
-        var_type = all_dtypes[var_name]
+        var_type = (
+            readstat_types[var_name]
+            if readstat_types and var_name in readstat_types
+            else str(df[var_name].dtype)
+        )
         non_null_count = int(all_non_null[var_name])
         metadata = determine_variable_source(var_name, questions, _index=q_index)
 
         # Sentinel fields added in batch after dictionary is built (batch_sentinel_scan)
 
-        # Min/max from parquet metadata (numeric/date columns only)
+        # Stats from parquet metadata (no data scan)
         mm = minmax.get(var_name)
 
         record = {
@@ -629,8 +690,10 @@ def create_variable_dictionary(
             'variable_order': i,
             'stata_type': var_type,
             'non_null_count': non_null_count,
-            'data_min': mm['min'] if mm else None,
-            'data_max': mm['max'] if mm else None,
+            'missing_rate': mm.get('missing_rate') if mm else None,
+            'is_all_missing': mm.get('is_all_missing', False) if mm else False,
+            'data_min': mm.get('min') if mm else None,
+            'data_max': mm.get('max') if mm else None,
             'original_variable_name': metadata['original_variable_name'],
             'question_text': metadata['question_text'],
             'question_type': metadata['question_type'],
@@ -804,6 +867,19 @@ def export_dictionary(var_dict: pd.DataFrame, df: pd.DataFrame, cfg: Dict, datas
     print(f"  Synthetic (_count) variables: {var_dict['is_synthetic'].sum()}")
     print(f"  Repeat variables with iteration-specific skip logic: {var_dict['skip_logic_iteration_specific'].notna().sum()}")
 
+    # Missing-rate diagnostics from parquet metadata
+    if 'missing_rate' in var_dict.columns and var_dict['missing_rate'].notna().any():
+        all_missing = var_dict[var_dict['is_all_missing'] == True]
+        sparse = var_dict[
+            var_dict['missing_rate'].notna() & (var_dict['missing_rate'] >= 0.95)
+            & ~var_dict['is_all_missing'].fillna(False)
+        ]
+        print(f"  All-missing variables (0 non-null): {len(all_missing)}")
+        if 0 < len(all_missing) <= 20:
+            for vn in all_missing['variable_name']:
+                print(f"    {vn}")
+        print(f"  Sparse variables (>=95% missing, not all-missing): {len(sparse)}")
+
     if var_dict['question_type'].notna().any():
         print("\nQuestion types:")
         for qtype, count in var_dict['question_type'].value_counts().items():
@@ -889,6 +965,13 @@ def export_dictionary(var_dict: pd.DataFrame, df: pd.DataFrame, cfg: Dict, datas
             sentinels['calculate_risk'] = True
         if sentinels:
             var_metadata['sentinels'] = sentinels
+
+        # Missing rate from parquet metadata (all columns)
+        missing_rate = row.get('missing_rate')
+        if missing_rate is not None and not (isinstance(missing_rate, float) and np.isnan(missing_rate)):
+            var_metadata['missing_rate'] = round(float(missing_rate), 4)
+        if row.get('is_all_missing'):
+            var_metadata['is_all_missing'] = True
 
         # Data range from parquet metadata — only for types where range is
         # informative (not select_one/select_multiple whose range is just
@@ -1054,7 +1137,7 @@ def main():
         print(f"Processing {dataset_name.upper()}")
         print(f"{'='*70}")
         df, questions, cfg, meta, pq_path, ext_missing_counts, minmax = load_data(dataset_name)
-        var_dict = create_variable_dictionary(df, questions, dataset_name, ext_missing_counts, minmax)
+        var_dict = create_variable_dictionary(df, questions, dataset_name, ext_missing_counts, minmax, meta=meta)
         export_dictionary(var_dict, df, cfg, dataset_name, meta, parquet_path=pq_path)
 
         if args.xlsx:

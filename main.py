@@ -39,14 +39,13 @@ class SurveyDocumentationSystem:
         self.config["output_dir"].mkdir(parents=True, exist_ok=True)
         self.config["sections_dir"].mkdir(parents=True, exist_ok=True)
 
-    def run_all_phases(self):
-        """Execute all three phases of documentation generation"""
+    def _load_survey(self):
+        """Load the SurveyCTO instrument XLSX and return parsed data."""
         print(f"\n{'=' * 80}")
         print(f"SURVEYCTO DOCUMENTATION SYSTEM")
         print(f"Survey: {self.survey_name}")
         print(f"{'=' * 80}")
 
-        # Load survey
         print(f"\nLoading survey from: {self.config['input_file']}")
         external_csv = self.config.get("external_choices_csv")
         if external_csv:
@@ -54,14 +53,16 @@ class SurveyDocumentationSystem:
         parser = SurveyParser(self.config["input_file"], external_choices_csv=external_csv)
         survey_df, choices_df = parser.load()
 
-        # Print survey info
         info = parser.get_survey_info()
         print(f"[OK] Loaded survey: {info['total_rows']} rows, {info['groups']} groups, {info['questions']} questions")
 
         choice_lists = parser.get_choice_lists()
         print(f"[OK] Loaded choices: {len(choice_lists)} choice lists")
 
-        # Phase 1: CSV Extraction
+        return survey_df, choices_df
+
+    def run_csv_phase(self, survey_df, choices_df):
+        """Phase 1: Extract survey and choices CSVs."""
         csv_extractor = CSVExtractor(survey_df, choices_df, self.config["output_dir"])
         survey_csv, choices_csv = csv_extractor.extract_all(
             config.SURVEY_COLUMNS,
@@ -69,24 +70,57 @@ class SurveyDocumentationSystem:
             f"{self.survey_key}_survey.csv",
             f"{self.survey_key}_choices.csv"
         )
+        return survey_csv, choices_csv
 
-        # Phase 2: JSON Extraction and Diagram
+    def run_json_phase(self, survey_df, choices_df):
+        """Phase 2: Extract questions JSON and generate structure diagram."""
         json_extractor = JSONExtractor(survey_df, choices_df, self.config["output_dir"])
         questions = json_extractor.extract_all_questions()
         json_path = json_extractor.save_json(questions, f"{self.survey_key}_questions.json")
 
-        # Generate structure diagram
         print("=== Phase 2: Structure Diagram ===")
         diagram_generator = DiagramGenerator(survey_df, self.config["output_dir"])
         diagram_path = diagram_generator.save_diagram(f"{self.survey_key}_structure.txt")
         print()
 
-        # Phase 3: Section Splitting
+        return questions, json_path, diagram_path
+
+    def run_sections_phase(self, questions):
+        """Phase 3: Split questions JSON into per-section files."""
         max_depth = self.config.get("max_section_depth")
         section_splitter = SectionSplitter(questions, self.config["sections_dir"], max_depth=max_depth)
-        section_paths = section_splitter.split_and_save(prefix="section")
+        return section_splitter.split_and_save(prefix="section")
 
-        # Final summary
+    def run_phases(self, phases):
+        """Execute only the requested phases."""
+        survey_df, choices_df = self._load_survey()
+        questions = None
+
+        if "csv" in phases:
+            self.run_csv_phase(survey_df, choices_df)
+
+        if "json" in phases:
+            questions, _, _ = self.run_json_phase(survey_df, choices_df)
+
+        if "sections" in phases:
+            if questions is None:
+                # sections depends on questions JSON — load from disk if available
+                json_path = self.config["output_dir"] / f"{self.survey_key}_questions.json"
+                if not json_path.exists():
+                    print(f"[SKIP] sections phase requires questions.json -- run --phases json first")
+                else:
+                    with open(json_path, "r", encoding="utf-8") as fh:
+                        questions = json.load(fh)
+            if questions is not None:
+                self.run_sections_phase(questions)
+
+    def run_all_phases(self):
+        """Execute all three phases of documentation generation."""
+        survey_df, choices_df = self._load_survey()
+        survey_csv, choices_csv = self.run_csv_phase(survey_df, choices_df)
+        questions, json_path, diagram_path = self.run_json_phase(survey_df, choices_df)
+        section_paths = self.run_sections_phase(questions)
+
         print(f"{'=' * 80}")
         print(f"DOCUMENTATION COMPLETE")
         print(f"{'=' * 80}")
@@ -171,7 +205,10 @@ def main():
                 continue
 
             system = SurveyDocumentationSystem(survey_key)
-            system.run_all_phases()
+            if run_all:
+                system.run_all_phases()
+            else:
+                system.run_phases(phases)
 
             # Seed phase runs after JSON extraction
             if run_all or "seed" in phases:
