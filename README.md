@@ -71,7 +71,9 @@ pip install -r surveycto_extractor/requirements.txt
 
 Copy `config.template.py` to `config.py` and fill in your paths.
 
-**`SURVEYS`** — one entry per instrument (required for phases 1–3 and seed):
+The config has two dicts that reflect a meaningful split in the pipeline:
+
+**`SURVEYS`** — instrument side, required for phases 1–3 and seed. Only needs the `.xlsx` form — can be configured on day 1, before any data is collected.
 
 ```python
 SURVEYS = {
@@ -87,13 +89,13 @@ SURVEYS = {
 }
 ```
 
-**`DATASETS`** — one entry per dataset (required for variable dictionary and summary stats):
+**`DATASETS`** — data side, required for variable dictionary and summary stats. Needs a collected `.dta` and the `questions_json` bridge file produced by Phase 2. Each key must match a key in `SURVEYS`.
 
 ```python
 DATASETS = {
     "my_survey": {
         "data":           Path("path/to/my_survey_data.dta"),
-        "questions_json": Path("path/to/survey_documentation/my_survey/my_survey_questions.json"),
+        "questions_json": Path("path/to/survey_documentation/my_survey/my_survey_questions.json"),  # Phase 2 output
         "output_json":    Path("path/to/survey_documentation/my_survey/my_survey_variable_dictionary.json"),
         "output_xlsx":    Path("path/to/survey_documentation/my_survey/my_survey_variable_dictionary.xlsx"),
         # "output_do":          Path("scripts/cleaning/my_survey_summary_stats.do"),
@@ -102,6 +104,8 @@ DATASETS = {
 }
 ```
 
+The `questions_json` path is the bridge between the two sides: it points to the `*_questions.json` file produced by `main.py --phases json`. Phase 4 will fail with an actionable error if this file doesn't exist yet.
+
 ---
 
 ## Running the pipeline
@@ -109,10 +113,15 @@ DATASETS = {
 ### Phases 1–3: Extract survey structure
 
 ```bash
-python main.py --survey my_survey           # all phases
-python main.py --survey my_survey --phases json seed   # specific phases
-python main.py --survey all                 # all surveys in config
+python main.py --survey my_survey                        # all phases (default)
+python main.py --survey my_survey --phases csv           # CSV only
+python main.py --survey my_survey --phases json          # questions JSON + diagram only
+python main.py --survey my_survey --phases sections      # section split only (reads questions JSON from disk)
+python main.py --survey my_survey --phases json seed     # JSON then seed
+python main.py --survey all                              # all surveys in config
 ```
+
+Phases 1–3 only require the SurveyCTO `.xlsx` instrument — they can run before any data is collected. Valid phase names: `csv`, `json`, `sections`, `seed`, `all`.
 
 Produces `*_questions.json`, `*_structure.txt`, and `sections/*.json`.
 
@@ -135,14 +144,15 @@ python create_variable_dictionaries.py --survey my_survey --xlsx
 ```
 
 Maps every Stata variable to its source question, Stata skip logic, choice list, and
-form position. Includes per-variable **data range** (min/max from parquet row-group
-metadata for integer, decimal, calculate, and date/time variables) and a **sentinel scan**
-that detects:
-- Raw integer sentinels (`-99`, `-88`, etc.) still in numeric columns
-- String sentinels (`"-99"`, `"-88"`) in unconverted text columns
-- Extended missing values (`.d`, `.r`, etc.) already recoded by HFC
-- Type mismatches (form says integer but Stata has string)
-- Calculate fields with unexplained negative values
+form position. Per-variable fields include:
+
+- **`stata_type`** — Stata native type (`double`, `float`, `int16`, `int8`, `string`, etc.) from pyreadstat metadata, not pandas dtypes
+- **`missing_rate`** — fraction of observations that are null, from parquet row-group metadata (no data scan)
+- **`is_all_missing`** — `true` when the variable has zero non-null observations
+- **`data_min` / `data_max`** — observed range for integer, decimal, calculate, and date/time variables (from parquet metadata)
+- **sentinel counts** — detects raw integer sentinels (`-99`, `-88`, etc.), string sentinels, extended missing values (`.d`, `.r`), type mismatches, and risky calculate fields
+
+The export summary prints a diagnostic of all-missing and sparse (≥95% missing) variables.
 
 Exports to both JSON (machine-readable) and XLSX (for sharing).
 Also saves `*_data_ord.dta` — a copy of your dataset with columns reordered to match
@@ -272,3 +282,8 @@ the JSON extractor to distinguish `select_one` from `select_multiple`.
 **`calculate` fields missing from `questions.json`**
 Remove `"calculate"` from `EXCLUDED_TYPES` in `config.py`. Calculate fields are
 needed for skip logic resolution and seed generation.
+
+**`FileNotFoundError: Bridge file not found`**
+Phase 4 (`create_variable_dictionaries.py`) requires the `*_questions.json` file
+produced by Phase 2. Run `python main.py --survey my_survey --phases json` first,
+then re-run the variable dictionary script.

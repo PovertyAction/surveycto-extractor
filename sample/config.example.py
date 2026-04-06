@@ -15,6 +15,7 @@ from pathlib import Path
 # Sample files live in sample/ relative to the repo root.
 SAMPLE_DIR = Path(__file__).parent / "sample"
 
+# Instrument side — only needs the .xlsx; can run before data collection (Phases 1-3, seed)
 SURVEYS = {
     "household_survey": {
         "input_file":           SAMPLE_DIR / "Household_Survey.xlsx",
@@ -27,6 +28,8 @@ SURVEYS = {
     },
 }
 
+# Data side — needs .dta + questions_json bridge; run after data collection (Phase 4+)
+# questions_json points to the *_questions.json file produced by: main.py --phases json
 DATASETS = {
     "household_survey": {
         "data":           SAMPLE_DIR / "household_survey.dta",

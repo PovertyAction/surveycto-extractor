@@ -28,8 +28,13 @@ DATA_DIR         = PROJECT_ROOT / "path" / "to" / "data"          # TODO
 
 
 # ---------------------------------------------------------------------------
-# SURVEYS — one entry per SurveyCTO instrument
+# SURVEYS — Instrument-side configuration (one entry per SurveyCTO form)
 # Used by: main.py, check_missing_cond_vars.py, check_string_conditions.py
+#
+# These entries describe the SurveyCTO instrument (.xlsx form definition).
+# Phases 1-3 only need the instrument — they can run before any data is
+# collected.  The short key (e.g. "my_survey") is the canonical identifier
+# that links each SURVEYS entry to its corresponding DATASETS entry.
 # ---------------------------------------------------------------------------
 SURVEYS = {
     # TODO: Replace "my_survey" with a short key (no spaces).
@@ -46,15 +51,26 @@ SURVEYS = {
 
 
 # ---------------------------------------------------------------------------
-# DATASETS — one entry per survey dataset
+# DATASETS — Data-side configuration (one entry per collected dataset)
 # Used by: create_variable_dictionaries.py, create_summary_stats_dofile.py
+#
+# These entries describe the actual collected data (.dta) paired with its
+# instrument metadata.  Phase 4 (variable dictionaries) and Phase 5 (summary
+# stats) require both a Stata dataset and a questions.json file, so they can
+# only run after data collection and after Phase 2 (json) has been run.
+#
+# BRIDGE: "questions_json" points to the _questions.json file produced by
+# Phase 2 for the corresponding SURVEYS entry.  This file bridges instrument
+# metadata (question labels, skip logic, choice lists) into the data pipeline.
+# Run `python main.py --survey my_survey --phases json` to generate it.
+#
+# CONSTRAINT: Each key here must match a key in SURVEYS above.
 # ---------------------------------------------------------------------------
-# Key in DATASETS must match a key in SURVEYS (same short name).
 DATASETS = {
     # TODO: Add one entry per survey dataset.
     # "my_survey": {
     #     "data":        DATA_DIR / "my_survey_data.dta",          # Stata dataset
-    #     "questions_json": OUTPUT_DIR / "my_survey" / "my_survey_questions.json",   # Phase 1-3 output
+    #     "questions_json": OUTPUT_DIR / "my_survey" / "my_survey_questions.json",   # Phase 2 output (bridge)
     #     "output_json": OUTPUT_DIR / "my_survey" / "my_survey_variable_dictionary.json",
     #     "output_xlsx": OUTPUT_DIR / "my_survey" / "my_survey_variable_dictionary.xlsx",
     #     # "skip_ord_dta": True,  # set True to skip _ord.dta (e.g. underscore-prefix vars or very wide datasets)
