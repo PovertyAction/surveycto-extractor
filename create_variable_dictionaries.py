@@ -825,7 +825,7 @@ def save_ord_dta(var_dict: pd.DataFrame, df: pd.DataFrame, cfg: Dict, meta=None,
 
     # Coerce object columns that actually contain numerics (pyreadstat read artifact
     # for sparse repeat-group columns -- stored as object with int/float values).
-    for col in df_ord.select_dtypes(include='object').columns:
+    for col in df_ord.select_dtypes(include=['object', pd.StringDtype()]).columns:
         try:
             df_ord[col] = pd.to_numeric(df_ord[col])
         except (ValueError, TypeError):
