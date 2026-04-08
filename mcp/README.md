@@ -9,13 +9,14 @@ Complement to the `skill/search_survey.py` for high-volume query sessions
 - Python 3.10+
 - `config.py` configured with `DATASETS` entries (Phase 4 output required)
 - Variable dictionary JSON files generated (`create_variable_dictionaries.py`)
+- `networkx` for the variable relationship graph (`pip install networkx`)
 
 ## Setup
 
 1. Install the MCP dependency:
 
 ```bash
-pip install "mcp[cli]"
+pip install "mcp[cli]" networkx
 ```
 
 2. Add to your project's `.mcp.json` (in the project root):
@@ -70,6 +71,7 @@ To override, set `SURVEY_CONFIG` env var:
 | `search_questions` | TF-IDF ranked search across names and question text | Discovering variables by natural-language query (e.g. "crop sales quantity") |
 | `get_choice_list` | All choices + variables using a list | Understanding categorical domains, verifying sentinels |
 | `get_gate_chain` | Full composed skip logic tree for a variable | Understanding why a variable has missing/zero values |
+| `get_variable_neighborhood` | Relationship graph around a variable | Before modifying/recoding a variable — shows what depends on it, what gates it, repeat siblings, shared choice lists |
 | `get_survey_info` | Dataset overview | Getting oriented before diving in |
 
 ## How it works
@@ -98,6 +100,7 @@ python mcp/survey_server.py
 | Best for | Occasional lookups | Cleaning sessions (10-50+ lookups) |
 | Batch queries | Not supported | `lookup_variables` tool |
 | Gate chain | `--gate-chain` flag | `get_gate_chain` tool |
+| Neighborhood | `--neighborhood` flag | `get_variable_neighborhood` tool |
 | Data range | Shown in output (from vardict) | Shown in lookup tools (from vardict) |
 | Survey filter | `--survey KEY` flag | `survey` parameter on every tool |
 

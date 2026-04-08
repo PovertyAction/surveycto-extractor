@@ -75,6 +75,10 @@ DATASETS = {
     #     "output_xlsx": OUTPUT_DIR / "my_survey" / "my_survey_variable_dictionary.xlsx",
     #     # "skip_ord_dta": True,  # set True to skip _ord.dta (e.g. underscore-prefix vars or very wide datasets)
     # },
+    #
+    # Phase 4 also generates *_variable_graph.json alongside the variable
+    # dictionary (requires networkx).  The graph file path is derived
+    # automatically from output_json — no config key needed.
 }
 
 
