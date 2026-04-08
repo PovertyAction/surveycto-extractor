@@ -305,6 +305,7 @@ class SurveyStore:
         self._tfidf: dict[str, _TfidfIndex] = {}
         self._choice_list_index: dict[str, dict[str, list[str]]] = {}
         self._graphs: dict[str, object] = {}  # networkx MultiDiGraph per survey
+        self._repeat_trees: dict[str, dict] = {}  # repeat group topology per survey
 
         self._load_all()
 
@@ -450,22 +451,29 @@ class SurveyStore:
             if graph_path.exists():
                 try:
                     with open(graph_path, encoding="utf-8") as f:
-                        self._graphs[label] = nx.node_link_graph(json.load(f))
+                        raw_graph = json.load(f)
+                    self._repeat_trees[label] = raw_graph.pop("repeat_groups", {})
+                    self._graphs[label] = nx.node_link_graph(raw_graph)
                     self._mtimes[str(graph_path)] = self._mtime(graph_path)
+                    rpt_msg = ""
+                    if self._repeat_trees[label]:
+                        rpt_msg = f", {len(self._repeat_trees[label])} repeat group(s)"
                     print(
                         f"[survey-expert] Graph loaded for {label}: "
                         f"{self._graphs[label].number_of_nodes()} nodes, "
-                        f"{self._graphs[label].number_of_edges()} edges",
+                        f"{self._graphs[label].number_of_edges()} edges{rpt_msg}",
                         file=sys.stderr,
                     )
                 except (json.JSONDecodeError, OSError) as exc:
                     self._graphs.pop(label, None)
+                    self._repeat_trees.pop(label, None)
                     print(
                         f"[survey-expert] WARNING: Failed to load graph {graph_path}: {exc}",
                         file=sys.stderr,
                     )
             else:
                 self._graphs.pop(label, None)
+                self._repeat_trees.pop(label, None)
 
     def _build_indexes(self, label: str):
         vardict = self._vardicts.get(label, {})
@@ -1284,7 +1292,6 @@ class SurveyStore:
             "constrained_by": set(),
             "constrains": set(),
             "repeat_sibling": set(),
-            "shares_choices": set(),
         }
 
         def _classify_out(etype: str, target: str):
@@ -1298,8 +1305,6 @@ class SurveyStore:
                 edge_groups["constrains"].add(target)
             elif etype == "repeat_sibling":
                 edge_groups["repeat_sibling"].add(target)
-            elif etype == "shares_choices":
-                edge_groups["shares_choices"].add(target)
 
         def _classify_in(etype: str, target: str):
             if etype == "calculates_from":
@@ -1312,8 +1317,6 @@ class SurveyStore:
                 edge_groups["constrained_by"].add(target)
             elif etype == "repeat_sibling":
                 edge_groups["repeat_sibling"].add(target)
-            elif etype == "shares_choices":
-                edge_groups["shares_choices"].add(target)
 
         if depth <= 1:
             # Direct edges only — fast path
@@ -1354,32 +1357,42 @@ class SurveyStore:
         rg = target_attrs.get("repeat_group")
         if rg:
             lines.append(f"  repeat_group: {rg}")
+            # Append repeat tree context if available
+            tree = self._repeat_trees.get(matched_label, {})
+            rg_info = tree.get(rg)
+            if rg_info:
+                lines.append(f"  repeat_tree: depth={rg_info['depth']}, "
+                             f"count_var={rg_info['count_var']}, "
+                             f"count_expr={rg_info.get('count_expr', '?')}, "
+                             f"max_iter={rg_info['max_iterations']}, "
+                             f"suffix={rg_info['stata_suffix_pattern']}")
+                if rg_info.get("parent"):
+                    lines.append(f"  repeat_parent: {rg_info['parent']}")
+                lines.append(f"  join_key: {rg_info['join_key_note']}")
         sv = target_attrs.get("stata_vars", [])
         if sv:
             lines.append(f"  stata_vars: {', '.join(sv)}")
 
         # Relationship sections with risk semantics
         sections = [
-            ("Calculates from (inputs — sentinel contamination risk)",
+            ("Calculates from (inputs -- sentinel contamination risk)",
              "calculates_from"),
-            ("Calculated by (downstream — changing this changes them)",
+            ("Calculated by (downstream -- changing this changes them)",
              "calculated_by"),
             ("Gated by (missing-by-logic if gate is false)",
              "gated_by"),
             ("Gates (changing this can make these disappear)",
              "gates"),
-            ("Group-gated by (structural gate — affects whole group)",
+            ("Group-gated by (structural gate -- affects whole group)",
              "group_gated_by"),
-            ("Group-gates (structural — these groups depend on this)",
+            ("Group-gates (structural -- these groups depend on this)",
              "group_gates"),
-            ("Constrained by (validation — defines valid ranges)",
+            ("Constrained by (validation -- defines valid ranges)",
              "constrained_by"),
-            ("Constrains (validation — these depend on valid values here)",
+            ("Constrains (validation -- these depend on valid values here)",
              "constrains"),
-            ("Repeat siblings (same repeat iteration — handle together)",
+            ("Repeat siblings (same repeat iteration -- handle together)",
              "repeat_sibling"),
-            ("Shares choices (same categorical domain — recode together)",
-             "shares_choices"),
         ]
 
         for header, key in sections:
@@ -1401,6 +1414,45 @@ class SurveyStore:
 
         return "\n".join(lines)
 
+    def get_repeat_structure(self, survey: str | None = None) -> str:
+        """Return the repeat group topology tree for one or more surveys."""
+        self._check_reload()
+        if self.is_empty:
+            return self._empty_message()
+
+        labels = self._filtered_labels(survey)
+        if survey and not labels:
+            return self._no_survey_match_msg(survey)
+
+        results = []
+        for label in labels:
+            tree = self._repeat_trees.get(label, {})
+            if not tree:
+                results.append(f"[{label}] No repeat groups (or graph not generated).")
+                continue
+
+            lines = [f"[{label}] Repeat group topology ({len(tree)} group(s)):"]
+
+            # Sort by depth then name for consistent display
+            for rg_name, info in sorted(tree.items(),
+                                        key=lambda x: (x[1]["depth"], x[0])):
+                indent = "  " * info["depth"]
+                lines.append(f"\n{indent}{rg_name}:")
+                lines.append(f"{indent}  parent: {info['parent'] or '(root)'}")
+                lines.append(f"{indent}  depth: {info['depth']}")
+                lines.append(f"{indent}  count_var: {info['count_var']}")
+                lines.append(f"{indent}  count_expr: {info.get('count_expr', '?')}")
+                lines.append(f"{indent}  max_iterations: {info['max_iterations']}")
+                lines.append(f"{indent}  n_variables: {info['n_variables']}")
+                if info.get("relevance"):
+                    lines.append(f"{indent}  relevance: {info['relevance']}")
+                lines.append(f"{indent}  stata_suffix: {info['stata_suffix_pattern']}")
+                lines.append(f"{indent}  join_key: {info['join_key_note']}")
+
+            results.append("\n".join(lines))
+
+        return "\n\n".join(results)
+
 
 # ---------------------------------------------------------------------------
 # MCP Server
@@ -1417,9 +1469,11 @@ server = FastMCP(
         "Use get_gate_chain to see the full composed skip logic tree for a variable "
         "(critical for verifying zeroing/missing logic in cleaning code). "
         "Use get_variable_neighborhood to see all variables connected to a target "
-        "(calculation inputs, gates, repeat siblings, shared choices) with risk semantics. "
+        "(calculation inputs, gates, repeat siblings) with risk semantics. "
         "IMPORTANT: before writing a cleaning module, call get_variable_neighborhood on "
         "key variables to understand sentinel contamination paths and gating dependencies. "
+        "Use get_repeat_structure to see the repeat group hierarchy (nesting, count "
+        "variables, max iterations, join keys) before writing reshape or merge code. "
         "Use get_survey_info for a dataset overview before diving in. "
         "All tools accept an optional 'survey' parameter to filter by survey key "
         "(partial match, e.g., survey='ltfu' matches 'ltfu_hh' and 'ltfu_adult')."
@@ -1581,12 +1635,12 @@ def get_variable_neighborhood(name: str, depth: int = 1,
     - Gates: variables that disappear if this one is recoded
     - Constrained by: variables that define valid ranges
     - Repeat siblings: variables in the same repeat iteration
-    - Shares choices: variables using the same categorical domain
 
-    Each neighbor includes its form type, repeat depth, and Stata column names
-    so you can follow up with lookup_variables for full metadata.
+    For variables inside repeat groups, includes repeat tree context:
+    parent group, count variable, count expression, max iterations,
+    Stata suffix pattern, and join key note.
 
-    Accepts a Stata column name (e.g., crpsale_qty_1_2) — automatically
+    Accepts a Stata column name (e.g., crpsale_qty_1_2) -- automatically
     resolves to the form-level variable (crpsale_qty).
 
     Requires the variable graph to be generated first:
@@ -1597,6 +1651,25 @@ def get_variable_neighborhood(name: str, depth: int = 1,
     return _get_store().get_neighborhood(
         name, depth=depth, survey=survey or None
     )
+
+
+@server.tool()
+def get_repeat_structure(survey: str = "") -> str:
+    """Show the repeat group topology tree for a survey.
+
+    Returns the hierarchy of repeat groups with:
+    - Parent-child nesting relationships
+    - Count variable and count expression (what drives the iteration count)
+    - Max iterations observed in the data
+    - Number of form-level variables in each repeat
+    - Stata suffix pattern (how iterations map to column name suffixes)
+    - Join key note (how to merge across repeat levels)
+
+    Essential for writing reshape, merge, or cross-level aggregation code.
+
+    Use the survey parameter to filter to a specific survey (partial match).
+    """
+    return _get_store().get_repeat_structure(survey=survey or None)
 
 
 # ---------------------------------------------------------------------------

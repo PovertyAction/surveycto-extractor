@@ -10,6 +10,7 @@ Usage:
   python search_survey.py --search <text>
   python search_survey.py --gate-chain <variable_name>
   python search_survey.py --neighborhood <variable_name> [--depth N]
+  python search_survey.py --repeat-tree
 
 Options:
   --context N   Also print N adjacent questions on each side in survey order,
@@ -34,8 +35,11 @@ and returns all variables within N hops, grouped by edge type:
   - gated_by / group_gated_by: relevance gating (missing-by-logic risk)
   - constrained_by: validation constraints
   - repeat_sibling: co-occur in same repeat iteration
-  - shares_choices: same categorical domain
 Requires networkx (pip install networkx).
+
+For --repeat-tree, shows the repeat group topology tree from the variable
+graph: parent-child nesting, count variables, max iterations, Stata suffix
+patterns, and join key notes.
 
 SETUP:
   Option A — Auto-discovery (recommended):
@@ -766,9 +770,11 @@ def variable_neighborhood(name: str, depth: int = 1, survey_filter: str = None) 
                   file=sys.stderr)
             continue
 
-        # Load graph
+        # Load graph and repeat tree
         with open(graph_path, encoding="utf-8") as f:
-            G = nx.node_link_graph(json.load(f))
+            raw_graph = json.load(f)
+        repeat_tree = raw_graph.pop("repeat_groups", {})
+        G = nx.node_link_graph(raw_graph)
 
         # Resolve Stata name to form-level name
         vardict = load_json(vpath).get("variables", {})
@@ -794,7 +800,7 @@ def variable_neighborhood(name: str, depth: int = 1, survey_filter: str = None) 
             "gated_by": set(), "gates": set(),
             "group_gated_by": set(), "group_gates": set(),
             "constrained_by": set(), "constrains": set(),
-            "repeat_sibling": set(), "shares_choices": set(),
+            "repeat_sibling": set(),
         }
 
         def _classify_out(etype, target):
@@ -808,8 +814,6 @@ def variable_neighborhood(name: str, depth: int = 1, survey_filter: str = None) 
                 edge_groups["constrains"].add(target)
             elif etype == "repeat_sibling":
                 edge_groups["repeat_sibling"].add(target)
-            elif etype == "shares_choices":
-                edge_groups["shares_choices"].add(target)
 
         def _classify_in(etype, target):
             if etype == "calculates_from":
@@ -822,8 +826,6 @@ def variable_neighborhood(name: str, depth: int = 1, survey_filter: str = None) 
                 edge_groups["constrained_by"].add(target)
             elif etype == "repeat_sibling":
                 edge_groups["repeat_sibling"].add(target)
-            elif etype == "shares_choices":
-                edge_groups["shares_choices"].add(target)
 
         if depth <= 1:
             for _, v, d in G.out_edges(form_name, data=True):
@@ -860,6 +862,16 @@ def variable_neighborhood(name: str, depth: int = 1, survey_filter: str = None) 
         rg = attrs.get("repeat_group")
         if rg:
             print(f"  repeat_group: {rg}")
+            rg_info = repeat_tree.get(rg)
+            if rg_info:
+                print(f"  repeat_tree: depth={rg_info['depth']}, "
+                      f"count_var={rg_info['count_var']}, "
+                      f"count_expr={rg_info.get('count_expr', '?')}, "
+                      f"max_iter={rg_info['max_iterations']}, "
+                      f"suffix={rg_info['stata_suffix_pattern']}")
+                if rg_info.get("parent"):
+                    print(f"  repeat_parent: {rg_info['parent']}")
+                print(f"  join_key: {rg_info['join_key_note']}")
         sv = attrs.get("stata_vars", [])
         if sv:
             print(f"  stata_vars: {', '.join(sv)}")
@@ -874,7 +886,6 @@ def variable_neighborhood(name: str, depth: int = 1, survey_filter: str = None) 
             ("Constrained by (validation -- defines valid ranges)", "constrained_by"),
             ("Constrains (validation -- these depend on valid values here)", "constrains"),
             ("Repeat siblings (same repeat iteration -- handle together)", "repeat_sibling"),
-            ("Shares choices (same categorical domain -- recode together)", "shares_choices"),
         ]
 
         for header, key in sections:
@@ -897,6 +908,54 @@ def variable_neighborhood(name: str, depth: int = 1, survey_filter: str = None) 
     return found
 
 
+def repeat_tree(survey_filter: str = None) -> bool:
+    """Show the repeat group topology tree from the variable graph."""
+    found = False
+
+    for label, files in _filter_surveys(survey_filter).items():
+        vpath = files["vardict"]
+        if not vpath.exists():
+            continue
+
+        graph_path = vpath.with_name(
+            vpath.stem.replace("_variable_dictionary", "_variable_graph") + ".json"
+        )
+        if not graph_path.exists():
+            print(f"[{label}] No variable graph found at {graph_path}", file=sys.stderr)
+            print(f"  Generate it: python create_variable_dictionaries.py --survey {label}",
+                  file=sys.stderr)
+            continue
+
+        with open(graph_path, encoding="utf-8") as f:
+            raw_graph = json.load(f)
+        tree = raw_graph.get("repeat_groups", {})
+
+        if not tree:
+            print(f"\n[{label}] No repeat groups.")
+            found = True
+            continue
+
+        found = True
+        print(f"\n[{label}] Repeat group topology ({len(tree)} group(s)):")
+
+        for rg_name, info in sorted(tree.items(),
+                                    key=lambda x: (x[1]["depth"], x[0])):
+            indent = "  " * info["depth"]
+            print(f"\n{indent}{rg_name}:")
+            print(f"{indent}  parent: {info['parent'] or '(root)'}")
+            print(f"{indent}  depth: {info['depth']}")
+            print(f"{indent}  count_var: {info['count_var']}")
+            print(f"{indent}  count_expr: {info.get('count_expr', '?')}")
+            print(f"{indent}  max_iterations: {info['max_iterations']}")
+            print(f"{indent}  n_variables: {info['n_variables']}")
+            if info.get("relevance"):
+                print(f"{indent}  relevance: {info['relevance']}")
+            print(f"{indent}  stata_suffix: {info['stata_suffix_pattern']}")
+            print(f"{indent}  join_key: {info['join_key_note']}")
+
+    return found
+
+
 def main():
     if not SURVEY_FILES:
         print(f"WARNING: No survey files found under {DOCS}", file=sys.stderr)
@@ -909,6 +968,7 @@ def main():
     grp.add_argument("--search",      metavar="TEXT", help="Search question text or variable names")
     grp.add_argument("--gate-chain",  metavar="NAME", help="Show full composed skip logic tree for a variable")
     grp.add_argument("--neighborhood", metavar="NAME", help="Show variable relationship neighborhood")
+    grp.add_argument("--repeat-tree", action="store_true", help="Show repeat group topology tree")
     parser.add_argument("--depth", metavar="N", type=int, default=1,
                         help="Neighborhood depth for --neighborhood (default: 1)")
     parser.add_argument("--context", metavar="N", type=int, default=0,
@@ -925,6 +985,8 @@ def main():
         ok = gate_chain(args.gate_chain, survey_filter=args.survey)
     elif args.neighborhood:
         ok = variable_neighborhood(args.neighborhood, depth=args.depth, survey_filter=args.survey)
+    elif args.repeat_tree:
+        ok = repeat_tree(survey_filter=args.survey)
     else:
         ok = search_text(args.search, context=args.context, survey_filter=args.survey)
 

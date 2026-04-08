@@ -1108,6 +1108,133 @@ def validate_select_multiple(dict_path, dataset_name: str):
 _REF_RE = re.compile(r"[$][{]([^}]+)[}]")
 
 
+def _build_repeat_tree(questions: List[Dict], variables: dict,
+                       repeat_group_names: set) -> dict:
+    """Build a repeat group topology tree from questions.json and vardict.
+
+    Returns a dict keyed by repeat group name, each with: parent, depth,
+    count_var, count_expr, max_iterations, n_variables, relevance,
+    stata_suffix_pattern, join_key_note.
+    """
+    # Collect repeat_count synthetic questions
+    repeat_counts = {}
+    for q in questions:
+        if q.get("type") == "repeat_count":
+            rg_name = q.get("repeat_group_name")
+            if rg_name:
+                repeat_counts[rg_name] = q
+
+    if not repeat_counts:
+        return {}
+
+    # Infer parent for each repeat group from its group_path
+    # The repeat_count variable lives at the parent level, so its group_path
+    # contains all ancestor groups. Walk backwards to find the nearest repeat.
+    parents: Dict[str, Optional[str]] = {}
+    for rg_name, q in repeat_counts.items():
+        gp = q.get("group_path", [])
+        parts = gp if isinstance(gp, list) else [
+            p.strip() for p in (gp or "").replace("/", " ").split() if p.strip()
+        ]
+        parent = None
+        for p in reversed(parts):
+            if p in repeat_group_names and p != rg_name:
+                parent = p
+                break
+        parents[rg_name] = parent
+
+    # Compute depth by walking parent chain
+    def _depth(rg: str, seen: set = None) -> int:
+        if seen is None:
+            seen = set()
+        if rg in seen:
+            return 1  # cycle guard
+        seen.add(rg)
+        p = parents.get(rg)
+        return 1 if p is None else _depth(p, seen) + 1
+
+    # Count form-level variables per repeat group (from questions, not vardict)
+    var_counts: Dict[str, int] = {}
+    for q in questions:
+        if q.get("type") == "repeat_count":
+            continue
+        gp = q.get("group_path", [])
+        parts = gp if isinstance(gp, list) else [
+            p.strip() for p in (gp or "").replace("/", " ").split() if p.strip()
+        ]
+        # Find innermost repeat group
+        innermost = None
+        for p in reversed(parts):
+            if p in repeat_group_names:
+                innermost = p
+                break
+        if innermost and q.get("variable_name"):
+            var_counts[innermost] = var_counts.get(innermost, 0) + 1
+
+    # Max iterations per repeat group from vardict repeat_iteration values
+    max_iters: Dict[str, int] = {}
+    for entry in variables.values():
+        if not isinstance(entry, dict):
+            continue
+        ri = entry.get("repeat_iteration")
+        if ri is None:
+            continue
+        gp = entry.get("survey", {}).get("group_path") or ""
+        parts = [p.strip() for p in gp.replace("/", " ").split() if p.strip()]
+        # Attribute to innermost repeat group in path
+        for p in reversed(parts):
+            if p in repeat_group_names:
+                max_iters[p] = max(max_iters.get(p, 0), ri)
+                break
+
+    # Build tree entries
+    tree = {}
+    for rg_name in sorted(repeat_counts.keys()):
+        q = repeat_counts[rg_name]
+        d = _depth(rg_name)
+        parent = parents.get(rg_name)
+
+        # Suffix pattern based on depth
+        if d == 1:
+            suffix = "_{iter}"
+        else:
+            parts = []
+            # Walk up parent chain to build prefix
+            chain = []
+            cur = parent
+            while cur is not None:
+                chain.append(cur)
+                cur = parents.get(cur)
+            chain.reverse()
+            for i, _ in enumerate(chain):
+                parts.append(f"_{{p{i+1}}}")
+            parts.append("_{iter}")
+            suffix = "".join(parts)
+
+        # Join key note
+        if d == 1:
+            join_note = ("Iteration index is the only key -- "
+                         "suffix _N maps directly to roster position N.")
+        else:
+            join_note = (f"Nested repeat -- Stata columns have suffix pattern "
+                         f"{suffix}. Join to parent level by matching the first "
+                         f"{d - 1} suffix(es).")
+
+        tree[rg_name] = {
+            "parent": parent,
+            "depth": d,
+            "count_var": f"{rg_name}_count",
+            "count_expr": q.get("calculation"),
+            "max_iterations": max_iters.get(rg_name, 0),
+            "n_variables": var_counts.get(rg_name, 0),
+            "relevance": q.get("relevance"),
+            "stata_suffix_pattern": suffix,
+            "join_key_note": join_note,
+        }
+
+    return tree
+
+
 def build_variable_graph(questions: List[Dict], vardict_json: dict,
                          output_path: Path) -> Optional[Path]:
     """Build a variable relationship graph and write it as JSON.
@@ -1231,24 +1358,12 @@ def build_variable_graph(questions: List[Dict], vardict_json: dict,
                 G.add_edge(left, right, type="repeat_sibling")
                 G.add_edge(right, left, type="repeat_sibling")
 
-    # -- Shared choice list edges (bidirectional) --
-    choice_members: Dict[str, list] = {}
-    for q in questions:
-        cl = q.get("choice_list")
-        vn = q.get("variable_name", "")
-        if cl and vn:
-            choice_members.setdefault(cl, []).append(vn)
-
-    for members in choice_members.values():
-        if len(members) < 2:
-            continue
-        hub = members[0]
-        for member in members[1:]:
-            G.add_edge(hub, member, type="shares_choices")
-            G.add_edge(member, hub, type="shares_choices")
+    # -- Build repeat group topology tree --
+    repeat_tree = _build_repeat_tree(questions, variables, repeat_group_names)
 
     # -- Write --
     data = nx.node_link_data(G)
+    data["repeat_groups"] = repeat_tree
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, default=str)
 
@@ -1258,8 +1373,11 @@ def build_variable_graph(questions: List[Dict], vardict_json: dict,
         t = d.get("type", "unknown")
         edge_types[t] = edge_types.get(t, 0) + 1
     summary = ", ".join(f"{t}: {c}" for t, c in sorted(edge_types.items()))
+    rpt_count = len(repeat_tree)
     print(f"  Variable graph: {G.number_of_nodes()} nodes, "
           f"{G.number_of_edges()} edges ({summary})")
+    if rpt_count:
+        print(f"  Repeat tree: {rpt_count} repeat group(s)")
     print(f"  Written to: {output_path}")
     return output_path
 
