@@ -32,6 +32,7 @@ import math
 import os
 import re
 import sys
+import time
 import importlib.util
 from pathlib import Path
 from typing import Optional
@@ -284,9 +285,12 @@ class _TfidfIndex:
 class SurveyStore:
     """In-memory store for survey metadata with auto-reload on file changes."""
 
+    _RELOAD_DEBOUNCE_SECS = 2.0  # min seconds between file-change checks
+
     def __init__(self, datasets_config: dict | None = None):
         self._config = datasets_config or {}
         self._mtimes: dict[str, float] = {}
+        self._last_reload_check: float = 0.0
 
         # Per-survey loaded data
         self._vardicts: dict[str, dict] = {}
@@ -299,6 +303,7 @@ class SurveyStore:
         self._count_vars: dict[str, dict[str, str]] = {}
         self._q_order: dict[str, dict[str, int]] = {}
         self._tfidf: dict[str, _TfidfIndex] = {}
+        self._choice_list_index: dict[str, dict[str, list[str]]] = {}
         self._graphs: dict[str, object] = {}  # networkx MultiDiGraph per survey
 
         self._load_all()
@@ -496,6 +501,16 @@ class SurveyStore:
                 q_order[vn] = i
         self._q_order[label] = q_order
 
+        # Choice list -> variables index (for fast get_choice_list)
+        cl_index: dict[str, list[str]] = {}
+        for var_name, entry in vardict.items():
+            if not isinstance(entry, dict):
+                continue
+            cl = entry.get("survey", {}).get("choice_list")
+            if cl:
+                cl_index.setdefault(cl, []).append(var_name)
+        self._choice_list_index[label] = cl_index
+
         # TF-IDF search index: one document per variable
         # Document text = variable name (underscores as spaces) + question text
         #                 + original form name (underscores as spaces)
@@ -515,6 +530,10 @@ class SurveyStore:
         self._tfidf[label] = _TfidfIndex(tfidf_docs)
 
     def _check_reload(self):
+        now = time.monotonic()
+        if now - self._last_reload_check < self._RELOAD_DEBOUNCE_SECS:
+            return
+        self._last_reload_check = now
         for label, cfg in self._config.items():
             q_path = Path(cfg.get("questions_json", ""))
             v_path = Path(cfg.get("output_json", ""))
@@ -921,19 +940,18 @@ class SurveyStore:
         results = []
 
         for label in labels:
-            using_vars = []
+            # Use pre-built choice list index instead of scanning all variables
+            using_vars = self._choice_list_index.get(label, {}).get(list_name, [])
             choices = None
 
-            for var_name, entry in self._vardicts.get(label, {}).items():
-                if not isinstance(entry, dict):
-                    continue
-                survey_data = entry.get("survey", {})
-                if survey_data.get("choice_list") == list_name:
-                    using_vars.append(var_name)
-                    if choices is None:
-                        c = survey_data.get("choices")
-                        if c and isinstance(c, list):
-                            choices = c
+            for var_name in using_vars:
+                if choices is not None:
+                    break
+                entry = self._vardicts.get(label, {}).get(var_name, {})
+                if isinstance(entry, dict):
+                    c = entry.get("survey", {}).get("choices")
+                    if c and isinstance(c, list):
+                        choices = c
 
             # Supplement from questions.json for full choice list
             if choices is None:

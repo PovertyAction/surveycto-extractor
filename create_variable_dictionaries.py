@@ -821,7 +821,7 @@ def save_ord_dta(var_dict: pd.DataFrame, df: pd.DataFrame, cfg: Dict, meta=None,
         return None
     ord_path = data_path.parent / (data_path.stem + '_ord.dta')
 
-    ordered_cols = [v for v in var_dict['variable_name'] if v in df.columns and v[:1].isalpha()]
+    ordered_cols = [v for v in var_dict['variable_name'] if v in df.columns]
 
     # Read selected columns from parquet (columnar, skips unneeded cols) or
     # fall back to subsetting the in-memory DataFrame.
@@ -1310,12 +1310,15 @@ def main():
         var_dict = create_variable_dictionary(df, questions, dataset_name, ext_missing_counts, minmax, meta=meta)
         export_dictionary(var_dict, df, cfg, dataset_name, meta, parquet_path=pq_path)
 
-        # Build variable relationship graph (reuse in-memory var_dict)
+        # Build variable relationship graph (needs the JSON dict, not the DataFrame)
         vardict_path = Path(cfg['output_json'])
         graph_path = vardict_path.with_name(
             vardict_path.stem.replace('_variable_dictionary', '_variable_graph') + '.json'
         )
-        build_variable_graph(questions, var_dict, graph_path)
+        if vardict_path.exists():
+            with open(vardict_path, encoding="utf-8") as f:
+                vardict_json = json.load(f)
+            build_variable_graph(questions, vardict_json, graph_path)
 
         if args.xlsx:
             from generators.xlsx_exporter import XLSXExporter

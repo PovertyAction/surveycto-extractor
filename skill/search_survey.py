@@ -54,6 +54,10 @@ import re
 import sys
 from pathlib import Path
 
+# Guard against Windows cp1252 encoding errors on non-ASCII output
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
 # ---------------------------------------------------------------------------
 # Lightweight TF-IDF index (shared with mcp/survey_server.py)
 # ---------------------------------------------------------------------------
@@ -572,6 +576,13 @@ def search_text(text: str, context: int = 0, survey_filter: str = None) -> bool:
 
         for var_name, _score in hits:
             q = q_index.get(var_name)
+            # If hit is a Stata-renamed variable, resolve to form name
+            if q is None and var_name in vardict:
+                form_name = vardict[var_name].get("survey", {}).get(
+                    "original_variable_name", ""
+                )
+                if form_name:
+                    q = q_index.get(form_name)
             if q is None:
                 continue
             try:

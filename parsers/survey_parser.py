@@ -127,7 +127,8 @@ class SurveyParser:
             DataFrame with columns [list_name, value, label]
         """
         try:
-            csv_df = pd.read_csv(self.external_choices_csv, dtype=str)
+            csv_df = pd.read_csv(self.external_choices_csv, dtype=str,
+                                    encoding="utf-8-sig")
 
             # Find all value/key columns
             value_cols = [c for c in csv_df.columns if c.endswith('_value') or c.endswith('_key') or c.endswith('_id')]
@@ -135,8 +136,14 @@ class SurveyParser:
             all_choices = []
 
             for value_col in value_cols:
-                # Determine list name from column (remove suffix)
-                list_name = value_col.replace('_value', '').replace('_key', '').replace('_id', '')
+                # Determine list name from column (remove the MATCHED suffix only;
+                # order matters — strip the longest matching suffix first to avoid
+                # 'household_id_value' → 'household' instead of 'household_id')
+                list_name = value_col
+                for suffix in ('_value', '_key', '_id'):
+                    if value_col.endswith(suffix):
+                        list_name = value_col[:-len(suffix)]
+                        break
 
                 # Find corresponding label column
                 label_col = f"{list_name}_label"

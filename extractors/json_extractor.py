@@ -51,9 +51,13 @@ class JSONExtractor:
             choices = []
 
             for _, row in list_choices.iterrows():
+                # row.get() on pandas Series returns NaN (not the default)
+                # when the column exists but the cell is empty — coerce to str
+                raw_val = row.get('value', '')
+                raw_lbl = row.get('label', '')
                 choice = {
-                    'value': row.get('value', ''),
-                    'label': row.get('label', '')
+                    'value': '' if pd.isna(raw_val) else str(raw_val),
+                    'label': '' if pd.isna(raw_lbl) else str(raw_lbl),
                 }
                 choices.append(choice)
 
@@ -202,7 +206,12 @@ class JSONExtractor:
 
             elif row_type == "end group":
                 group_name = row.get("name", "")
-                self.group_stack.pop(group_name)
+                # Some instruments have empty 'name' on end group rows;
+                # pop without a name to avoid mismatched group_path
+                if not group_name or (isinstance(group_name, float) and pd.isna(group_name)):
+                    self.group_stack.pop("")
+                else:
+                    self.group_stack.pop(group_name)
                 continue
 
             elif row_type == "begin repeat":

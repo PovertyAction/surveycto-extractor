@@ -56,8 +56,9 @@ class SectionSplitter:
                     max_level = min(max_level, self.max_depth)
 
                 for i in range(1, max_level + 1):
-                    # Build section key from path prefix
-                    section_key = "_".join(group_path[:i])
+                    # Build section key from path prefix — use / separator
+                    # to avoid collisions when group names contain underscores
+                    section_key = "/".join(group_path[:i])
                     sections[section_key]["questions"].append(question)
                     sections[section_key]["depth"] = i
 
@@ -78,8 +79,8 @@ class SectionSplitter:
         output_paths = {}
 
         for section_name, (section_questions, _) in sections.items():
-            # Create safe filename (already using underscores from split_by_all_levels)
-            safe_name = section_name.replace(" ", "_").replace("/", "_")
+            # Create safe filename: section keys use / as separator
+            safe_name = section_name.replace("/", "_").replace(" ", "_")
             filename = f"{prefix}_{safe_name}.json"
             output_path = self.output_dir / filename
 
@@ -105,17 +106,24 @@ class SectionSplitter:
             print(f"\n=== Phase 3: Section Splitting (Max Depth: {self.max_depth}) ===")
         else:
             print(f"\n=== Phase 3: Section Splitting (All Nesting Levels) ===")
-        output_paths = self.save_sections(prefix)
+
+        # Compute sections once, reuse for save + summary
+        sections = self.split_by_all_levels()
+        output_paths = {}
+
+        for section_name, (section_questions, _) in sections.items():
+            safe_name = section_name.replace("/", "_").replace(" ", "_")
+            filename = f"{prefix}_{safe_name}.json"
+            output_path = self.output_dir / filename
+            with open(output_path, 'w', encoding='utf-8') as f:
+                json.dump(section_questions, f, indent=2, ensure_ascii=False)
+            output_paths[section_name] = output_path
 
         # Print summary grouped by depth
-        sections = self.split_by_all_levels()
-
-        # Group by nesting depth for better readability
         by_depth = defaultdict(list)
         for section_name, (questions, depth) in sections.items():
             by_depth[depth].append((section_name, questions))
 
-        # Print sections organized by depth
         for depth in sorted(by_depth.keys()):
             if depth == 0:
                 print("  Root level:")
@@ -123,7 +131,7 @@ class SectionSplitter:
                 print(f"  Nesting level {depth}:")
 
             for section_name, questions in sorted(by_depth[depth]):
-                safe_name = section_name.replace(" ", "_").replace("/", "_")
+                safe_name = section_name.replace("/", "_").replace(" ", "_")
                 filename = f"{prefix}_{safe_name}.json"
                 indent = "    " if depth > 0 else "  "
                 print(f"{indent}[OK] {filename}: {len(questions)} questions")

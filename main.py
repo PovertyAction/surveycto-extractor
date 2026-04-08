@@ -16,6 +16,7 @@ from extractors.json_extractor import JSONExtractor
 from generators.diagram_generator import DiagramGenerator
 from generators.section_splitter import SectionSplitter
 from generators.seed_generator import generate_seed_dofile
+from transformers.logic_converter import clear_strip_log
 
 
 class SurveyDocumentationSystem:
@@ -197,8 +198,13 @@ def main():
     phases = set(args.phases)
     run_all = "all" in phases
 
+    errors = []
     for survey_key in surveys:
         try:
+            # Clear logic converter strip log between surveys to avoid
+            # stale entries bleeding across instruments
+            clear_strip_log()
+
             # Seed-only: no need to load the survey XLSX
             if not run_all and phases == {"seed"}:
                 run_seed_phase(survey_key)
@@ -218,7 +224,11 @@ def main():
             print(f"\nERROR processing {survey_key} survey: {str(e)}")
             import traceback
             traceback.print_exc()
+            errors.append(survey_key)
             continue
+
+    if errors:
+        sys.exit(1)
 
 
 if __name__ == "__main__":

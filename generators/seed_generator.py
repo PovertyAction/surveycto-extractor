@@ -138,8 +138,10 @@ def _max_iterations_from_data(data_path: "Path") -> Dict[str, int]:
     for col in col_set:
         m = re.match(r'^(.+?)_(\d+)$', col)
         # Also handle digit appended directly without underscore (e.g. "f_hr_fn_r1")
+        # but require the digit suffix to be short (1-2 digits) to avoid false
+        # positives like "income2023" or "year2024"
         if not m:
-            m = re.match(r'^(.+?)(\d+)$', col)
+            m = re.match(r'^(.+?[a-z_])(\d{1,2})$', col)
         if not m:
             continue
         base, num = m.group(1), int(m.group(2))
@@ -337,7 +339,46 @@ def generate_seed_dofile(
             lines.append("")
             continue
 
-        # ── select_multiple → binary columns, one per choice
+        # ── Variables inside a repeat group → emit N iterations
+        # Must check BEFORE select_multiple so the combined case
+        # (select_multiple inside a repeat) gets iteration suffixes.
+        repeat_parent = _find_repeat_parent(group_path, repeat_counts)
+
+        if repeat_parent:
+            n = repeat_counts[repeat_parent]
+
+            # select_multiple inside repeat → double suffix: var_choiceval_iter
+            if q_type == "select_multiple" and choices:
+                for ci, choice in enumerate(choices):
+                    choice_val = str(choice.get("value", ci + 1)).strip()
+                    choice_label = str(choice.get("label", "")).strip()
+                    stata_suffix = choice_val.replace('-', '_')
+                    base_col = f"{var_name}_{stata_suffix}"
+                    val = "1" if ci == 0 else "0"
+                    for i in range(1, n + 1):
+                        iter_var = f"{base_col}_{i}"
+                        iter_label = f"{label}: {choice_label} (iteration {i})" if choice_label else f"{label}: {choice_val} (iteration {i})"
+                        gen_line = _gen_line(iter_var, "byte", val, iter_label)
+                        lines.append(gen_line)
+                lines.append("")
+                continue
+
+            stata_type = _stata_type(q_type, constraint)
+            base_value = _stata_value(q_type, choices if choices else None)
+            base_value = _format_value(stata_type, base_value)
+
+            for i in range(1, n + 1):
+                iter_var = f"{var_name}_{i}"
+                iter_label = f"{label} (iteration {i})"
+                gen_line = _gen_line(iter_var, stata_type, base_value, iter_label)
+                lines.append(gen_line)
+                fmt = _format_value_with_format(iter_var, q_type)
+                if fmt:
+                    lines.append(fmt)
+            lines.append("")
+            continue
+
+        # ── select_multiple (not in repeat) → binary columns, one per choice
         if q_type == "select_multiple":
             for ci, choice in enumerate(choices):
                 choice_val = str(choice.get("value", ci + 1)).strip()
@@ -351,27 +392,6 @@ def generate_seed_dofile(
                 val = "1" if ci == 0 else "0"
                 gen_line = _gen_line(col_var, "byte", val, col_label)
                 lines.append(gen_line)
-            lines.append("")
-            continue
-
-        # ── Variables inside a repeat group → emit N iterations
-        # Determine if this variable is inside a repeat group
-        repeat_parent = _find_repeat_parent(group_path, repeat_counts)
-
-        if repeat_parent:
-            n = repeat_counts[repeat_parent]
-            stata_type = _stata_type(q_type, constraint)
-            base_value = _stata_value(q_type, choices if choices else None)
-            base_value = _format_value(stata_type, base_value)
-
-            for i in range(1, n + 1):
-                iter_var = f"{var_name}_{i}"
-                iter_label = f"{label} (iteration {i})"
-                gen_line = _gen_line(iter_var, stata_type, base_value, iter_label)
-                lines.append(gen_line)
-                fmt = _format_value_with_format(iter_var, q_type)
-                if fmt:
-                    lines.append(fmt)
             lines.append("")
             continue
 
