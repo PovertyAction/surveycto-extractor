@@ -299,7 +299,7 @@ class SurveyStore:
         self._count_vars: dict[str, dict[str, str]] = {}
         self._q_order: dict[str, dict[str, int]] = {}
         self._tfidf: dict[str, _TfidfIndex] = {}
-        self._graphs: dict[str, object] = {}  # networkx DiGraph per survey
+        self._graphs: dict[str, object] = {}  # networkx MultiDiGraph per survey
 
         self._load_all()
 
@@ -452,10 +452,13 @@ class SurveyStore:
                         file=sys.stderr,
                     )
                 except (json.JSONDecodeError, OSError) as exc:
+                    self._graphs.pop(label, None)
                     print(
                         f"[survey-expert] WARNING: Failed to load graph {graph_path}: {exc}",
                         file=sys.stderr,
                     )
+            else:
+                self._graphs.pop(label, None)
 
     def _build_indexes(self, label: str):
         vardict = self._vardicts.get(label, {})
@@ -514,10 +517,13 @@ class SurveyStore:
             q_path = Path(cfg.get("questions_json", ""))
             v_path = Path(cfg.get("output_json", ""))
             # Also check graph file (convention-based path)
-            graph_path = v_path.with_name(
-                v_path.stem.replace("_variable_dictionary", "_variable_graph") + ".json"
-            ) if str(v_path) else Path("")
-            for p in (q_path, v_path, graph_path):
+            paths = [q_path, v_path]
+            if cfg.get("output_json"):
+                gp = v_path.with_name(
+                    v_path.stem.replace("_variable_dictionary", "_variable_graph") + ".json"
+                )
+                paths.append(gp)
+            for p in paths:
                 key = str(p)
                 if self._mtime(p) != self._mtimes.get(key, 0.0):
                     print(f"[survey-expert] Reloading {label}...", file=sys.stderr)
@@ -1303,16 +1309,11 @@ class SurveyStore:
             for u, _, d in G.in_edges(form_name, data=True):
                 first_hop_in.setdefault(u, set()).add(d.get("type", ""))
 
+            # Single BFS to get all shortest paths at once
             traversal = G.to_undirected(as_view=True)
-            for node in neighbor_nodes:
-                if node == form_name:
-                    continue
-                # Find the first hop on shortest path to this node
-                try:
-                    path = nx.shortest_path(traversal, form_name, node)
-                except (nx.NetworkXNoPath, nx.NodeNotFound):
-                    continue
-                if len(path) < 2:
+            all_paths = nx.single_source_shortest_path(traversal, form_name, cutoff=depth)
+            for node, path in all_paths.items():
+                if node == form_name or len(path) < 2:
                     continue
                 first_step = path[1]
                 for etype in first_hop_out.get(first_step, set()):

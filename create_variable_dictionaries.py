@@ -1222,11 +1222,12 @@ def build_variable_graph(questions: List[Dict], vardict_json: dict,
     for members in repeat_members.values():
         if len(members) < 2:
             continue
-        # Connect first member to all others (star topology, avoids O(n^2) edges)
-        hub = members[0]
-        for member in members[1:]:
-            G.add_edge(hub, member, type="repeat_sibling")
-            G.add_edge(member, hub, type="repeat_sibling")
+        # Full mesh — repeat groups are small, and star topology would hide
+        # siblings from non-hub nodes at depth=1
+        for i, left in enumerate(members):
+            for right in members[i + 1:]:
+                G.add_edge(left, right, type="repeat_sibling")
+                G.add_edge(right, left, type="repeat_sibling")
 
     # -- Shared choice list edges (bidirectional) --
     choice_members: Dict[str, list] = {}
@@ -1307,15 +1308,12 @@ def main():
         var_dict = create_variable_dictionary(df, questions, dataset_name, ext_missing_counts, minmax, meta=meta)
         export_dictionary(var_dict, df, cfg, dataset_name, meta, parquet_path=pq_path)
 
-        # Build variable relationship graph
+        # Build variable relationship graph (reuse in-memory var_dict)
         vardict_path = Path(cfg['output_json'])
         graph_path = vardict_path.with_name(
             vardict_path.stem.replace('_variable_dictionary', '_variable_graph') + '.json'
         )
-        if vardict_path.exists():
-            with open(vardict_path, encoding="utf-8") as f:
-                vardict_json = json.load(f)
-            build_variable_graph(questions, vardict_json, graph_path)
+        build_variable_graph(questions, var_dict, graph_path)
 
         if args.xlsx:
             from generators.xlsx_exporter import XLSXExporter

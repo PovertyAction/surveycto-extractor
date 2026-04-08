@@ -826,15 +826,11 @@ def variable_neighborhood(name: str, depth: int = 1, survey_filter: str = None) 
             for u, _, d in G.in_edges(form_name, data=True):
                 first_hop_in.setdefault(u, set()).add(d.get("type", ""))
 
+            # Single BFS to get all shortest paths at once
             traversal = G.to_undirected(as_view=True)
-            for node in neighbor_nodes:
-                if node == form_name:
-                    continue
-                try:
-                    path = nx.shortest_path(traversal, form_name, node)
-                except (nx.NetworkXNoPath, nx.NodeNotFound):
-                    continue
-                if len(path) < 2:
+            all_paths = nx.single_source_shortest_path(traversal, form_name, cutoff=depth)
+            for node, path in all_paths.items():
+                if node == form_name or len(path) < 2:
                     continue
                 first_step = path[1]
                 for etype in first_hop_out.get(first_step, set()):
