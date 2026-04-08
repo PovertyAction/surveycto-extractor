@@ -32,11 +32,19 @@ import math
 import os
 import re
 import sys
+import time
 import importlib.util
 from pathlib import Path
 from typing import Optional
 
 from mcp.server.fastmcp import FastMCP
+
+try:
+    import networkx as nx
+    _NX_AVAILABLE = True
+except ImportError:
+    nx = None
+    _NX_AVAILABLE = False
 
 # ---------------------------------------------------------------------------
 # Config discovery (never raises — returns None on failure)
@@ -277,9 +285,12 @@ class _TfidfIndex:
 class SurveyStore:
     """In-memory store for survey metadata with auto-reload on file changes."""
 
+    _RELOAD_DEBOUNCE_SECS = 2.0  # min seconds between file-change checks
+
     def __init__(self, datasets_config: dict | None = None):
         self._config = datasets_config or {}
         self._mtimes: dict[str, float] = {}
+        self._last_reload_check: float = 0.0
 
         # Per-survey loaded data
         self._vardicts: dict[str, dict] = {}
@@ -292,6 +303,9 @@ class SurveyStore:
         self._count_vars: dict[str, dict[str, str]] = {}
         self._q_order: dict[str, dict[str, int]] = {}
         self._tfidf: dict[str, _TfidfIndex] = {}
+        self._choice_list_index: dict[str, dict[str, list[str]]] = {}
+        self._graphs: dict[str, object] = {}  # networkx MultiDiGraph per survey
+        self._repeat_trees: dict[str, dict] = {}  # repeat group topology per survey
 
         self._load_all()
 
@@ -397,9 +411,11 @@ class SurveyStore:
                 )
                 self._vardicts[label] = {}
                 self._dataset_meta[label] = {}
+                self._graphs.pop(label, None)
         else:
             self._vardicts[label] = {}
             self._dataset_meta[label] = {}
+            self._graphs.pop(label, None)
 
         # Questions (supplement)
         if q_path.exists():
@@ -426,6 +442,38 @@ class SurveyStore:
 
         # Build indexes
         self._build_indexes(label)
+
+        # Load variable graph (convention: *_variable_graph.json next to vardict)
+        if _NX_AVAILABLE:
+            graph_path = v_path.with_name(
+                v_path.stem.replace("_variable_dictionary", "_variable_graph") + ".json"
+            )
+            if graph_path.exists():
+                try:
+                    with open(graph_path, encoding="utf-8") as f:
+                        raw_graph = json.load(f)
+                    self._repeat_trees[label] = raw_graph.pop("repeat_groups", {})
+                    self._graphs[label] = nx.node_link_graph(raw_graph)
+                    self._mtimes[str(graph_path)] = self._mtime(graph_path)
+                    rpt_msg = ""
+                    if self._repeat_trees[label]:
+                        rpt_msg = f", {len(self._repeat_trees[label])} repeat group(s)"
+                    print(
+                        f"[survey-expert] Graph loaded for {label}: "
+                        f"{self._graphs[label].number_of_nodes()} nodes, "
+                        f"{self._graphs[label].number_of_edges()} edges{rpt_msg}",
+                        file=sys.stderr,
+                    )
+                except (json.JSONDecodeError, OSError) as exc:
+                    self._graphs.pop(label, None)
+                    self._repeat_trees.pop(label, None)
+                    print(
+                        f"[survey-expert] WARNING: Failed to load graph {graph_path}: {exc}",
+                        file=sys.stderr,
+                    )
+            else:
+                self._graphs.pop(label, None)
+                self._repeat_trees.pop(label, None)
 
     def _build_indexes(self, label: str):
         vardict = self._vardicts.get(label, {})
@@ -461,6 +509,16 @@ class SurveyStore:
                 q_order[vn] = i
         self._q_order[label] = q_order
 
+        # Choice list -> variables index (for fast get_choice_list)
+        cl_index: dict[str, list[str]] = {}
+        for var_name, entry in vardict.items():
+            if not isinstance(entry, dict):
+                continue
+            cl = entry.get("survey", {}).get("choice_list")
+            if cl:
+                cl_index.setdefault(cl, []).append(var_name)
+        self._choice_list_index[label] = cl_index
+
         # TF-IDF search index: one document per variable
         # Document text = variable name (underscores as spaces) + question text
         #                 + original form name (underscores as spaces)
@@ -480,10 +538,21 @@ class SurveyStore:
         self._tfidf[label] = _TfidfIndex(tfidf_docs)
 
     def _check_reload(self):
+        now = time.monotonic()
+        if now - self._last_reload_check < self._RELOAD_DEBOUNCE_SECS:
+            return
+        self._last_reload_check = now
         for label, cfg in self._config.items():
             q_path = Path(cfg.get("questions_json", ""))
             v_path = Path(cfg.get("output_json", ""))
-            for p in (q_path, v_path):
+            # Also check graph file (convention-based path)
+            paths = [q_path, v_path]
+            if cfg.get("output_json"):
+                gp = v_path.with_name(
+                    v_path.stem.replace("_variable_dictionary", "_variable_graph") + ".json"
+                )
+                paths.append(gp)
+            for p in paths:
                 key = str(p)
                 if self._mtime(p) != self._mtimes.get(key, 0.0):
                     print(f"[survey-expert] Reloading {label}...", file=sys.stderr)
@@ -756,8 +825,9 @@ class SurveyStore:
                 survey_data = entry.get("survey", {})
                 form_name = survey_data.get("original_variable_name", name)
                 stata_type = entry.get("stata", {}).get("type", "?")
-                non_null = entry.get("non_null_count", "?")
-                form_type = survey_data.get("type", "?")
+                non_null = entry.get("non_null_count")
+                non_null = non_null if non_null is not None else "?"
+                form_type = str(survey_data.get("type") or "?")
                 qt = (survey_data.get("question_text") or "").strip()[:80]
 
                 skip = (
@@ -844,8 +914,9 @@ class SurveyStore:
         for score, label, var_name in scored:
             entry = self._vardicts.get(label, {}).get(var_name, {})
             survey_data = entry.get("survey", {})
-            form_type = survey_data.get("type", "?")
-            non_null = entry.get("non_null_count", "?")
+            form_type = str(survey_data.get("type") or "?")
+            non_null = entry.get("non_null_count")
+            non_null = non_null if non_null is not None else "?"
             qt_display = (survey_data.get("question_text") or "").strip()[:70]
             skip = survey_data.get("stata_skip_logic") or ""
             skip_brief = _trunc(skip, 50) if skip else ""
@@ -877,19 +948,18 @@ class SurveyStore:
         results = []
 
         for label in labels:
-            using_vars = []
+            # Use pre-built choice list index instead of scanning all variables
+            using_vars = self._choice_list_index.get(label, {}).get(list_name, [])
             choices = None
 
-            for var_name, entry in self._vardicts.get(label, {}).items():
-                if not isinstance(entry, dict):
-                    continue
-                survey_data = entry.get("survey", {})
-                if survey_data.get("choice_list") == list_name:
-                    using_vars.append(var_name)
-                    if choices is None:
-                        c = survey_data.get("choices")
-                        if c and isinstance(c, list):
-                            choices = c
+            for var_name in using_vars:
+                if choices is not None:
+                    break
+                entry = self._vardicts.get(label, {}).get(var_name, {})
+                if isinstance(entry, dict):
+                    c = entry.get("survey", {}).get("choices")
+                    if c and isinstance(c, list):
+                        choices = c
 
             # Supplement from questions.json for full choice list
             if choices is None:
@@ -1148,6 +1218,241 @@ class SurveyStore:
         candidates.sort(key=lambda x: abs(len(x) - len(name)))
         return candidates[:max_suggestions]
 
+    # -- Variable neighborhood graph -------------------------------------
+
+    def _resolve_form_name(self, stata_name: str,
+                           survey: str | None = None) -> tuple[str | None, str | None]:
+        """Resolve a Stata variable name to its form-level name and survey label."""
+        labels = self._filtered_labels(survey)
+        for label in labels:
+            entry = self._vardicts.get(label, {}).get(stata_name)
+            if isinstance(entry, dict):
+                form_name = entry.get("survey", {}).get("original_variable_name") or stata_name
+                return form_name, label
+        return None, None
+
+    def get_neighborhood(self, name: str, depth: int = 1,
+                         survey: str | None = None) -> str:
+        """Return the variable neighborhood from the relationship graph."""
+        self._check_reload()
+        if not _NX_AVAILABLE:
+            return ("Variable graph requires networkx. "
+                    "Install: pip install networkx")
+        if self.is_empty:
+            return self._empty_message()
+
+        labels = self._filtered_labels(survey)
+        if survey and not labels:
+            return self._no_survey_match_msg(survey)
+
+        # Check if any graphs are loaded
+        available = [l for l in labels if l in self._graphs]
+        if not available:
+            return ("No variable graph loaded. Generate it by running:\n"
+                    "  python create_variable_dictionaries.py --survey <KEY>")
+
+        # Resolve to form-level name
+        form_name, matched_label = self._resolve_form_name(name, survey)
+        if form_name is None:
+            # Try the name directly as a form-level node
+            for label in available:
+                if name in self._graphs[label]:
+                    form_name = name
+                    matched_label = label
+                    break
+        if form_name is None:
+            suggestions = self._suggest_similar(name, survey)
+            msg = f"Variable '{name}' not found."
+            if suggestions:
+                msg += f"\n  Did you mean: {', '.join(suggestions[:5])}"
+            return msg
+
+        G = self._graphs.get(matched_label)
+        if G is None or form_name not in G:
+            return f"Variable '{form_name}' not in graph for {matched_label}."
+
+        # Get neighborhood: all nodes within `depth` hops (undirected view)
+        undirected = G.to_undirected(as_view=True)
+        neighborhood = nx.single_source_shortest_path_length(undirected, form_name, cutoff=depth)
+        neighbor_nodes = set(neighborhood.keys())
+
+        # Get the target node attributes
+        target_attrs = G.nodes[form_name]
+
+        # Collect neighbors grouped by relationship type.
+        # For depth=1, group by direct edge type/direction.
+        # For depth>1, group by the first-hop edge that leads to each neighbor.
+        edge_groups: dict[str, set[str]] = {
+            "calculates_from": set(),
+            "calculated_by": set(),
+            "gated_by": set(),
+            "gates": set(),
+            "group_gated_by": set(),
+            "group_gates": set(),
+            "constrained_by": set(),
+            "constrains": set(),
+            "repeat_sibling": set(),
+        }
+
+        def _classify_out(etype: str, target: str):
+            if etype == "calculates_from":
+                edge_groups["calculated_by"].add(target)
+            elif etype == "gated_by":
+                edge_groups["gates"].add(target)
+            elif etype == "group_gated_by":
+                edge_groups["group_gates"].add(target)
+            elif etype == "constrained_by":
+                edge_groups["constrains"].add(target)
+            elif etype == "repeat_sibling":
+                edge_groups["repeat_sibling"].add(target)
+
+        def _classify_in(etype: str, target: str):
+            if etype == "calculates_from":
+                edge_groups["calculates_from"].add(target)
+            elif etype == "gated_by":
+                edge_groups["gated_by"].add(target)
+            elif etype == "group_gated_by":
+                edge_groups["group_gated_by"].add(target)
+            elif etype == "constrained_by":
+                edge_groups["constrained_by"].add(target)
+            elif etype == "repeat_sibling":
+                edge_groups["repeat_sibling"].add(target)
+
+        if depth <= 1:
+            # Direct edges only — fast path
+            for _, v, d in G.out_edges(form_name, data=True):
+                if v in neighbor_nodes:
+                    _classify_out(d.get("type", ""), v)
+            for u, _, d in G.in_edges(form_name, data=True):
+                if u in neighbor_nodes:
+                    _classify_in(d.get("type", ""), u)
+        else:
+            # Multi-hop: classify each neighbor by the first-hop edge
+            # that leads to it from form_name
+            first_hop_out = {}  # neighbor -> set of edge types via out
+            for _, v, d in G.out_edges(form_name, data=True):
+                first_hop_out.setdefault(v, set()).add(d.get("type", ""))
+            first_hop_in = {}   # neighbor -> set of edge types via in
+            for u, _, d in G.in_edges(form_name, data=True):
+                first_hop_in.setdefault(u, set()).add(d.get("type", ""))
+
+            # Single BFS to get all shortest paths at once (reuse undirected view)
+            all_paths = nx.single_source_shortest_path(undirected, form_name, cutoff=depth)
+            for node, path in all_paths.items():
+                if node == form_name or len(path) < 2:
+                    continue
+                first_step = path[1]
+                for etype in first_hop_out.get(first_step, set()):
+                    _classify_out(etype, node)
+                for etype in first_hop_in.get(first_step, set()):
+                    _classify_in(etype, node)
+
+        # Format output
+        lines = [
+            f"[{matched_label}] Variable neighborhood: {form_name} (depth={depth})",
+            f"  type: {target_attrs.get('type', '?')}",
+            f"  group_path: {target_attrs.get('group_path', '')}",
+            f"  repeat_depth: {target_attrs.get('repeat_depth', 0)}",
+        ]
+        rg = target_attrs.get("repeat_group")
+        if rg:
+            lines.append(f"  repeat_group: {rg}")
+            # Append repeat tree context if available
+            tree = self._repeat_trees.get(matched_label, {})
+            rg_info = tree.get(rg)
+            if rg_info:
+                lines.append(f"  repeat_tree: depth={rg_info['depth']}, "
+                             f"count_var={rg_info['count_var']}, "
+                             f"count_expr={rg_info.get('count_expr', '?')}, "
+                             f"max_iter={rg_info['max_iterations']}, "
+                             f"suffix={rg_info['stata_suffix_pattern']}")
+                if rg_info.get("parent"):
+                    lines.append(f"  repeat_parent: {rg_info['parent']}")
+                lines.append(f"  join_key: {rg_info['join_key_note']}")
+        sv = target_attrs.get("stata_vars", [])
+        if sv:
+            lines.append(f"  stata_vars: {', '.join(sv)}")
+
+        # Relationship sections with risk semantics
+        sections = [
+            ("Calculates from (inputs -- sentinel contamination risk)",
+             "calculates_from"),
+            ("Calculated by (downstream -- changing this changes them)",
+             "calculated_by"),
+            ("Gated by (missing-by-logic if gate is false)",
+             "gated_by"),
+            ("Gates (changing this can make these disappear)",
+             "gates"),
+            ("Group-gated by (structural gate -- affects whole group)",
+             "group_gated_by"),
+            ("Group-gates (structural -- these groups depend on this)",
+             "group_gates"),
+            ("Constrained by (validation -- defines valid ranges)",
+             "constrained_by"),
+            ("Constrains (validation -- these depend on valid values here)",
+             "constrains"),
+            ("Repeat siblings (same repeat iteration -- handle together)",
+             "repeat_sibling"),
+        ]
+
+        for header, key in sections:
+            members = edge_groups.get(key, [])
+            if not members:
+                continue
+            lines.append(f"\n  {header}:")
+            for m in sorted(members):
+                m_attrs = G.nodes.get(m, {})
+                m_type = m_attrs.get("type", "?")
+                m_depth = m_attrs.get("repeat_depth", 0)
+                m_svars = m_attrs.get("stata_vars", [])
+                sv_str = f" -> {', '.join(m_svars)}" if m_svars else ""
+                depth_str = f" [repeat_depth={m_depth}]" if m_depth > 0 else ""
+                lines.append(f"    {m} ({m_type}){depth_str}{sv_str}")
+
+        if all(not edge_groups.get(k) for _, k in sections):
+            lines.append("\n  (no relationships found)")
+
+        return "\n".join(lines)
+
+    def get_repeat_structure(self, survey: str | None = None) -> str:
+        """Return the repeat group topology tree for one or more surveys."""
+        self._check_reload()
+        if self.is_empty:
+            return self._empty_message()
+
+        labels = self._filtered_labels(survey)
+        if survey and not labels:
+            return self._no_survey_match_msg(survey)
+
+        results = []
+        for label in labels:
+            tree = self._repeat_trees.get(label, {})
+            if not tree:
+                results.append(f"[{label}] No repeat groups (or graph not generated).")
+                continue
+
+            lines = [f"[{label}] Repeat group topology ({len(tree)} group(s)):"]
+
+            # Sort by depth then name for consistent display
+            for rg_name, info in sorted(tree.items(),
+                                        key=lambda x: (x[1]["depth"], x[0])):
+                indent = "  " * info["depth"]
+                lines.append(f"\n{indent}{rg_name}:")
+                lines.append(f"{indent}  parent: {info['parent'] or '(root)'}")
+                lines.append(f"{indent}  depth: {info['depth']}")
+                lines.append(f"{indent}  count_var: {info['count_var']}")
+                lines.append(f"{indent}  count_expr: {info.get('count_expr', '?')}")
+                lines.append(f"{indent}  max_iterations: {info['max_iterations']}")
+                lines.append(f"{indent}  n_variables: {info['n_variables']}")
+                if info.get("relevance"):
+                    lines.append(f"{indent}  relevance: {info['relevance']}")
+                lines.append(f"{indent}  stata_suffix: {info['stata_suffix_pattern']}")
+                lines.append(f"{indent}  join_key: {info['join_key_note']}")
+
+            results.append("\n".join(lines))
+
+        return "\n\n".join(results)
+
 
 # ---------------------------------------------------------------------------
 # MCP Server
@@ -1163,6 +1468,12 @@ server = FastMCP(
         "Use get_choice_list to see all choices and variables sharing a choice list. "
         "Use get_gate_chain to see the full composed skip logic tree for a variable "
         "(critical for verifying zeroing/missing logic in cleaning code). "
+        "Use get_variable_neighborhood to see all variables connected to a target "
+        "(calculation inputs, gates, repeat siblings) with risk semantics. "
+        "IMPORTANT: before writing a cleaning module, call get_variable_neighborhood on "
+        "key variables to understand sentinel contamination paths and gating dependencies. "
+        "Use get_repeat_structure to see the repeat group hierarchy (nesting, count "
+        "variables, max iterations, join keys) before writing reshape or merge code. "
         "Use get_survey_info for a dataset overview before diving in. "
         "All tools accept an optional 'survey' parameter to filter by survey key "
         "(partial match, e.g., survey='ltfu' matches 'ltfu_hh' and 'ltfu_adult')."
@@ -1309,6 +1620,56 @@ def get_survey_info() -> str:
     Use this to understand the scope of the dataset before diving in.
     """
     return _get_store().get_info()
+
+
+@server.tool()
+def get_variable_neighborhood(name: str, depth: int = 1,
+                              survey: str = "") -> str:
+    """Show the relationship neighborhood of a variable from the dependency graph.
+
+    Returns all variables connected to the target within `depth` hops,
+    grouped by relationship type with risk semantics:
+    - Calculates from: inputs whose sentinel contamination propagates here
+    - Calculated by: downstream variables that change if this one changes
+    - Gated by: gate variables that control whether this one has data
+    - Gates: variables that disappear if this one is recoded
+    - Constrained by: variables that define valid ranges
+    - Repeat siblings: variables in the same repeat iteration
+
+    For variables inside repeat groups, includes repeat tree context:
+    parent group, count variable, count expression, max iterations,
+    Stata suffix pattern, and join key note.
+
+    Accepts a Stata column name (e.g., crpsale_qty_1_2) -- automatically
+    resolves to the form-level variable (crpsale_qty).
+
+    Requires the variable graph to be generated first:
+      python create_variable_dictionaries.py --survey <KEY>
+
+    Use the survey parameter to filter to a specific survey (partial match).
+    """
+    return _get_store().get_neighborhood(
+        name, depth=depth, survey=survey or None
+    )
+
+
+@server.tool()
+def get_repeat_structure(survey: str = "") -> str:
+    """Show the repeat group topology tree for a survey.
+
+    Returns the hierarchy of repeat groups with:
+    - Parent-child nesting relationships
+    - Count variable and count expression (what drives the iteration count)
+    - Max iterations observed in the data
+    - Number of form-level variables in each repeat
+    - Stata suffix pattern (how iterations map to column name suffixes)
+    - Join key note (how to merge across repeat levels)
+
+    Essential for writing reshape, merge, or cross-level aggregation code.
+
+    Use the survey parameter to filter to a specific survey (partial match).
+    """
+    return _get_store().get_repeat_structure(survey=survey or None)
 
 
 # ---------------------------------------------------------------------------

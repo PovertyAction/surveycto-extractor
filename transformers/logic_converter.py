@@ -359,6 +359,10 @@ class LogicConverter:
         expr = re.sub(r'\bif\s*\(', 'cond(', expr, flags=re.IGNORECASE)
 
         # --- Step 7: coalesce() ---------------------------------------------
+        # NOTE: [^)]+ patterns here and below don't handle nested parens —
+        # e.g. coalesce(if(x, a, b), c) won't match.  These cases are rare in
+        # SurveyCTO instruments and fall through unchanged.  A full balanced-paren
+        # parser would fix this but is deferred until a real instrument triggers it.
         def _coalesce_sub(m: re.Match) -> str:
             return LogicConverter._translate_coalesce(m, varname)
         expr = re.sub(r'\bcoalesce\s*\(([^)]+)\)', _coalesce_sub, expr, flags=re.IGNORECASE)

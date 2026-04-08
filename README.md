@@ -36,6 +36,7 @@ training dataset.
 | `*_create_seed.do` | `main.py --phases seed` | Stata do-file that builds a 1-row schema dataset — run this before your real data arrives to test your cleaning pipeline |
 | `*_variable_dictionary.json` | `create_variable_dictionaries.py` | Maps every Stata variable to its source question, skip logic, choice list, and sentinel counts — in form order, not dataset column order |
 | `*_variable_dictionary.xlsx` | `create_variable_dictionaries.py --xlsx` | Same dictionary as a spreadsheet for sharing with field teams or PIs |
+| `*_variable_graph.json` | `create_variable_dictionaries.py` | Variable relationship graph — calculation dependencies, gating chains, repeat structure, shared choice domains (requires `networkx`) |
 | `*_data_ord.dta` | `create_variable_dictionaries.py` | Column-reordered dataset following form structure |
 | `*.parquet` | `create_variable_dictionaries.py` | Parquet sidecar written next to the `.dta` — used internally for fast columnar access; also available for downstream analysis |
 | `*_summary_stats.do` | `create_summary_stats_dofile.py` | Stata do-file with `tabstat` calls grouped by skip condition + Excel export |
@@ -159,6 +160,11 @@ Also saves `*_data_ord.dta` — a copy of your dataset with columns reordered to
 form structure rather than submission order. A parquet sidecar is written next to the
 `.dta` for fast columnar access by downstream scripts.
 
+If `networkx` is installed, Phase 4 also generates `*_variable_graph.json` — a
+directed graph of variable relationships (calculation dependencies, relevance gating,
+constraints, repeat siblings, shared choice domains). This powers the
+`--neighborhood` flag in the skill and `get_variable_neighborhood` in the MCP server.
+
 ### Summary stats do-file
 
 ```bash
@@ -184,9 +190,10 @@ from a spreadsheet or description.
 The skill answers questions like:
 - "What is the skip condition for `hh_size`?" (`--var`)
 - "What are the valid choices for `asset_type`?" (`--choice-list`)
-- "Which variables belong to the household roster repeat group?" (`--search`)
+- "Which variables capture crop sales?" (`--search` — TF-IDF ranked, natural language works)
 - "Why is `income_1` missing for some observations?" (`--gate-chain`)
 - "What's the observed range of `hh_age`?" (shown automatically via `data_range`)
+- "What depends on `crpsale_qty`?" (`--neighborhood` — shows calculation deps, gates, repeat siblings)
 
 ### Setup
 
@@ -213,13 +220,14 @@ for sessions with heavy query volume (10–50+ variable lookups per cleaning mod
 | Best for | Occasional lookups | Cleaning sessions (10-50+ lookups) |
 | Batch queries | Not supported | `lookup_variables` tool |
 | Gate chain | `--gate-chain` flag | `get_gate_chain` tool |
+| Neighborhood | `--neighborhood` flag | `get_variable_neighborhood` tool |
 | Data range | Shown in output | Shown in lookup tools |
 | Multi-survey filter | `--survey KEY` flag | `survey` parameter on every tool |
 
 ### Setup
 
 ```bash
-pip install "mcp[cli]"
+pip install "mcp[cli]" networkx
 ```
 
 Add to your project's `.mcp.json`:
