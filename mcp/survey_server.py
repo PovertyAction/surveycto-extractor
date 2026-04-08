@@ -405,9 +405,11 @@ class SurveyStore:
                 )
                 self._vardicts[label] = {}
                 self._dataset_meta[label] = {}
+                self._graphs.pop(label, None)
         else:
             self._vardicts[label] = {}
             self._dataset_meta[label] = {}
+            self._graphs.pop(label, None)
 
         # Questions (supplement)
         if q_path.exists():
@@ -1243,8 +1245,8 @@ class SurveyStore:
         if G is None or form_name not in G:
             return f"Variable '{form_name}' not in graph for {matched_label}."
 
-        # Get neighborhood: all nodes within `depth` hops (undirected)
-        undirected = G.to_undirected()
+        # Get neighborhood: all nodes within `depth` hops (undirected view)
+        undirected = G.to_undirected(as_view=True)
         neighborhood = nx.single_source_shortest_path_length(undirected, form_name, cutoff=depth)
         neighbor_nodes = set(neighborhood.keys())
 
@@ -1290,6 +1292,10 @@ class SurveyStore:
                 edge_groups["group_gated_by"].add(target)
             elif etype == "constrained_by":
                 edge_groups["constrained_by"].add(target)
+            elif etype == "repeat_sibling":
+                edge_groups["repeat_sibling"].add(target)
+            elif etype == "shares_choices":
+                edge_groups["shares_choices"].add(target)
 
         if depth <= 1:
             # Direct edges only — fast path
@@ -1309,9 +1315,8 @@ class SurveyStore:
             for u, _, d in G.in_edges(form_name, data=True):
                 first_hop_in.setdefault(u, set()).add(d.get("type", ""))
 
-            # Single BFS to get all shortest paths at once
-            traversal = G.to_undirected(as_view=True)
-            all_paths = nx.single_source_shortest_path(traversal, form_name, cutoff=depth)
+            # Single BFS to get all shortest paths at once (reuse undirected view)
+            all_paths = nx.single_source_shortest_path(undirected, form_name, cutoff=depth)
             for node, path in all_paths.items():
                 if node == form_name or len(path) < 2:
                     continue

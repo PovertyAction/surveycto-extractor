@@ -772,8 +772,8 @@ def variable_neighborhood(name: str, depth: int = 1, survey_filter: str = None) 
         found = True
         attrs = G.nodes[form_name]
 
-        # Get neighborhood
-        undirected = G.to_undirected()
+        # Get neighborhood (undirected view — reused for depth>1 BFS)
+        undirected = G.to_undirected(as_view=True)
         neighborhood = nx.single_source_shortest_path_length(undirected, form_name, cutoff=depth)
         neighbor_nodes = set(neighborhood.keys())
 
@@ -809,6 +809,10 @@ def variable_neighborhood(name: str, depth: int = 1, survey_filter: str = None) 
                 edge_groups["group_gated_by"].add(target)
             elif etype == "constrained_by":
                 edge_groups["constrained_by"].add(target)
+            elif etype == "repeat_sibling":
+                edge_groups["repeat_sibling"].add(target)
+            elif etype == "shares_choices":
+                edge_groups["shares_choices"].add(target)
 
         if depth <= 1:
             for _, v, d in G.out_edges(form_name, data=True):
@@ -826,9 +830,8 @@ def variable_neighborhood(name: str, depth: int = 1, survey_filter: str = None) 
             for u, _, d in G.in_edges(form_name, data=True):
                 first_hop_in.setdefault(u, set()).add(d.get("type", ""))
 
-            # Single BFS to get all shortest paths at once
-            traversal = G.to_undirected(as_view=True)
-            all_paths = nx.single_source_shortest_path(traversal, form_name, cutoff=depth)
+            # Single BFS to get all shortest paths at once (reuse undirected view)
+            all_paths = nx.single_source_shortest_path(undirected, form_name, cutoff=depth)
             for node, path in all_paths.items():
                 if node == form_name or len(path) < 2:
                     continue
@@ -876,6 +879,9 @@ def variable_neighborhood(name: str, depth: int = 1, survey_filter: str = None) 
                 sv_str = f" -> {', '.join(m_svars)}" if m_svars else ""
                 depth_str = f" [repeat_depth={m_depth}]" if m_depth > 0 else ""
                 print(f"    {m} ({m_type}){depth_str}{sv_str}")
+
+        if all(not edge_groups.get(k) for _, k in sections):
+            print("\n  (no relationships found)")
 
     return found
 

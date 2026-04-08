@@ -1200,6 +1200,8 @@ def build_variable_graph(questions: List[Dict], vardict_json: dict,
 
         # Group relevances: gate var -> group member
         for gr in (q.get("group_relevances") or []):
+            if not isinstance(gr, str):
+                continue
             for ref in _REF_RE.findall(gr):
                 if ref in q_index:
                     G.add_edge(ref, vn, type="group_gated_by")
