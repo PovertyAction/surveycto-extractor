@@ -45,6 +45,13 @@ except ImportError:
     _pq = None
     _PYARROW_AVAILABLE = False
 
+try:
+    import networkx as nx
+    _NETWORKX_AVAILABLE = True
+except ImportError:
+    nx = None
+    _NETWORKX_AVAILABLE = False
+
 # Pull DATASETS from this project's config.py (same directory as this script)
 sys.path.insert(0, str(Path(__file__).parent))
 from config import DATASETS
@@ -1094,6 +1101,168 @@ def validate_select_multiple(dict_path, dataset_name: str):
         return True
 
 
+# ---------------------------------------------------------------------------
+# Variable relationship graph
+# ---------------------------------------------------------------------------
+
+_REF_RE = re.compile(r"[$][{]([^}]+)[}]")
+
+
+def build_variable_graph(questions: List[Dict], vardict_json: dict,
+                         output_path: Path) -> Optional[Path]:
+    """Build a variable relationship graph and write it as JSON.
+
+    Nodes are form-level variables (one per question). Edges encode semantic
+    relationships: calculation dependencies, gating, constraints, repeat
+    siblings, and shared choice lists. Returns the output path, or None if
+    networkx is not available.
+    """
+    if not _NETWORKX_AVAILABLE:
+        print("  [SKIP] networkx not installed -- skipping variable graph")
+        return None
+
+    G = nx.DiGraph()
+    variables = vardict_json.get("variables", {})
+
+    # -- Build reverse map: form variable name -> list of Stata column names --
+    stata_vars_map: Dict[str, list] = {}
+    for stata_name, entry in variables.items():
+        if not isinstance(entry, dict):
+            continue
+        form_name = entry.get("survey", {}).get("original_variable_name") or stata_name
+        stata_vars_map.setdefault(form_name, []).append(stata_name)
+
+    # -- Build question index --
+    q_index = {q["variable_name"]: q for q in questions if "variable_name" in q}
+
+    # -- Helper: compute repeat depth and innermost repeat group from group_path --
+    # Repeat groups are identified by having variables with repeat_iteration in vardict.
+    # Collect known repeat group names.
+    repeat_group_names: set = set()
+    for entry in variables.values():
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("repeat_iteration") is not None:
+            gp = entry.get("survey", {}).get("group_path") or ""
+            parts = [p.strip() for p in gp.replace("/", " ").split() if p.strip()]
+            if parts:
+                repeat_group_names.add(parts[-1])
+        if entry.get("survey", {}).get("type") == "repeat_count":
+            base = entry.get("repeat_metadata", {}).get("repeat_group_base", "")
+            if base:
+                repeat_group_names.add(base)
+
+    def _repeat_info(group_path):
+        """Return (repeat_depth, innermost_repeat_group) from a group_path list."""
+        if not group_path:
+            return 0, None
+        parts = group_path if isinstance(group_path, list) else [
+            p.strip() for p in group_path.replace("/", " ").split() if p.strip()
+        ]
+        depth = sum(1 for p in parts if p in repeat_group_names)
+        innermost = None
+        for p in reversed(parts):
+            if p in repeat_group_names:
+                innermost = p
+                break
+        return depth, innermost
+
+    # -- Add nodes --
+    for q in questions:
+        vn = q.get("variable_name")
+        if not vn:
+            continue
+        gp = q.get("group_path", [])
+        gp_str = "/".join(gp) if isinstance(gp, list) else (gp or "")
+        depth, rg = _repeat_info(gp)
+        G.add_node(vn,
+                    type=q.get("type", ""),
+                    group_path=gp_str,
+                    repeat_depth=depth,
+                    repeat_group=rg,
+                    stata_vars=stata_vars_map.get(vn, [vn]))
+
+    # -- Add directed edges from ${ref} parsing --
+    for q in questions:
+        vn = q.get("variable_name", "")
+        if not vn:
+            continue
+
+        # Calculation: input -> calculate var
+        for ref in _REF_RE.findall(q.get("calculation", "") or ""):
+            if ref in q_index:
+                G.add_edge(ref, vn, type="calculates_from")
+
+        # Relevance: gate var -> gated var
+        for ref in _REF_RE.findall(q.get("relevance", "") or ""):
+            if ref in q_index:
+                G.add_edge(ref, vn, type="gated_by")
+
+        # Group relevances: gate var -> group member
+        for gr in (q.get("group_relevances") or []):
+            for ref in _REF_RE.findall(gr):
+                if ref in q_index:
+                    G.add_edge(ref, vn, type="group_gated_by")
+
+        # Constraint: constraining var -> constrained var
+        for ref in _REF_RE.findall(q.get("constraint", "") or ""):
+            if ref in q_index:
+                G.add_edge(ref, vn, type="constrained_by")
+
+    # -- Repeat sibling edges (bidirectional) --
+    # Group questions by their innermost repeat group
+    repeat_members: Dict[str, list] = {}
+    for q in questions:
+        vn = q.get("variable_name", "")
+        gp = q.get("group_path", [])
+        _, rg = _repeat_info(gp)
+        if rg:
+            repeat_members.setdefault(rg, []).append(vn)
+
+    for members in repeat_members.values():
+        if len(members) < 2:
+            continue
+        # Connect first member to all others (star topology, avoids O(n^2) edges)
+        hub = members[0]
+        for member in members[1:]:
+            if not G.has_edge(hub, member) or G[hub][member].get("type") != "repeat_sibling":
+                G.add_edge(hub, member, type="repeat_sibling")
+                G.add_edge(member, hub, type="repeat_sibling")
+
+    # -- Shared choice list edges (bidirectional) --
+    choice_members: Dict[str, list] = {}
+    for q in questions:
+        cl = q.get("choice_list")
+        vn = q.get("variable_name", "")
+        if cl and vn:
+            choice_members.setdefault(cl, []).append(vn)
+
+    for members in choice_members.values():
+        if len(members) < 2:
+            continue
+        hub = members[0]
+        for member in members[1:]:
+            if not G.has_edge(hub, member) or G[hub][member].get("type") != "shares_choices":
+                G.add_edge(hub, member, type="shares_choices")
+                G.add_edge(member, hub, type="shares_choices")
+
+    # -- Write --
+    data = nx.node_link_data(G)
+    with open(output_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, default=str)
+
+    # Summary
+    edge_types = {}
+    for _, _, d in G.edges(data=True):
+        t = d.get("type", "unknown")
+        edge_types[t] = edge_types.get(t, 0) + 1
+    summary = ", ".join(f"{t}: {c}" for t, c in sorted(edge_types.items()))
+    print(f"  Variable graph: {G.number_of_nodes()} nodes, "
+          f"{G.number_of_edges()} edges ({summary})")
+    print(f"  Written to: {output_path}")
+    return output_path
+
+
 def main():
     parser = argparse.ArgumentParser(
         description='Create variable dictionaries from config.DATASETS'
@@ -1139,6 +1308,16 @@ def main():
         df, questions, cfg, meta, pq_path, ext_missing_counts, minmax = load_data(dataset_name)
         var_dict = create_variable_dictionary(df, questions, dataset_name, ext_missing_counts, minmax, meta=meta)
         export_dictionary(var_dict, df, cfg, dataset_name, meta, parquet_path=pq_path)
+
+        # Build variable relationship graph
+        vardict_path = Path(cfg['output_json'])
+        graph_path = vardict_path.with_name(
+            vardict_path.stem.replace('_variable_dictionary', '_variable_graph') + '.json'
+        )
+        if vardict_path.exists():
+            with open(vardict_path, encoding="utf-8") as f:
+                vardict_json = json.load(f)
+            build_variable_graph(questions, vardict_json, graph_path)
 
         if args.xlsx:
             from generators.xlsx_exporter import XLSXExporter

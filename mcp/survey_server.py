@@ -38,6 +38,13 @@ from typing import Optional
 
 from mcp.server.fastmcp import FastMCP
 
+try:
+    import networkx as nx
+    _NX_AVAILABLE = True
+except ImportError:
+    nx = None
+    _NX_AVAILABLE = False
+
 # ---------------------------------------------------------------------------
 # Config discovery (never raises — returns None on failure)
 # ---------------------------------------------------------------------------
@@ -292,6 +299,7 @@ class SurveyStore:
         self._count_vars: dict[str, dict[str, str]] = {}
         self._q_order: dict[str, dict[str, int]] = {}
         self._tfidf: dict[str, _TfidfIndex] = {}
+        self._graphs: dict[str, object] = {}  # networkx DiGraph per survey
 
         self._load_all()
 
@@ -426,6 +434,28 @@ class SurveyStore:
 
         # Build indexes
         self._build_indexes(label)
+
+        # Load variable graph (convention: *_variable_graph.json next to vardict)
+        if _NX_AVAILABLE:
+            graph_path = v_path.with_name(
+                v_path.stem.replace("_variable_dictionary", "_variable_graph") + ".json"
+            )
+            if graph_path.exists():
+                try:
+                    with open(graph_path, encoding="utf-8") as f:
+                        self._graphs[label] = nx.node_link_graph(json.load(f))
+                    self._mtimes[str(graph_path)] = self._mtime(graph_path)
+                    print(
+                        f"[survey-expert] Graph loaded for {label}: "
+                        f"{self._graphs[label].number_of_nodes()} nodes, "
+                        f"{self._graphs[label].number_of_edges()} edges",
+                        file=sys.stderr,
+                    )
+                except (json.JSONDecodeError, OSError) as exc:
+                    print(
+                        f"[survey-expert] WARNING: Failed to load graph {graph_path}: {exc}",
+                        file=sys.stderr,
+                    )
 
     def _build_indexes(self, label: str):
         vardict = self._vardicts.get(label, {})
@@ -1148,6 +1178,163 @@ class SurveyStore:
         candidates.sort(key=lambda x: abs(len(x) - len(name)))
         return candidates[:max_suggestions]
 
+    # -- Variable neighborhood graph -------------------------------------
+
+    def _resolve_form_name(self, stata_name: str,
+                           survey: str | None = None) -> tuple[str | None, str | None]:
+        """Resolve a Stata variable name to its form-level name and survey label."""
+        labels = self._filtered_labels(survey)
+        for label in labels:
+            entry = self._vardicts.get(label, {}).get(stata_name)
+            if isinstance(entry, dict):
+                form_name = entry.get("survey", {}).get("original_variable_name") or stata_name
+                return form_name, label
+        return None, None
+
+    def get_neighborhood(self, name: str, depth: int = 1,
+                         survey: str | None = None) -> str:
+        """Return the variable neighborhood from the relationship graph."""
+        self._check_reload()
+        if not _NX_AVAILABLE:
+            return ("Variable graph requires networkx. "
+                    "Install: pip install networkx")
+        if self.is_empty:
+            return self._empty_message()
+
+        labels = self._filtered_labels(survey)
+        if survey and not labels:
+            return self._no_survey_match_msg(survey)
+
+        # Check if any graphs are loaded
+        available = [l for l in labels if l in self._graphs]
+        if not available:
+            return ("No variable graph loaded. Generate it by running:\n"
+                    "  python create_variable_dictionaries.py --survey <KEY>")
+
+        # Resolve to form-level name
+        form_name, matched_label = self._resolve_form_name(name, survey)
+        if form_name is None:
+            # Try the name directly as a form-level node
+            for label in available:
+                if name in self._graphs[label]:
+                    form_name = name
+                    matched_label = label
+                    break
+        if form_name is None:
+            suggestions = self._suggest_similar(name, survey)
+            msg = f"Variable '{name}' not found."
+            if suggestions:
+                msg += f"\n  Did you mean: {', '.join(suggestions[:5])}"
+            return msg
+
+        G = self._graphs.get(matched_label)
+        if G is None or form_name not in G:
+            return f"Variable '{form_name}' not in graph for {matched_label}."
+
+        # Get neighborhood: all nodes within `depth` hops (undirected)
+        undirected = G.to_undirected()
+        neighborhood = nx.single_source_shortest_path_length(undirected, form_name, cutoff=depth)
+        neighbor_nodes = set(neighborhood.keys())
+
+        # Get the target node attributes
+        target_attrs = G.nodes[form_name]
+
+        # Collect edges grouped by type and direction
+        edge_groups: dict[str, list[str]] = {
+            "calculates_from": [],    # inputs to this variable
+            "calculated_by": [],      # variables that use this as input
+            "gated_by": [],           # gate variables
+            "gates": [],             # variables this one gates
+            "group_gated_by": [],    # group-level gates
+            "group_gates": [],       # variables this group-gates
+            "constrained_by": [],    # constraining variables
+            "constrains": [],        # variables this constrains
+            "repeat_sibling": [],    # same repeat group
+            "shares_choices": [],    # same choice list
+        }
+
+        for u, v, d in G.edges(data=True):
+            etype = d.get("type", "")
+            if u == form_name and v in neighbor_nodes:
+                if etype == "calculates_from":
+                    edge_groups["calculated_by"].append(v)
+                elif etype == "gated_by":
+                    edge_groups["gates"].append(v)
+                elif etype == "group_gated_by":
+                    edge_groups["group_gates"].append(v)
+                elif etype == "constrained_by":
+                    edge_groups["constrains"].append(v)
+                elif etype == "repeat_sibling":
+                    edge_groups["repeat_sibling"].append(v)
+                elif etype == "shares_choices":
+                    edge_groups["shares_choices"].append(v)
+            elif v == form_name and u in neighbor_nodes:
+                if etype == "calculates_from":
+                    edge_groups["calculates_from"].append(u)
+                elif etype == "gated_by":
+                    edge_groups["gated_by"].append(u)
+                elif etype == "group_gated_by":
+                    edge_groups["group_gated_by"].append(u)
+                elif etype == "constrained_by":
+                    edge_groups["constrained_by"].append(u)
+
+        # Format output
+        lines = [
+            f"[{matched_label}] Variable neighborhood: {form_name} (depth={depth})",
+            f"  type: {target_attrs.get('type', '?')}",
+            f"  group_path: {target_attrs.get('group_path', '')}",
+            f"  repeat_depth: {target_attrs.get('repeat_depth', 0)}",
+        ]
+        rg = target_attrs.get("repeat_group")
+        if rg:
+            lines.append(f"  repeat_group: {rg}")
+        sv = target_attrs.get("stata_vars", [])
+        if sv:
+            lines.append(f"  stata_vars: {', '.join(sv)}")
+
+        # Relationship sections with risk semantics
+        sections = [
+            ("Calculates from (inputs — sentinel contamination risk)",
+             "calculates_from"),
+            ("Calculated by (downstream — changing this changes them)",
+             "calculated_by"),
+            ("Gated by (missing-by-logic if gate is false)",
+             "gated_by"),
+            ("Gates (changing this can make these disappear)",
+             "gates"),
+            ("Group-gated by (structural gate — affects whole group)",
+             "group_gated_by"),
+            ("Group-gates (structural — these groups depend on this)",
+             "group_gates"),
+            ("Constrained by (validation — defines valid ranges)",
+             "constrained_by"),
+            ("Constrains (validation — these depend on valid values here)",
+             "constrains"),
+            ("Repeat siblings (same repeat iteration — handle together)",
+             "repeat_sibling"),
+            ("Shares choices (same categorical domain — recode together)",
+             "shares_choices"),
+        ]
+
+        for header, key in sections:
+            members = edge_groups.get(key, [])
+            if not members:
+                continue
+            lines.append(f"\n  {header}:")
+            for m in sorted(members):
+                m_attrs = G.nodes.get(m, {})
+                m_type = m_attrs.get("type", "?")
+                m_depth = m_attrs.get("repeat_depth", 0)
+                m_svars = m_attrs.get("stata_vars", [])
+                sv_str = f" -> {', '.join(m_svars)}" if m_svars else ""
+                depth_str = f" [repeat_depth={m_depth}]" if m_depth > 0 else ""
+                lines.append(f"    {m} ({m_type}){depth_str}{sv_str}")
+
+        if all(not edge_groups.get(k) for _, k in sections):
+            lines.append("\n  (no relationships found)")
+
+        return "\n".join(lines)
+
 
 # ---------------------------------------------------------------------------
 # MCP Server
@@ -1163,6 +1350,10 @@ server = FastMCP(
         "Use get_choice_list to see all choices and variables sharing a choice list. "
         "Use get_gate_chain to see the full composed skip logic tree for a variable "
         "(critical for verifying zeroing/missing logic in cleaning code). "
+        "Use get_variable_neighborhood to see all variables connected to a target "
+        "(calculation inputs, gates, repeat siblings, shared choices) with risk semantics. "
+        "IMPORTANT: before writing a cleaning module, call get_variable_neighborhood on "
+        "key variables to understand sentinel contamination paths and gating dependencies. "
         "Use get_survey_info for a dataset overview before diving in. "
         "All tools accept an optional 'survey' parameter to filter by survey key "
         "(partial match, e.g., survey='ltfu' matches 'ltfu_hh' and 'ltfu_adult')."
@@ -1309,6 +1500,37 @@ def get_survey_info() -> str:
     Use this to understand the scope of the dataset before diving in.
     """
     return _get_store().get_info()
+
+
+@server.tool()
+def get_variable_neighborhood(name: str, depth: int = 1,
+                              survey: str = "") -> str:
+    """Show the relationship neighborhood of a variable from the dependency graph.
+
+    Returns all variables connected to the target within `depth` hops,
+    grouped by relationship type with risk semantics:
+    - Calculates from: inputs whose sentinel contamination propagates here
+    - Calculated by: downstream variables that change if this one changes
+    - Gated by: gate variables that control whether this one has data
+    - Gates: variables that disappear if this one is recoded
+    - Constrained by: variables that define valid ranges
+    - Repeat siblings: variables in the same repeat iteration
+    - Shares choices: variables using the same categorical domain
+
+    Each neighbor includes its form type, repeat depth, and Stata column names
+    so you can follow up with lookup_variables for full metadata.
+
+    Accepts a Stata column name (e.g., crpsale_qty_1_2) — automatically
+    resolves to the form-level variable (crpsale_qty).
+
+    Requires the variable graph to be generated first:
+      python create_variable_dictionaries.py --survey <KEY>
+
+    Use the survey parameter to filter to a specific survey (partial match).
+    """
+    return _get_store().get_neighborhood(
+        name, depth=depth, survey=survey or None
+    )
 
 
 # ---------------------------------------------------------------------------
