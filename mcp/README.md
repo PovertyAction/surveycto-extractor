@@ -67,7 +67,7 @@ To override, set `SURVEY_CONFIG` env var:
 |------|---------|-------------|
 | `lookup_variable` | Full metadata for one variable (includes data range) | Deep investigation of a specific variable |
 | `lookup_variables` | Compact metadata for many variables (includes data range) | Batch-checking a cleaning module (10-50 vars) |
-| `search_questions` | Keyword search across names and question text | Discovering related variables |
+| `search_questions` | TF-IDF ranked search across names and question text | Discovering variables by natural-language query (e.g. "crop sales quantity") |
 | `get_choice_list` | All choices + variables using a list | Understanding categorical domains, verifying sentinels |
 | `get_gate_chain` | Full composed skip logic tree for a variable | Understanding why a variable has missing/zero values |
 | `get_survey_info` | Dataset overview | Getting oriented before diving in |

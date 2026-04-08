@@ -28,6 +28,7 @@ Setup:
 """
 
 import json
+import math
 import os
 import re
 import sys
@@ -169,6 +170,107 @@ def _is_sentinel_value(value) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Lightweight TF-IDF index (no external dependencies)
+# ---------------------------------------------------------------------------
+
+_TOKEN_RE = re.compile(r"[a-z0-9]{2,}")
+
+
+def _tokenize(text: str) -> list[str]:
+    """Split text into lowercase alpha-numeric tokens (>= 2 chars)."""
+    return _TOKEN_RE.findall(text.lower())
+
+
+class _TfidfIndex:
+    """Minimal TF-IDF index for cosine-similarity search over text documents.
+
+    Each document is a (doc_id, text) pair.  At build time we compute IDF
+    weights and per-document TF-IDF norms.  Queries are scored by cosine
+    similarity against every document (fast enough for < 50 k docs).
+    """
+
+    __slots__ = ("_doc_ids", "_doc_tfs", "_idf", "_doc_norms")
+
+    def __init__(self, docs: list[tuple[str, str]]):
+        self._doc_ids: list[str] = []
+        self._doc_tfs: list[dict[str, float]] = []
+        self._idf: dict[str, float] = {}
+        self._doc_norms: list[float] = []
+        self._build(docs)
+
+    # -- build --------------------------------------------------------------
+
+    def _build(self, docs: list[tuple[str, str]]):
+        n = len(docs)
+        if n == 0:
+            return
+
+        # Term frequency per document + document frequency
+        df: dict[str, int] = {}
+        for doc_id, text in docs:
+            tokens = _tokenize(text)
+            tf: dict[str, float] = {}
+            for tok in tokens:
+                tf[tok] = tf.get(tok, 0.0) + 1.0
+            # Normalize TF by document length (prevents long docs dominating)
+            doc_len = len(tokens) or 1
+            for tok in tf:
+                tf[tok] /= doc_len
+            self._doc_ids.append(doc_id)
+            self._doc_tfs.append(tf)
+            for tok in tf:
+                df[tok] = df.get(tok, 0) + 1
+
+        # IDF with smoothing: log((N + 1) / (df + 1)) + 1
+        self._idf = {
+            tok: math.log((n + 1) / (freq + 1)) + 1
+            for tok, freq in df.items()
+        }
+
+        # Precompute document norms
+        for tf in self._doc_tfs:
+            norm_sq = sum(
+                (w * self._idf.get(tok, 0.0)) ** 2 for tok, w in tf.items()
+            )
+            self._doc_norms.append(math.sqrt(norm_sq) or 1.0)
+
+    # -- query --------------------------------------------------------------
+
+    def query(self, text: str, max_results: int = 20,
+              min_score: float = 0.01) -> list[tuple[str, float]]:
+        """Return top doc_ids ranked by cosine similarity to *text*."""
+        tokens = _tokenize(text)
+        if not tokens or not self._doc_ids:
+            return []
+
+        # Query TF (raw counts, normalized)
+        q_tf: dict[str, float] = {}
+        for tok in tokens:
+            q_tf[tok] = q_tf.get(tok, 0.0) + 1.0
+        q_len = len(tokens)
+        for tok in q_tf:
+            q_tf[tok] /= q_len
+
+        # Query TF-IDF vector and norm
+        q_vec = {tok: w * self._idf.get(tok, 0.0) for tok, w in q_tf.items()}
+        q_norm = math.sqrt(sum(v ** 2 for v in q_vec.values())) or 1.0
+
+        # Score each document
+        scored: list[tuple[str, float]] = []
+        for i, tf in enumerate(self._doc_tfs):
+            dot = sum(q_vec.get(tok, 0.0) * w * self._idf.get(tok, 0.0)
+                      for tok, w in tf.items() if tok in q_vec)
+            if dot <= 0:
+                continue
+            score = dot / (self._doc_norms[i] * q_norm)
+            if score >= min_score:
+                scored.append((self._doc_ids[i], score))
+
+        scored.sort(key=lambda x: x[1], reverse=True)
+        return scored[:max_results]
+
+
+# ---------------------------------------------------------------------------
 # Data store
 # ---------------------------------------------------------------------------
 
@@ -189,6 +291,7 @@ class SurveyStore:
         self._max_iters: dict[str, dict[str, int]] = {}
         self._count_vars: dict[str, dict[str, str]] = {}
         self._q_order: dict[str, dict[str, int]] = {}
+        self._tfidf: dict[str, _TfidfIndex] = {}
 
         self._load_all()
 
@@ -357,6 +460,24 @@ class SurveyStore:
             if vn:
                 q_order[vn] = i
         self._q_order[label] = q_order
+
+        # TF-IDF search index: one document per variable
+        # Document text = variable name (underscores as spaces) + question text
+        #                 + original form name (underscores as spaces)
+        tfidf_docs: list[tuple[str, str]] = []
+        for var_name, entry in vardict.items():
+            if not isinstance(entry, dict):
+                continue
+            survey_data = entry.get("survey", {})
+            qt = survey_data.get("question_text") or ""
+            form_name = survey_data.get("original_variable_name") or ""
+            doc_text = (
+                var_name.replace("_", " ") + " " +
+                qt + " " +
+                form_name.replace("_", " ")
+            )
+            tfidf_docs.append((var_name, doc_text))
+        self._tfidf[label] = _TfidfIndex(tfidf_docs)
 
     def _check_reload(self):
         for label, cfg in self._config.items():
@@ -692,7 +813,7 @@ class SurveyStore:
 
     def search(self, query: str, max_results: int = 20,
                survey: str | None = None) -> str:
-        """Search variable names and question text across surveys."""
+        """Search variable names and question text across surveys (TF-IDF ranked)."""
         self._check_reload()
         if self.is_empty:
             return self._empty_message()
@@ -701,39 +822,42 @@ class SurveyStore:
         if survey and not labels:
             return self._no_survey_match_msg(survey)
 
-        query_lower = query.lower()
-        matches = []
-
+        # Collect TF-IDF hits across all matching surveys
+        scored: list[tuple[float, str, str]] = []  # (score, label, var_name)
         for label in labels:
-            for var_name, entry in self._vardicts.get(label, {}).items():
-                if not isinstance(entry, dict):
-                    continue
-                survey_data = entry.get("survey", {})
-                qt = (survey_data.get("question_text") or "").lower()
-                form_name = (survey_data.get("original_variable_name") or "").lower()
-                if query_lower in var_name.lower() or query_lower in qt or query_lower in form_name:
-                    form_type = survey_data.get("type", "?")
-                    non_null = entry.get("non_null_count", "?")
-                    qt_display = (survey_data.get("question_text") or "").strip()[:70]
-                    skip = survey_data.get("stata_skip_logic") or ""
-                    skip_brief = _trunc(skip, 50) if skip else ""
-                    sent = _fmt_sentinel_compact(entry.get("sentinels"))
+            idx = self._tfidf.get(label)
+            if idx is None:
+                continue
+            for var_name, score in idx.query(query, max_results=max_results):
+                scored.append((score, label, var_name))
 
-                    line = f"  [{label}] {var_name:30s} | {form_type:15s} | n={non_null}"
-                    if sent != "none":
-                        line += f" | SENT:{sent}"
-                    if skip_brief:
-                        line += f" | skip:{skip_brief}"
-                    line += f"\n{'':33s}  Q: {qt_display}"
-                    matches.append(line)
-                    if len(matches) >= max_results:
-                        break
-            if len(matches) >= max_results:
-                break
+        # Sort by score descending, keep top max_results
+        scored.sort(key=lambda x: x[0], reverse=True)
+        scored = scored[:max_results]
 
-        if not matches:
+        if not scored:
             scope = f" in survey '{survey}'" if survey else ""
             return f"No matches for '{query}'{scope}."
+
+        # Format output
+        matches = []
+        for score, label, var_name in scored:
+            entry = self._vardicts.get(label, {}).get(var_name, {})
+            survey_data = entry.get("survey", {})
+            form_type = survey_data.get("type", "?")
+            non_null = entry.get("non_null_count", "?")
+            qt_display = (survey_data.get("question_text") or "").strip()[:70]
+            skip = survey_data.get("stata_skip_logic") or ""
+            skip_brief = _trunc(skip, 50) if skip else ""
+            sent = _fmt_sentinel_compact(entry.get("sentinels"))
+
+            line = f"  [{label}] {var_name:30s} | {form_type:15s} | n={non_null}"
+            if sent != "none":
+                line += f" | SENT:{sent}"
+            if skip_brief:
+                line += f" | skip:{skip_brief}"
+            line += f"\n{'':33s}  Q: {qt_display}"
+            matches.append(line)
 
         scope = f" (survey filter: {survey})" if survey else ""
         header = f"Found {len(matches)} match(es) for '{query}'{scope}:"
@@ -1120,10 +1244,13 @@ def lookup_variables(names: list[str], survey: str = "") -> str:
 @server.tool()
 def search_questions(query: str, max_results: int = 20,
                      survey: str = "") -> str:
-    """Search across variable names and question text by keyword.
+    """Search across variable names and question text using TF-IDF ranking.
 
-    Searches loaded surveys. Returns matching variables with type,
-    non-null count, sentinel status, skip logic, and question text.
+    Accepts natural-language queries (e.g., "crop sales quantity") and
+    matches individual words against variable names, question text, and
+    original form names.  Results are ranked by relevance, so abbreviated
+    variable names (crpsale_qty) surface when the question text mentions
+    the full words (crop, sale, quantity).
 
     Use the survey parameter to filter to a specific survey (partial match).
 

@@ -33,9 +33,88 @@ SETUP:
 
 import argparse
 import json
+import math
 import re
 import sys
 from pathlib import Path
+
+# ---------------------------------------------------------------------------
+# Lightweight TF-IDF index (shared with mcp/survey_server.py)
+# ---------------------------------------------------------------------------
+
+_TOKEN_RE = re.compile(r"[a-z0-9]{2,}")
+
+
+def _tokenize(text: str) -> list[str]:
+    """Split text into lowercase alpha-numeric tokens (>= 2 chars)."""
+    return _TOKEN_RE.findall(text.lower())
+
+
+class _TfidfIndex:
+    """Minimal TF-IDF index for cosine-similarity search over text documents."""
+
+    __slots__ = ("_doc_ids", "_doc_tfs", "_idf", "_doc_norms")
+
+    def __init__(self, docs: list[tuple[str, str]]):
+        self._doc_ids: list[str] = []
+        self._doc_tfs: list[dict[str, float]] = []
+        self._idf: dict[str, float] = {}
+        self._doc_norms: list[float] = []
+        self._build(docs)
+
+    def _build(self, docs: list[tuple[str, str]]):
+        n = len(docs)
+        if n == 0:
+            return
+        df: dict[str, int] = {}
+        for doc_id, text in docs:
+            tokens = _tokenize(text)
+            tf: dict[str, float] = {}
+            for tok in tokens:
+                tf[tok] = tf.get(tok, 0.0) + 1.0
+            doc_len = len(tokens) or 1
+            for tok in tf:
+                tf[tok] /= doc_len
+            self._doc_ids.append(doc_id)
+            self._doc_tfs.append(tf)
+            for tok in tf:
+                df[tok] = df.get(tok, 0) + 1
+        self._idf = {
+            tok: math.log((n + 1) / (freq + 1)) + 1
+            for tok, freq in df.items()
+        }
+        for tf in self._doc_tfs:
+            norm_sq = sum(
+                (w * self._idf.get(tok, 0.0)) ** 2 for tok, w in tf.items()
+            )
+            self._doc_norms.append(math.sqrt(norm_sq) or 1.0)
+
+    def query(self, text: str, max_results: int = 20,
+              min_score: float = 0.01) -> list[tuple[str, float]]:
+        """Return top doc_ids ranked by cosine similarity to *text*."""
+        tokens = _tokenize(text)
+        if not tokens or not self._doc_ids:
+            return []
+        q_tf: dict[str, float] = {}
+        for tok in tokens:
+            q_tf[tok] = q_tf.get(tok, 0.0) + 1.0
+        q_len = len(tokens)
+        for tok in q_tf:
+            q_tf[tok] /= q_len
+        q_vec = {tok: w * self._idf.get(tok, 0.0) for tok, w in q_tf.items()}
+        q_norm = math.sqrt(sum(v ** 2 for v in q_vec.values())) or 1.0
+        scored: list[tuple[str, float]] = []
+        for i, tf in enumerate(self._doc_tfs):
+            dot = sum(q_vec.get(tok, 0.0) * w * self._idf.get(tok, 0.0)
+                      for tok, w in tf.items() if tok in q_vec)
+            if dot <= 0:
+                continue
+            score = dot / (self._doc_norms[i] * q_norm)
+            if score >= min_score:
+                scored.append((self._doc_ids[i], score))
+        scored.sort(key=lambda x: x[1], reverse=True)
+        return scored[:max_results]
+
 
 # ---------------------------------------------------------------------------
 # CONFIGURATION — update DOCS to match your project layout
@@ -440,21 +519,55 @@ def search_choice_list(list_name: str, context: int = 0, survey_filter: str = No
 
 
 def search_text(text: str, context: int = 0, survey_filter: str = None) -> bool:
-    text_lower = text.lower()
     found = False
     for label, files in _filter_surveys(survey_filter).items():
         qpath = files["questions"]
+        vpath = files["vardict"]
         if not qpath.exists():
             continue
         questions = load_json(qpath)
         q_index   = _questions_by_name(questions)
-        for i, q in enumerate(questions):
-            qt = q.get("question_text") or ""
+
+        # Build TF-IDF index: one document per question, text = var_name + question_text
+        vardict = {}
+        if vpath.exists():
+            vardict = load_json(vpath).get("variables", {})
+
+        tfidf_docs: list[tuple[str, str]] = []
+        for q in questions:
             vn = q.get("variable_name") or ""
-            if text_lower in qt.lower() or text_lower in vn.lower():
-                print_question(q, label, questions=questions, target_idx=i,
-                               context=context, q_index=q_index)
-                found = True
+            qt = q.get("question_text") or ""
+            tfidf_docs.append((vn, vn.replace("_", " ") + " " + qt))
+        # Also index vardict variables not in questions (Stata-renamed vars)
+        q_varnames = {d[0] for d in tfidf_docs}
+        for var_name, entry in vardict.items():
+            if var_name in q_varnames or not isinstance(entry, dict):
+                continue
+            survey_data = entry.get("survey", {})
+            qt = survey_data.get("question_text") or ""
+            form_name = survey_data.get("original_variable_name") or ""
+            tfidf_docs.append((
+                var_name,
+                var_name.replace("_", " ") + " " + qt + " " + form_name.replace("_", " "),
+            ))
+
+        idx = _TfidfIndex(tfidf_docs)
+        hits = idx.query(text, max_results=20)
+
+        for var_name, _score in hits:
+            q = q_index.get(var_name)
+            if q is None:
+                continue
+            try:
+                target_idx = next(
+                    i for i, x in enumerate(questions)
+                    if x.get("variable_name") == var_name
+                )
+            except StopIteration:
+                target_idx = None
+            print_question(q, label, questions=questions, target_idx=target_idx,
+                           context=context, q_index=q_index)
+            found = True
     return found
 
 
