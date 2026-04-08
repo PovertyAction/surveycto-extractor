@@ -786,8 +786,9 @@ class SurveyStore:
                 survey_data = entry.get("survey", {})
                 form_name = survey_data.get("original_variable_name", name)
                 stata_type = entry.get("stata", {}).get("type", "?")
-                non_null = entry.get("non_null_count", "?")
-                form_type = survey_data.get("type", "?")
+                non_null = entry.get("non_null_count")
+                non_null = non_null if non_null is not None else "?"
+                form_type = str(survey_data.get("type") or "?")
                 qt = (survey_data.get("question_text") or "").strip()[:80]
 
                 skip = (
@@ -874,8 +875,9 @@ class SurveyStore:
         for score, label, var_name in scored:
             entry = self._vardicts.get(label, {}).get(var_name, {})
             survey_data = entry.get("survey", {})
-            form_type = survey_data.get("type", "?")
-            non_null = entry.get("non_null_count", "?")
+            form_type = str(survey_data.get("type") or "?")
+            non_null = entry.get("non_null_count")
+            non_null = non_null if non_null is not None else "?"
             qt_display = (survey_data.get("question_text") or "").strip()[:70]
             skip = survey_data.get("stata_skip_logic") or ""
             skip_brief = _trunc(skip, 50) if skip else ""
