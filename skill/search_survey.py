@@ -738,7 +738,6 @@ def variable_neighborhood(name: str, depth: int = 1, survey_filter: str = None) 
               file=sys.stderr)
         return False
 
-    _REF_RE = re.compile(r"[$][{]([^}]+)[}]")
     found = False
 
     for label, files in _filter_surveys(survey_filter).items():
@@ -778,39 +777,70 @@ def variable_neighborhood(name: str, depth: int = 1, survey_filter: str = None) 
         neighborhood = nx.single_source_shortest_path_length(undirected, form_name, cutoff=depth)
         neighbor_nodes = set(neighborhood.keys())
 
-        # Collect edges grouped by type and direction
+        # Collect neighbors grouped by relationship type
         edge_groups = {
-            "calculates_from": [], "calculated_by": [],
-            "gated_by": [], "gates": [],
-            "group_gated_by": [], "group_gates": [],
-            "constrained_by": [], "constrains": [],
-            "repeat_sibling": [], "shares_choices": [],
+            "calculates_from": set(), "calculated_by": set(),
+            "gated_by": set(), "gates": set(),
+            "group_gated_by": set(), "group_gates": set(),
+            "constrained_by": set(), "constrains": set(),
+            "repeat_sibling": set(), "shares_choices": set(),
         }
 
-        for u, v, d in G.edges(data=True):
-            etype = d.get("type", "")
-            if u == form_name and v in neighbor_nodes:
-                if etype == "calculates_from":
-                    edge_groups["calculated_by"].append(v)
-                elif etype == "gated_by":
-                    edge_groups["gates"].append(v)
-                elif etype == "group_gated_by":
-                    edge_groups["group_gates"].append(v)
-                elif etype == "constrained_by":
-                    edge_groups["constrains"].append(v)
-                elif etype == "repeat_sibling":
-                    edge_groups["repeat_sibling"].append(v)
-                elif etype == "shares_choices":
-                    edge_groups["shares_choices"].append(v)
-            elif v == form_name and u in neighbor_nodes:
-                if etype == "calculates_from":
-                    edge_groups["calculates_from"].append(u)
-                elif etype == "gated_by":
-                    edge_groups["gated_by"].append(u)
-                elif etype == "group_gated_by":
-                    edge_groups["group_gated_by"].append(u)
-                elif etype == "constrained_by":
-                    edge_groups["constrained_by"].append(u)
+        def _classify_out(etype, target):
+            if etype == "calculates_from":
+                edge_groups["calculated_by"].add(target)
+            elif etype == "gated_by":
+                edge_groups["gates"].add(target)
+            elif etype == "group_gated_by":
+                edge_groups["group_gates"].add(target)
+            elif etype == "constrained_by":
+                edge_groups["constrains"].add(target)
+            elif etype == "repeat_sibling":
+                edge_groups["repeat_sibling"].add(target)
+            elif etype == "shares_choices":
+                edge_groups["shares_choices"].add(target)
+
+        def _classify_in(etype, target):
+            if etype == "calculates_from":
+                edge_groups["calculates_from"].add(target)
+            elif etype == "gated_by":
+                edge_groups["gated_by"].add(target)
+            elif etype == "group_gated_by":
+                edge_groups["group_gated_by"].add(target)
+            elif etype == "constrained_by":
+                edge_groups["constrained_by"].add(target)
+
+        if depth <= 1:
+            for _, v, d in G.out_edges(form_name, data=True):
+                if v in neighbor_nodes:
+                    _classify_out(d.get("type", ""), v)
+            for u, _, d in G.in_edges(form_name, data=True):
+                if u in neighbor_nodes:
+                    _classify_in(d.get("type", ""), u)
+        else:
+            # Multi-hop: classify each neighbor by the first-hop edge
+            first_hop_out = {}
+            for _, v, d in G.out_edges(form_name, data=True):
+                first_hop_out.setdefault(v, set()).add(d.get("type", ""))
+            first_hop_in = {}
+            for u, _, d in G.in_edges(form_name, data=True):
+                first_hop_in.setdefault(u, set()).add(d.get("type", ""))
+
+            traversal = G.to_undirected(as_view=True)
+            for node in neighbor_nodes:
+                if node == form_name:
+                    continue
+                try:
+                    path = nx.shortest_path(traversal, form_name, node)
+                except (nx.NetworkXNoPath, nx.NodeNotFound):
+                    continue
+                if len(path) < 2:
+                    continue
+                first_step = path[1]
+                for etype in first_hop_out.get(first_step, set()):
+                    _classify_out(etype, node)
+                for etype in first_hop_in.get(first_step, set()):
+                    _classify_in(etype, node)
 
         # Print output
         print(f"\n[{label}] Variable neighborhood: {form_name} (depth={depth})")

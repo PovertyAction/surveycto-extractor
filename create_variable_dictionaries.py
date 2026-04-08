@@ -1121,7 +1121,7 @@ def build_variable_graph(questions: List[Dict], vardict_json: dict,
         print("  [SKIP] networkx not installed -- skipping variable graph")
         return None
 
-    G = nx.DiGraph()
+    G = nx.MultiDiGraph()
     variables = vardict_json.get("variables", {})
 
     # -- Build reverse map: form variable name -> list of Stata column names --
@@ -1216,7 +1216,7 @@ def build_variable_graph(questions: List[Dict], vardict_json: dict,
         vn = q.get("variable_name", "")
         gp = q.get("group_path", [])
         _, rg = _repeat_info(gp)
-        if rg:
+        if rg and vn:
             repeat_members.setdefault(rg, []).append(vn)
 
     for members in repeat_members.values():
@@ -1225,9 +1225,8 @@ def build_variable_graph(questions: List[Dict], vardict_json: dict,
         # Connect first member to all others (star topology, avoids O(n^2) edges)
         hub = members[0]
         for member in members[1:]:
-            if not G.has_edge(hub, member) or G[hub][member].get("type") != "repeat_sibling":
-                G.add_edge(hub, member, type="repeat_sibling")
-                G.add_edge(member, hub, type="repeat_sibling")
+            G.add_edge(hub, member, type="repeat_sibling")
+            G.add_edge(member, hub, type="repeat_sibling")
 
     # -- Shared choice list edges (bidirectional) --
     choice_members: Dict[str, list] = {}
@@ -1242,9 +1241,8 @@ def build_variable_graph(questions: List[Dict], vardict_json: dict,
             continue
         hub = members[0]
         for member in members[1:]:
-            if not G.has_edge(hub, member) or G[hub][member].get("type") != "shares_choices":
-                G.add_edge(hub, member, type="shares_choices")
-                G.add_edge(member, hub, type="shares_choices")
+            G.add_edge(hub, member, type="shares_choices")
+            G.add_edge(member, hub, type="shares_choices")
 
     # -- Write --
     data = nx.node_link_data(G)

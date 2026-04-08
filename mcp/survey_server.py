@@ -513,7 +513,11 @@ class SurveyStore:
         for label, cfg in self._config.items():
             q_path = Path(cfg.get("questions_json", ""))
             v_path = Path(cfg.get("output_json", ""))
-            for p in (q_path, v_path):
+            # Also check graph file (convention-based path)
+            graph_path = v_path.with_name(
+                v_path.stem.replace("_variable_dictionary", "_variable_graph") + ".json"
+            ) if str(v_path) else Path("")
+            for p in (q_path, v_path, graph_path):
                 key = str(p)
                 if self._mtime(p) != self._mtimes.get(key, 0.0):
                     print(f"[survey-expert] Reloading {label}...", file=sys.stderr)
@@ -1241,44 +1245,80 @@ class SurveyStore:
         # Get the target node attributes
         target_attrs = G.nodes[form_name]
 
-        # Collect edges grouped by type and direction
-        edge_groups: dict[str, list[str]] = {
-            "calculates_from": [],    # inputs to this variable
-            "calculated_by": [],      # variables that use this as input
-            "gated_by": [],           # gate variables
-            "gates": [],             # variables this one gates
-            "group_gated_by": [],    # group-level gates
-            "group_gates": [],       # variables this group-gates
-            "constrained_by": [],    # constraining variables
-            "constrains": [],        # variables this constrains
-            "repeat_sibling": [],    # same repeat group
-            "shares_choices": [],    # same choice list
+        # Collect neighbors grouped by relationship type.
+        # For depth=1, group by direct edge type/direction.
+        # For depth>1, group by the first-hop edge that leads to each neighbor.
+        edge_groups: dict[str, set[str]] = {
+            "calculates_from": set(),
+            "calculated_by": set(),
+            "gated_by": set(),
+            "gates": set(),
+            "group_gated_by": set(),
+            "group_gates": set(),
+            "constrained_by": set(),
+            "constrains": set(),
+            "repeat_sibling": set(),
+            "shares_choices": set(),
         }
 
-        for u, v, d in G.edges(data=True):
-            etype = d.get("type", "")
-            if u == form_name and v in neighbor_nodes:
-                if etype == "calculates_from":
-                    edge_groups["calculated_by"].append(v)
-                elif etype == "gated_by":
-                    edge_groups["gates"].append(v)
-                elif etype == "group_gated_by":
-                    edge_groups["group_gates"].append(v)
-                elif etype == "constrained_by":
-                    edge_groups["constrains"].append(v)
-                elif etype == "repeat_sibling":
-                    edge_groups["repeat_sibling"].append(v)
-                elif etype == "shares_choices":
-                    edge_groups["shares_choices"].append(v)
-            elif v == form_name and u in neighbor_nodes:
-                if etype == "calculates_from":
-                    edge_groups["calculates_from"].append(u)
-                elif etype == "gated_by":
-                    edge_groups["gated_by"].append(u)
-                elif etype == "group_gated_by":
-                    edge_groups["group_gated_by"].append(u)
-                elif etype == "constrained_by":
-                    edge_groups["constrained_by"].append(u)
+        def _classify_out(etype: str, target: str):
+            if etype == "calculates_from":
+                edge_groups["calculated_by"].add(target)
+            elif etype == "gated_by":
+                edge_groups["gates"].add(target)
+            elif etype == "group_gated_by":
+                edge_groups["group_gates"].add(target)
+            elif etype == "constrained_by":
+                edge_groups["constrains"].add(target)
+            elif etype == "repeat_sibling":
+                edge_groups["repeat_sibling"].add(target)
+            elif etype == "shares_choices":
+                edge_groups["shares_choices"].add(target)
+
+        def _classify_in(etype: str, target: str):
+            if etype == "calculates_from":
+                edge_groups["calculates_from"].add(target)
+            elif etype == "gated_by":
+                edge_groups["gated_by"].add(target)
+            elif etype == "group_gated_by":
+                edge_groups["group_gated_by"].add(target)
+            elif etype == "constrained_by":
+                edge_groups["constrained_by"].add(target)
+
+        if depth <= 1:
+            # Direct edges only — fast path
+            for _, v, d in G.out_edges(form_name, data=True):
+                if v in neighbor_nodes:
+                    _classify_out(d.get("type", ""), v)
+            for u, _, d in G.in_edges(form_name, data=True):
+                if u in neighbor_nodes:
+                    _classify_in(d.get("type", ""), u)
+        else:
+            # Multi-hop: classify each neighbor by the first-hop edge
+            # that leads to it from form_name
+            first_hop_out = {}  # neighbor -> set of edge types via out
+            for _, v, d in G.out_edges(form_name, data=True):
+                first_hop_out.setdefault(v, set()).add(d.get("type", ""))
+            first_hop_in = {}   # neighbor -> set of edge types via in
+            for u, _, d in G.in_edges(form_name, data=True):
+                first_hop_in.setdefault(u, set()).add(d.get("type", ""))
+
+            traversal = G.to_undirected(as_view=True)
+            for node in neighbor_nodes:
+                if node == form_name:
+                    continue
+                # Find the first hop on shortest path to this node
+                try:
+                    path = nx.shortest_path(traversal, form_name, node)
+                except (nx.NetworkXNoPath, nx.NodeNotFound):
+                    continue
+                if len(path) < 2:
+                    continue
+                first_step = path[1]
+                for etype in first_hop_out.get(first_step, set()):
+                    _classify_out(etype, node)
+                for etype in first_hop_in.get(first_step, set()):
+                    _classify_in(etype, node)
 
         # Format output
         lines = [
