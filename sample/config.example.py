@@ -30,8 +30,20 @@ SURVEYS = {
         #       Directories searched for pulldata CSVs (defaults to the
         #       directory containing input_file).
         #   "geo_bbox": (lat_min, lat_max, lon_min, lon_max),
-        #       Bounding box for synthetic geopoint sampling (defaults to
-        #       the global -90..90 / -180..180).
+        #       Bounding box for synthetic geopoint sampling. Set this to
+        #       a study-area box so HFC GPS boundary checks operate on
+        #       realistic coordinates; otherwise sampling spans the
+        #       entire globe (which any boundary check will flag as
+        #       out-of-area on every row). Example Uganda-ish bbox:
+        #       "geo_bbox": (-1.5, 4.2, 29.5, 35.0),
+        #
+        # Recommended for HFC dry-runs that need consent-gated sections
+        # populated (the random sampler hits the gate ~12% of the time
+        # without forcing):
+        #   python main.py --survey household_survey --phases synthetic \
+        #       --force-value c_consent_qs_ans=1 \
+        #       --force-value c_consent_understand=1 \
+        #       --force-value c_consent=1 --force-value hh_consent=1
     },
 }
 

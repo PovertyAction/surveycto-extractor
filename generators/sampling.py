@@ -117,6 +117,75 @@ def select_multiple_count_bounds(constraint: Optional[str]) -> Tuple[Optional[in
     return (lo, hi)
 
 
+# ── Conditional exclusive-choice SM constraints ───────────────────────────────
+
+_COND_SM_RX = re.compile(
+    r"if\s*\(\s*(?P<pred>.+?)"
+    r"\s*,\s*count-selected\(\s*\.\s*\)\s*"
+    r"(?P<then_op>=|>=|<=|>(?!=)|<(?!=))\s*(?P<then_n>\d+)"
+    r"\s*,\s*count-selected\(\s*\.\s*\)\s*"
+    r"(?P<else_op>=|>=|<=|>(?!=)|<(?!=))\s*(?P<else_n>\d+)\s*\)",
+    re.DOTALL,
+)
+
+_SELECTED_LITERAL_RX = re.compile(
+    r"selected\(\s*\.\s*,\s*['\"]?(-?\d+)['\"]?\s*\)"
+)
+
+
+def select_multiple_conditional_bounds(
+    constraint: Optional[str],
+) -> Tuple[List[str], Optional[int], Optional[int]]:
+    """Parse the common conditional SM-constraint pattern
+
+        if(selected(., X) [or selected(., Y)]*,
+           count-selected(.) <op> M,
+           count-selected(.) <op> N)
+
+    Returns ``(exclusive_values, else_lo, else_hi)`` — the list of choice
+    values whose selection forces an exclusive pick (because the
+    ``then``-branch typically pins ``count-selected(.) = 1``), and the
+    bounds that apply when none of those are selected.
+
+    Returns ``([], None, None)`` when the pattern doesn't match.
+    """
+    if not constraint:
+        return ([], None, None)
+    m = _COND_SM_RX.search(constraint)
+    if not m:
+        return ([], None, None)
+
+    pred = m.group("pred")
+    # Predicate must be a chain of selected(., LIT) joined by `or`; anything
+    # else (e.g. references to other variables) is too dynamic to handle here.
+    if not _SELECTED_LITERAL_RX.search(pred):
+        return ([], None, None)
+    # Strip the OR-joined chain of selected(.,LIT) calls; if anything else
+    # remains, bail.
+    stripped = _SELECTED_LITERAL_RX.sub("", pred)
+    stripped = re.sub(r"\s*or\s*", "", stripped, flags=re.IGNORECASE).strip()
+    if stripped:
+        return ([], None, None)
+
+    exclusives = [m2.group(1) for m2 in _SELECTED_LITERAL_RX.finditer(pred)]
+
+    def _bound(op: str, n: int, side: str) -> Tuple[Optional[int], Optional[int]]:
+        if op == "=":
+            return (n, n)
+        if op == ">=":
+            return (n, None)
+        if op == ">":
+            return (n + 1, None)
+        if op == "<=":
+            return (None, n)
+        if op == "<":
+            return (None, n - 1)
+        return (None, None)
+
+    else_lo, else_hi = _bound(m.group("else_op"), int(m.group("else_n")), "else")
+    return (exclusives, else_lo, else_hi)
+
+
 # ── Per-type sampler (Python values, for CSV output) ──────────────────────────
 
 DEFAULT_GEO_BBOX: Tuple[float, float, float, float] = (-90.0, 90.0, -180.0, 180.0)
@@ -202,8 +271,44 @@ def sample_python_value(
     if q_type == "select_multiple":
         if not choices:
             return []
-        lo_n, hi_n = select_multiple_count_bounds(constraint)
         max_n = len(choices)
+
+        # Conditional exclusive-choice pattern: predicates of the form
+        # `if(selected(., X) or selected(., Y), count-selected(.)=1, ...)`
+        # mark X/Y as "exclusive sentinels" — when present in the row,
+        # they must be the only pick. Honour this by sometimes picking
+        # an exclusive value alone (and otherwise picking from the
+        # non-exclusive subset under the else-branch bounds).
+        exclusives, else_lo, else_hi = select_multiple_conditional_bounds(constraint)
+        if exclusives:
+            choice_values = {str(c.get("value", "")).strip(): c for c in choices}
+            present_exclusives = [v for v in exclusives if v in choice_values]
+            non_exclusive = [
+                c for c in choices
+                if str(c.get("value", "")).strip() not in present_exclusives
+            ]
+            # 1 / (1 + len(non_exclusive)) probability of going exclusive:
+            # roughly proportional to how "rare" the sentinel branch should
+            # be relative to the substantive choices.
+            denom = 1 + len(non_exclusive)
+            if present_exclusives and rng.randrange(denom) == 0:
+                return [rng.choice(present_exclusives)]
+            # Non-exclusive sample under the else-branch bounds
+            ne_max = max(1, len(non_exclusive))
+            lo_n = 1 if else_lo is None else max(1, min(else_lo, ne_max))
+            hi_n = ne_max if else_hi is None else max(lo_n, min(else_hi, ne_max))
+            n_pick = rng.randint(lo_n, hi_n)
+            picks = rng.sample(non_exclusive, n_pick)
+            return [str(c.get("value", "")).strip() for c in picks]
+
+        lo_n, hi_n = select_multiple_count_bounds(constraint)
+        # When the constraint is non-trivial but unparseable (e.g. it
+        # references other variables), cap the upper bound conservatively
+        # rather than picking up to len(choices). Empirically, large
+        # multi-choice picks under unknown constraints violate them most
+        # of the time.
+        if (lo_n is None and hi_n is None) and constraint:
+            hi_n = min(3, max_n)
         lo_n = 1 if lo_n is None else max(1, min(lo_n, max_n))
         hi_n = max_n if hi_n is None else max(lo_n, min(hi_n, max_n))
         n_pick = rng.randint(lo_n, hi_n)

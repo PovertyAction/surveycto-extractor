@@ -168,21 +168,41 @@ def run_seed_phase(survey_key: str, n_rows: int = 1, seed: int = 0):
     print()
 
 
-def _parse_force_values(spec: str):
-    """Parse ``--force-value VAR=VAL,VAR=VAL`` into a dict."""
+def _parse_force_values(specs):
+    """Parse ``--force-value`` arguments into a dict.
+
+    Accepts a list of strings (from ``action='append'``) or a single string
+    (legacy). Within one spec, comma-separated ``VAR=VAL`` pairs are
+    accepted only when every comma-segment contains ``=`` — so values that
+    embed commas can be passed unambiguously by repeating the flag (which
+    avoids the parse conflict).
+    """
     out = {}
-    if not spec:
+    if specs is None:
         return out
-    for entry in spec.split(","):
-        entry = entry.strip()
-        if not entry:
+    if isinstance(specs, str):
+        specs = [specs]
+    for spec in specs:
+        if not spec:
             continue
-        if "=" not in entry:
-            raise ValueError(
-                f"--force-value entry {entry!r} must be in VAR=VAL form"
-            )
-        k, v = entry.split("=", 1)
-        out[k.strip()] = v.strip()
+        parts = [p for p in spec.split(",") if p.strip()]
+        # Only treat commas as entry separators when every segment is a
+        # well-formed VAR=VAL — otherwise the comma probably belongs to a
+        # value, and we treat the whole spec as a single VAR=VAL.
+        if len(parts) > 1 and all("=" in p for p in parts):
+            entries = parts
+        else:
+            entries = [spec]
+        for entry in entries:
+            entry = entry.strip()
+            if not entry:
+                continue
+            if "=" not in entry:
+                raise ValueError(
+                    f"--force-value entry {entry!r} must be in VAR=VAL form"
+                )
+            k, v = entry.split("=", 1)
+            out[k.strip()] = v.strip()
     return out
 
 
@@ -274,14 +294,16 @@ def main():
     )
     parser.add_argument(
         "--force-value",
-        type=str,
+        action="append",
         default=None,
         metavar="VAR=VAL[,VAR=VAL...]",
         help="For --phases synthetic: force one or more variables to specific "
-             "values, overriding random sampling. Relevance is still evaluated; "
-             "the forced value only takes effect when the question would have "
-             "been populated. Useful for ensuring consent-gated sections "
-             "populate during HFC dry-runs (e.g. --force-value c_consent=1)."
+             "values, overriding random sampling. Bypasses relevance so gated "
+             "cascades populate even when their parent gates would otherwise "
+             "evaluate false (useful for HFC dry-runs of consent-gated "
+             "sections). May be repeated; multiple VAR=VAL pairs in one flag "
+             "can be comma-separated (use repeated flags if values contain "
+             "commas). Example: --force-value c_consent=1,hh_consent=1"
     )
 
     args = parser.parse_args()
@@ -301,7 +323,7 @@ def main():
     seed_rows = explicit_rows if explicit_rows is not None else 1
     synthetic_rows = explicit_rows if explicit_rows is not None else 5
 
-    force_values = _parse_force_values(args.force_value or "")
+    force_values = _parse_force_values(args.force_value)
 
     errors = []
     for survey_key in surveys:

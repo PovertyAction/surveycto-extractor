@@ -550,8 +550,6 @@ def _compute_value(
     sampler_kwargs = {}
     if geo_bbox is not None:
         sampler_kwargs["geo_bbox"] = geo_bbox
-    if q_type == "select_multiple":
-        return sample_python_value(q_type, narrowed_choices, constraint, rng, **sampler_kwargs)
     return sample_python_value(q_type, narrowed_choices, constraint, rng, **sampler_kwargs)
 
 
@@ -630,6 +628,9 @@ def _build_column_order(
             for i in range(1, n + 1):
                 # select_multiple inside a repeat: SurveyCTO export emits ONLY
                 # the per-choice indicator columns (no `var_<iter>` parent).
+                # Verified against ugs_ltfu_hh_WIDE.csv (`plot_use` in
+                # `plot_list_r`): `plot_use_<value>_<i>` indicators exist;
+                # `plot_use_<i>` parent does not.
                 if q_type == "select_multiple":
                     for c in choices:
                         cv = str(c.get("value", "")).strip()
@@ -660,11 +661,13 @@ def _build_column_order(
 def _row_to_csv_dict(
     row: Dict[str, Any], runctx: RunContext, column_order: List[str]
 ) -> Dict[str, str]:
-    """Project a walk-result row into the final wide column order. Form-side
-    values win over run-context defaults — so a form's ``duration`` calculate
-    overrides the synthesised metadata value when its expression evaluates
-    cleanly, and falls back to the synth default when the calc is empty /
-    unsupported.
+    """Project a walk-result row into the final wide column order.
+
+    Form-side values win when present in ``row`` (including the empty
+    string — a form ``calculate`` that legitimately evaluates to empty
+    stays empty, matching real SurveyCTO export behaviour). Metadata
+    columns NOT defined by the form fall back to the synthesised
+    run-context value.
     """
     runctx_defaults: Dict[str, str] = {
         "CompletionDate": runctx.end_time.strftime("%b %d, %Y %I:%M:%S %p"),
@@ -685,8 +688,7 @@ def _row_to_csv_dict(
     out: Dict[str, str] = {}
     for c in column_order:
         if c in row:
-            form_v = _format_for_csv(row[c])
-            out[c] = form_v if form_v != "" else runctx_defaults.get(c, "")
+            out[c] = _format_for_csv(row[c])
         else:
             out[c] = runctx_defaults.get(c, "")
     return out
