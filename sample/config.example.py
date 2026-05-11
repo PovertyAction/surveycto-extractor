@@ -25,6 +25,13 @@ SURVEYS = {
         "name":                 "Household Survey (IPA HFC sample)",
         "max_section_depth":    3,
         "repeat_defaults":      {},
+        # Optional per-survey settings used by --phases synthetic:
+        #   "pulldata_search_dirs": [DATA_DIR / "form_attachments"],
+        #       Directories searched for pulldata CSVs (defaults to the
+        #       directory containing input_file).
+        #   "geo_bbox": (lat_min, lat_max, lon_min, lon_max),
+        #       Bounding box for synthetic geopoint sampling (defaults to
+        #       the global -90..90 / -180..180).
     },
 }
 

@@ -227,5 +227,8 @@ def format_datetime_for_csv(dt: datetime.datetime) -> str:
 
 
 def format_time_for_csv(t: datetime.time) -> str:
-    """SurveyCTO exports times as HH:MM:SS.000+00:00; we keep it simpler."""
-    return t.strftime("%I:%M:%S %p")
+    """SurveyCTO exports times as ``HH:MM:SS.000+HH:MM`` (24-hour, ms,
+    UTC offset). Use UTC for synthetic so the format is deterministic;
+    downstream parsers that expect this shape (HFC time-window checks)
+    will see the right pattern."""
+    return f"{t.hour:02d}:{t.minute:02d}:{t.second:02d}.000+00:00"

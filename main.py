@@ -168,8 +168,28 @@ def run_seed_phase(survey_key: str, n_rows: int = 1, seed: int = 0):
     print()
 
 
+def _parse_force_values(spec: str):
+    """Parse ``--force-value VAR=VAL,VAR=VAL`` into a dict."""
+    out = {}
+    if not spec:
+        return out
+    for entry in spec.split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        if "=" not in entry:
+            raise ValueError(
+                f"--force-value entry {entry!r} must be in VAR=VAL form"
+            )
+        k, v = entry.split("=", 1)
+        out[k.strip()] = v.strip()
+    return out
+
+
 def run_synthetic_phase(
-    survey_key: str, n_rows: int = 5, seed: int = 0, allow_missing_pulldata: bool = False
+    survey_key: str, n_rows: int = 5, seed: int = 0,
+    allow_missing_pulldata: bool = False,
+    force_values=None,
 ):
     """Generate a SurveyCTO-shaped synthetic export CSV from questions.json."""
     survey_cfg = config.SURVEYS[survey_key]
@@ -192,6 +212,8 @@ def run_synthetic_phase(
     else:
         search_dirs = [Path(d) for d in search_dirs]
 
+    geo_bbox = survey_cfg.get("geo_bbox")
+
     print(f"\n=== Phase 2d: Synthetic Data Generator ({survey_key}) ===")
     generate_synthetic_csv(
         questions_json_path=questions_json,
@@ -201,6 +223,8 @@ def run_synthetic_phase(
         n_rows=n_rows,
         seed=seed,
         allow_missing_pulldata=allow_missing_pulldata,
+        force_values=force_values,
+        geo_bbox=geo_bbox,
     )
     print()
 
@@ -230,23 +254,34 @@ def main():
     parser.add_argument(
         "--rows",
         type=int,
-        default=1,
-        help="Number of rows in the seed dataset (seed phase only). Default 1 "
-             "produces the original schema seed; larger values emit per-row "
-             "replace statements with constraint-aware random values."
+        default=None,
+        help="Number of rows. Default depends on phase: 1 for seed (preserves "
+             "the byte-identical schema-seed output), 5 for synthetic. Explicit "
+             "values are used as-is for either phase."
     )
     parser.add_argument(
         "--seed",
         type=int,
         default=0,
         help="Random seed for reproducible seed dataset generation. Default 0. "
-             "Same --seed produces byte-identical do-file output."
+             "Same --seed produces byte-identical do-file / CSV output."
     )
     parser.add_argument(
         "--allow-missing-pulldata",
         action="store_true",
         help="For --phases synthetic: warn instead of failing when a pulldata "
              "CSV referenced by the form is not found in the search dirs."
+    )
+    parser.add_argument(
+        "--force-value",
+        type=str,
+        default=None,
+        metavar="VAR=VAL[,VAR=VAL...]",
+        help="For --phases synthetic: force one or more variables to specific "
+             "values, overriding random sampling. Relevance is still evaluated; "
+             "the forced value only takes effect when the question would have "
+             "been populated. Useful for ensuring consent-gated sections "
+             "populate during HFC dry-runs (e.g. --force-value c_consent=1)."
     )
 
     args = parser.parse_args()
@@ -259,6 +294,15 @@ def main():
     phases = set(args.phases)
     run_all = "all" in phases
 
+    # Phase-aware defaults for --rows: seed expects 1 (byte-identical
+    # schema seed); synthetic expects 5 ("multiple respondents" is the
+    # design intent). Explicit --rows N overrides for either phase.
+    explicit_rows = args.rows
+    seed_rows = explicit_rows if explicit_rows is not None else 1
+    synthetic_rows = explicit_rows if explicit_rows is not None else 5
+
+    force_values = _parse_force_values(args.force_value or "")
+
     errors = []
     for survey_key in surveys:
         try:
@@ -268,12 +312,13 @@ def main():
 
             # Seed-only / synthetic-only: no need to load the survey XLSX
             if not run_all and phases == {"seed"}:
-                run_seed_phase(survey_key, n_rows=args.rows, seed=args.seed)
+                run_seed_phase(survey_key, n_rows=seed_rows, seed=args.seed)
                 continue
             if not run_all and phases == {"synthetic"}:
                 run_synthetic_phase(
-                    survey_key, n_rows=args.rows, seed=args.seed,
+                    survey_key, n_rows=synthetic_rows, seed=args.seed,
                     allow_missing_pulldata=args.allow_missing_pulldata,
+                    force_values=force_values,
                 )
                 continue
 
@@ -285,13 +330,14 @@ def main():
 
             # Seed phase runs after JSON extraction
             if run_all or "seed" in phases:
-                run_seed_phase(survey_key, n_rows=args.rows, seed=args.seed)
+                run_seed_phase(survey_key, n_rows=seed_rows, seed=args.seed)
 
             # Synthetic CSV phase runs after JSON extraction
             if "synthetic" in phases:
                 run_synthetic_phase(
-                    survey_key, n_rows=args.rows, seed=args.seed,
+                    survey_key, n_rows=synthetic_rows, seed=args.seed,
                     allow_missing_pulldata=args.allow_missing_pulldata,
+                    force_values=force_values,
                 )
 
         except Exception as e:

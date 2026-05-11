@@ -1326,7 +1326,9 @@ def _fn_uuid(args, ctx):
     if rng is None:
         return str(_uuid_mod.uuid4())
     bits = rng.getrandbits(128)
-    return str(_uuid_mod.UUID(int=bits))
+    # version=4 sets the RFC 4122 variant/version bits so the result
+    # passes a uuid.UUID(value).version == 4 check.
+    return str(_uuid_mod.UUID(int=bits, version=4))
 
 
 @_register("random")

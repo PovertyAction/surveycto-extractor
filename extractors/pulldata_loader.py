@@ -55,9 +55,15 @@ class PullDataTable:
             return ""
         idx = self._indexes.get(key_col)
         if idx is None:
-            idx = {
-                _norm(v): i for i, v in enumerate(self.df[key_col].tolist())
-            }
+            # First-occurrence wins (matches SurveyCTO's documented
+            # pulldata behaviour for duplicate keys). The dict
+            # comprehension we previously used overwrote with the last
+            # occurrence.
+            idx = {}
+            for i, v in enumerate(self.df[key_col].tolist()):
+                k = _norm(v)
+                if k not in idx:
+                    idx[k] = i
             self._indexes[key_col] = idx
         row_i = idx.get(_norm(key_value))
         if row_i is None:
@@ -70,8 +76,8 @@ class PullDataTable:
 
 def _norm(value: Any) -> str:
     """Canonical string form for key matching. Pandas reads numeric CSV
-    cells as floats; SurveyCTO compares stringwise. We coerce both sides
-    so ``42`` and ``'42'`` and ``42.0`` all match the same row."""
+    cells as floats; SurveyCTO compares stringwise. We coerce so that
+    ``42``, ``'42'``, ``42.0``, and ``'42.0'`` all match the same row."""
     if value is None:
         return ""
     if isinstance(value, float):
@@ -79,8 +85,22 @@ def _norm(value: Any) -> str:
             return ""
         if value.is_integer():
             return str(int(value))
-        return str(value)
-    return str(value).strip()
+        return repr(value)
+    s = str(value).strip()
+    if not s:
+        return ""
+    # Strings that parse as floats normalise via the float branch so
+    # the float-stored side ('1.0') and the string-stored side ('1')
+    # land on the same key.
+    try:
+        f = float(s)
+    except (TypeError, ValueError):
+        return s
+    if f != f:  # NaN
+        return ""
+    if f.is_integer():
+        return str(int(f))
+    return repr(f)
 
 
 def scan_pulldata_refs(questions: Iterable[Dict[str, Any]]) -> Dict[str, Set[str]]:

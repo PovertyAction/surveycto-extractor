@@ -182,8 +182,15 @@ def _build_run_context(rng: random.Random, index: int) -> RunContext:
         username=f"enum{rng.randint(1, 50):03d}",
         duration=duration,
         caseid=f"case-{index:04d}",
-        key=f"uuid:{uuid.UUID(int=rng.getrandbits(128))}",
-        formdef_version=f"2026{rng.randint(1, 12):02d}{rng.randint(1, 28):02d}",
+        # version=4 sets the RFC 4122 variant/version bits; real SurveyCTO
+        # KEY values are v4 UUIDs and HFC checks may assert this.
+        key=f"uuid:{uuid.UUID(int=rng.getrandbits(128), version=4)}",
+        # Sample a real date in the recent past so days 29-31 actually
+        # appear (the previous `randint(1, 28)` capped at 28 to avoid
+        # invalid dates).
+        formdef_version=(
+            base_dt - datetime.timedelta(days=rng.randint(0, 3 * 365))
+        ).strftime("%Y%m%d"),
     )
 
 
@@ -255,7 +262,10 @@ def _format_for_csv(value: Any) -> str:
             return ""
         if value.is_integer():
             return str(int(value))
-        return f"{value:.4f}".rstrip("0").rstrip(".")
+        # ``%.10g`` preserves significant digits for very small numbers
+        # (``0.00001`` would otherwise truncate to ``"0"`` via ``%.4f``)
+        # while still trimming trailing zeros for normal-magnitude floats.
+        return f"{value:.10g}"
     if isinstance(value, list):
         return " ".join(str(v) for v in value if v != "")
     return str(value)
@@ -339,11 +349,24 @@ def _walk_one(
     choices_lookup: Optional[Dict[str, List[Dict[str, Any]]]],
     var_to_choice_list: Optional[Dict[str, str]],
     strip_log: StripLog,
+    force_values: Optional[Dict[str, str]] = None,
+    geo_bbox: Optional[Tuple[float, float, float, float]] = None,
 ) -> WalkResult:
-    """Generate one respondent's row."""
+    """Generate one respondent's row.
+
+    ``force_values`` maps ``variable_name -> string value``; when the
+    walker reaches a listed variable that would otherwise be sampled,
+    the forced value is used instead. Relevance is still evaluated, so
+    a forced value only takes effect when the question would have been
+    populated anyway. Useful for ensuring consent-gated sections
+    populate during HFC dry-runs (e.g. ``c_consent=1``).
+
+    ``geo_bbox`` overrides the global default for geopoint sampling.
+    """
 
     row: Dict[str, Any] = {}
     repeat_counts: Dict[str, int] = {}
+    force_values = force_values or {}
 
     def _make_ctx(current_var: Optional[str], repeat_stack: List[Tuple[str, int]]):
         return EvalContext(
@@ -391,11 +414,17 @@ def _walk_one(
         repeat_parent = _find_innermost_repeat(group_path, repeats)
         if repeat_parent:
             n = repeat_counts.get(repeat_parent, 1)
+            forced = force_values.get(var_name)
             for i in range(1, n + 1):
                 key = f"{var_name}_{i}"
                 stack = [(repeat_parent, i)]
                 ctx = _make_ctx(key, stack)
-                if not _is_relevant(q, ctx, strip_log, key):
+                # --force-value bypasses relevance: the user is explicitly
+                # asking for the variable to be populated, so we treat it
+                # as relevant and write the forced value. This is the only
+                # way to make a gated-cascade actually populate when the
+                # gating ancestor would have randomly evaluated false.
+                if forced is None and not _is_relevant(q, ctx, strip_log, key):
                     row[key] = ""
                     if q_type == "select_multiple":
                         for c in choices:
@@ -404,10 +433,13 @@ def _walk_one(
                                 continue
                             row[f"{var_name}_{_choice_suffix(cv)}_{i}"] = ""
                     continue
-                value = _compute_value(
-                    q, q_type, choices, constraint, ctx, rng, runctx,
-                    strip_log, key,
-                )
+                if var_name in force_values:
+                    value = force_values[var_name]
+                else:
+                    value = _compute_value(
+                        q, q_type, choices, constraint, ctx, rng, runctx,
+                        strip_log, key, geo_bbox,
+                    )
                 if q_type == "select_multiple":
                     # Store the formatted space-separated string in the row
                     # so downstream `selected(${var}, X)` inside the same
@@ -430,7 +462,9 @@ def _walk_one(
 
         # ── Top-level variables (no repeat)
         ctx = _make_ctx(var_name, [])
-        if not _is_relevant(q, ctx, strip_log, var_name):
+        forced = force_values.get(var_name)
+        # --force-value bypasses relevance (see in-repeat branch above).
+        if forced is None and not _is_relevant(q, ctx, strip_log, var_name):
             row[var_name] = ""
             if q_type == "select_multiple":
                 for c in choices:
@@ -439,9 +473,13 @@ def _walk_one(
                         continue
                     row[f"{var_name}_{_choice_suffix(cv)}"] = ""
             continue
-        value = _compute_value(
-            q, q_type, choices, constraint, ctx, rng, runctx, strip_log, var_name,
-        )
+        if forced is not None:
+            value = forced
+        else:
+            value = _compute_value(
+                q, q_type, choices, constraint, ctx, rng, runctx,
+                strip_log, var_name, geo_bbox,
+            )
         if q_type == "select_multiple":
             # Store the formatted space-separated string (not the raw list)
             # so downstream `selected(${var}, X)` calls tokenise correctly
@@ -477,6 +515,7 @@ def _compute_value(
     runctx: RunContext,
     strip_log: StripLog,
     var_label: str,
+    geo_bbox: Optional[Tuple[float, float, float, float]] = None,
 ) -> Any:
     """Compute a Python value for one (relevance-true) question."""
 
@@ -508,9 +547,12 @@ def _compute_value(
         if not narrowed_choices:
             narrowed_choices = choices  # fall back to full list
 
+    sampler_kwargs = {}
+    if geo_bbox is not None:
+        sampler_kwargs["geo_bbox"] = geo_bbox
     if q_type == "select_multiple":
-        return sample_python_value(q_type, narrowed_choices, constraint, rng)
-    return sample_python_value(q_type, narrowed_choices, constraint, rng)
+        return sample_python_value(q_type, narrowed_choices, constraint, rng, **sampler_kwargs)
+    return sample_python_value(q_type, narrowed_choices, constraint, rng, **sampler_kwargs)
 
 
 def _narrow_choices(
@@ -660,16 +702,35 @@ def generate_synthetic_csv(
     n_rows: int = 5,
     seed: int = 0,
     allow_missing_pulldata: bool = False,
+    force_values: Optional[Dict[str, str]] = None,
+    geo_bbox: Optional[Tuple[float, float, float, float]] = None,
 ) -> Path:
     """Walk the form and write ``n_rows`` synthetic respondents to a wide CSV.
 
-    Returns the path of the written CSV. Writes a sibling strip-log at
-    ``output_csv_path.with_suffix('.strip.log')`` listing any expressions
-    the evaluator could not interpret.
+    Architecture: two passes per respondent, but only the second pass
+    retains the row in memory (and only one row at a time, which is then
+    written straight to disk). The first pass discards the row dict after
+    extracting `repeat_counts` so we can compute the global ``max_iter``
+    per repeat group before writing the CSV header. Memory is O(n_cols)
+    rather than O(n_rows x n_cols).
+
+    Each respondent gets a deterministic seed derived from ``seed``;
+    within that, two further RNGs split run-context generation from
+    question sampling, so adding or removing a metadata field doesn't
+    shift the byte-output of question-level samples at the same seed.
+
+    ``force_values`` maps ``variable_name -> string``; when the walker
+    reaches a listed variable that would otherwise be sampled, the
+    forced value is used. Useful for ensuring consent-gated sections
+    populate during HFC dry-runs.
+
+    ``geo_bbox`` overrides the global geopoint sampling box (per-survey
+    config; defaults to global).
     """
     if n_rows < 1:
         n_rows = 1
-    rng = random.Random(seed)
+    master = random.Random(seed)
+    respondent_seeds = [master.randrange(2 ** 63) for _ in range(n_rows)]
 
     with questions_json_path.open("r", encoding="utf-8") as f:
         questions: List[Dict[str, Any]] = json.load(f)
@@ -682,8 +743,9 @@ def generate_synthetic_csv(
     }
     repeats.discard("")
 
-    # Choice lookup for choice-label() etc. (not needed in Phase A subset,
-    # but plumb it through so Phase B doesn't need a signature change).
+    # Choice lookup for choice-label() / jr:choice-name(); plus var_name
+    # -> choice_list so the evaluator can resolve the right list from a
+    # ${var} reference.
     choices_lookup: Dict[str, List[Dict[str, Any]]] = {}
     var_to_choice_list: Dict[str, str] = {}
     for q in questions:
@@ -705,34 +767,50 @@ def generate_synthetic_csv(
         raise SystemExit(f"[synthetic] {exc}") from exc
     pulldata_lookup = make_lookup(tables) if tables else None
 
-    strip_log = StripLog()
-
-    # Pass 1: walk all respondents in memory, tracking max iterations per repeat
-    walk_results: List[WalkResult] = []
-    max_iter: Dict[str, int] = {}
-    for i in range(n_rows):
-        runctx = _build_run_context(rng, i + 1)
-        result = _walk_one(
-            questions, repeats, rng, runctx, pulldata_lookup, choices_lookup,
-            var_to_choice_list, strip_log,
+    def _walk_for_respondent(rs: int, i: int, log: StripLog) -> WalkResult:
+        # Two RNGs per respondent, derived from the per-respondent seed:
+        # `meta_rng` -> run-context only; `sample_rng` -> sampling + the
+        # evaluator's random() / uuid(). Adding a metadata field changes
+        # meta_rng draws but leaves sample_rng intact -> sampling stays
+        # byte-stable across edits to the run-context generator.
+        meta_rng = random.Random(f"{rs}::meta")
+        sample_rng = random.Random(f"{rs}::sample")
+        rctx = _build_run_context(meta_rng, i + 1)
+        return _walk_one(
+            questions, repeats, sample_rng, rctx, pulldata_lookup,
+            choices_lookup, var_to_choice_list, log,
+            force_values=force_values, geo_bbox=geo_bbox,
         )
-        # Store run-context inside the result for the writer
-        result.row["__runctx__"] = runctx
-        walk_results.append(result)
+
+    # ── Pass 1: collect repeat_counts per respondent; drop rows.
+    max_iter: Dict[str, int] = {}
+    p1_log = StripLog()  # pass-1 strip-log discarded so we don't double-report
+    for i, rs in enumerate(respondent_seeds):
+        result = _walk_for_respondent(rs, i, p1_log)
         for k, v in result.repeat_counts.items():
             if v > max_iter.get(k, 0):
                 max_iter[k] = v
+        # row dropped at end of scope
 
-    # Pass 2: assemble columns and write CSV
     column_order = _build_column_order(questions, repeats, max_iter)
 
+    # ── Pass 2: walk and write streaming. Each row is materialised once,
+    # written to disk, then released.
+    strip_log = StripLog()
     output_csv_path.parent.mkdir(parents=True, exist_ok=True)
     with output_csv_path.open("w", encoding="utf-8", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=column_order, extrasaction="ignore")
         writer.writeheader()
-        for result in walk_results:
-            runctx = result.row.pop("__runctx__")
-            writer.writerow(_row_to_csv_dict(result.row, runctx, column_order))
+        for i, rs in enumerate(respondent_seeds):
+            meta_rng = random.Random(f"{rs}::meta")
+            sample_rng = random.Random(f"{rs}::sample")
+            rctx = _build_run_context(meta_rng, i + 1)
+            result = _walk_one(
+                questions, repeats, sample_rng, rctx, pulldata_lookup,
+                choices_lookup, var_to_choice_list, strip_log,
+                force_values=force_values, geo_bbox=geo_bbox,
+            )
+            writer.writerow(_row_to_csv_dict(result.row, rctx, column_order))
 
     # Strip-log: write fresh, or remove a stale one from a previous run that
     # had unsupported functions which are now supported.
