@@ -384,7 +384,15 @@ def _walk_one(
                     strip_log, key,
                 )
                 if q_type == "select_multiple":
-                    selected_tokens = set(_format_for_csv(value).split())
+                    # Store the formatted space-separated string in the row
+                    # so downstream `selected(${var}, X)` inside the same
+                    # repeat (which resolves `${var}` -> `var_<i>` via the
+                    # repeat stack) can tokenise it correctly. The column
+                    # builder omits this `var_<i>` cell from CSV; it's
+                    # internal-only.
+                    csv_str = _format_for_csv(value)
+                    row[key] = csv_str
+                    selected_tokens = set(csv_str.split())
                     for c in choices:
                         cv = str(c.get("value", "")).strip()
                         if not cv:
@@ -409,15 +417,21 @@ def _walk_one(
         value = _compute_value(
             q, q_type, choices, constraint, ctx, rng, runctx, strip_log, var_name,
         )
-        row[var_name] = value
         if q_type == "select_multiple":
-            selected_tokens = set(_format_for_csv(value).split())
+            # Store the formatted space-separated string (not the raw list)
+            # so downstream `selected(${var}, X)` calls tokenise correctly
+            # via `_to_string(...) .split()`.
+            csv_str = _format_for_csv(value)
+            row[var_name] = csv_str
+            selected_tokens = set(csv_str.split())
             for c in choices:
                 cv = str(c.get("value", "")).strip()
                 if not cv:
                     continue
                 bin_key = f"{var_name}_{_choice_suffix(cv)}"
                 row[bin_key] = 1 if cv in selected_tokens else 0
+        else:
+            row[var_name] = value
 
     return WalkResult(row=row, repeat_counts=repeat_counts)
 
