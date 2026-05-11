@@ -136,7 +136,7 @@ class SurveyDocumentationSystem:
         print()
 
 
-def run_seed_phase(survey_key: str):
+def run_seed_phase(survey_key: str, n_rows: int = 1, seed: int = 0):
     """Phase 2c: generate seed .do file from questions.json (no dataset needed)."""
     survey_cfg = config.SURVEYS[survey_key]
     dataset_cfg = config.DATASETS.get(survey_key)
@@ -161,6 +161,8 @@ def run_seed_phase(survey_key: str):
         survey_name=survey_cfg["name"],
         repeat_defaults=repeat_defaults,
         data_path=data_path,
+        n_rows=n_rows,
+        seed=seed,
     )
     print()
 
@@ -187,6 +189,21 @@ def main():
         help=f"Phases to run: {', '.join(valid_phases)} (default: all). "
              f"'seed' requires questions.json from phase 'json'."
     )
+    parser.add_argument(
+        "--rows",
+        type=int,
+        default=1,
+        help="Number of rows in the seed dataset (seed phase only). Default 1 "
+             "produces the original schema seed; larger values emit per-row "
+             "replace statements with constraint-aware random values."
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=0,
+        help="Random seed for reproducible seed dataset generation. Default 0. "
+             "Same --seed produces byte-identical do-file output."
+    )
 
     args = parser.parse_args()
 
@@ -207,7 +224,7 @@ def main():
 
             # Seed-only: no need to load the survey XLSX
             if not run_all and phases == {"seed"}:
-                run_seed_phase(survey_key)
+                run_seed_phase(survey_key, n_rows=args.rows, seed=args.seed)
                 continue
 
             system = SurveyDocumentationSystem(survey_key)
@@ -218,7 +235,7 @@ def main():
 
             # Seed phase runs after JSON extraction
             if run_all or "seed" in phases:
-                run_seed_phase(survey_key)
+                run_seed_phase(survey_key, n_rows=args.rows, seed=args.seed)
 
         except Exception as e:
             print(f"\nERROR processing {survey_key} survey: {str(e)}")

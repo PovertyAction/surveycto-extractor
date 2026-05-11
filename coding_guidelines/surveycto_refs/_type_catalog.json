@@ -1,0 +1,432 @@
+{
+  "acknowledge": {
+    "description": "Standard XLSForm/ODK types sometimes seen in inherited forms.",
+    "hidden": false,
+    "stata_type": "byte",
+    "storage_class": "numeric",
+    "structural": false,
+    "supports_constraint": false,
+    "surveycto_type": "acknowledge",
+    "visible": false
+  },
+  "audio": {
+    "description": "Audio attachment.",
+    "hidden": false,
+    "stata_type": "str244",
+    "storage_class": "string",
+    "structural": false,
+    "supports_constraint": true,
+    "surveycto_type": "audio",
+    "visible": true
+  },
+  "audio audit": {
+    "description": "SurveyCTO-specific invisible audio recording of survey administration.",
+    "hidden": true,
+    "stata_type": "str244",
+    "storage_class": "string",
+    "structural": false,
+    "supports_constraint": false,
+    "surveycto_type": "audio audit",
+    "visible": false
+  },
+  "barcode": {
+    "description": "Barcode or QR-code value.",
+    "hidden": false,
+    "stata_type": "str32",
+    "storage_class": "string",
+    "structural": false,
+    "supports_constraint": true,
+    "surveycto_type": "barcode",
+    "visible": true
+  },
+  "begin group": {
+    "description": "Starts/ends a non-repeating group.",
+    "hidden": false,
+    "stata_type": null,
+    "storage_class": "structural",
+    "structural": true,
+    "supports_constraint": false,
+    "surveycto_type": "begin group",
+    "visible": false
+  },
+  "begin repeat": {
+    "description": "Starts/ends a repeat group.",
+    "hidden": false,
+    "stata_type": null,
+    "storage_class": "structural",
+    "structural": true,
+    "supports_constraint": false,
+    "surveycto_type": "begin repeat",
+    "visible": false
+  },
+  "calculate": {
+    "description": "Automatically calculated value.",
+    "hidden": true,
+    "stata_type": "long",
+    "storage_class": "numeric",
+    "structural": false,
+    "supports_constraint": false,
+    "surveycto_type": "calculate",
+    "visible": false
+  },
+  "calculate_here": {
+    "description": "SurveyCTO-specific fixed-location calculation.",
+    "hidden": true,
+    "stata_type": "long",
+    "storage_class": "numeric",
+    "structural": false,
+    "supports_constraint": false,
+    "surveycto_type": "calculate_here",
+    "visible": false
+  },
+  "caseid": {
+    "description": "Selected case ID, if any.",
+    "hidden": true,
+    "stata_type": "str32",
+    "storage_class": "string",
+    "structural": false,
+    "supports_constraint": false,
+    "surveycto_type": "caseid",
+    "visible": false
+  },
+  "comments": {
+    "description": "Enables field-level comments.",
+    "hidden": true,
+    "stata_type": "str244",
+    "storage_class": "string",
+    "structural": false,
+    "supports_constraint": false,
+    "surveycto_type": "comments",
+    "visible": false
+  },
+  "date": {
+    "description": "Date.",
+    "hidden": false,
+    "stata_type": "long",
+    "storage_class": "numeric",
+    "structural": false,
+    "supports_constraint": true,
+    "surveycto_type": "date",
+    "visible": true
+  },
+  "datetime": {
+    "description": "Date and time.",
+    "hidden": false,
+    "stata_type": "double",
+    "storage_class": "numeric",
+    "structural": false,
+    "supports_constraint": true,
+    "surveycto_type": "datetime",
+    "visible": true
+  },
+  "decimal": {
+    "description": "Number with decimals allowed.",
+    "hidden": false,
+    "stata_type": "double",
+    "storage_class": "numeric",
+    "structural": false,
+    "supports_constraint": true,
+    "surveycto_type": "decimal",
+    "visible": true
+  },
+  "deviceid": {
+    "description": "Device ID.",
+    "hidden": true,
+    "stata_type": "str32",
+    "storage_class": "string",
+    "structural": false,
+    "supports_constraint": false,
+    "surveycto_type": "deviceid",
+    "visible": false
+  },
+  "email": {
+    "description": "Standard XLSForm/ODK types sometimes seen in inherited forms.",
+    "hidden": false,
+    "stata_type": "str244",
+    "storage_class": "string",
+    "structural": false,
+    "supports_constraint": false,
+    "surveycto_type": "email",
+    "visible": false
+  },
+  "end": {
+    "description": "End date/time.",
+    "hidden": true,
+    "stata_type": "double",
+    "storage_class": "numeric",
+    "structural": false,
+    "supports_constraint": false,
+    "surveycto_type": "end",
+    "visible": false
+  },
+  "end group": {
+    "description": "Starts/ends a non-repeating group.",
+    "hidden": false,
+    "stata_type": null,
+    "storage_class": "structural",
+    "structural": true,
+    "supports_constraint": false,
+    "surveycto_type": "end group",
+    "visible": false
+  },
+  "end repeat": {
+    "description": "Starts/ends a repeat group.",
+    "hidden": false,
+    "stata_type": null,
+    "storage_class": "structural",
+    "structural": true,
+    "supports_constraint": false,
+    "surveycto_type": "end repeat",
+    "visible": false
+  },
+  "enumerator": {
+    "description": "SurveyCTO-specific. Enumerator name and ID in one value, selected/entered/scanned from an attached enumerator dataset.",
+    "hidden": false,
+    "stata_type": "str32",
+    "storage_class": "string",
+    "structural": false,
+    "supports_constraint": true,
+    "surveycto_type": "enumerator",
+    "visible": true
+  },
+  "file": {
+    "description": "File attachment.",
+    "hidden": false,
+    "stata_type": "str244",
+    "storage_class": "string",
+    "structural": false,
+    "supports_constraint": true,
+    "surveycto_type": "file",
+    "visible": true
+  },
+  "geopoint": {
+    "description": "Single GPS position.",
+    "hidden": false,
+    "stata_type": "double",
+    "storage_class": "numeric",
+    "structural": false,
+    "supports_constraint": true,
+    "surveycto_type": "geopoint",
+    "visible": true
+  },
+  "geoshape": {
+    "description": "GPS polygon enclosing an area.",
+    "hidden": false,
+    "stata_type": "str244",
+    "storage_class": "string",
+    "structural": false,
+    "supports_constraint": true,
+    "surveycto_type": "geoshape",
+    "visible": true
+  },
+  "geotrace": {
+    "description": "GPS open polyline or closed polygon.",
+    "hidden": false,
+    "stata_type": "str244",
+    "storage_class": "string",
+    "structural": false,
+    "supports_constraint": true,
+    "surveycto_type": "geotrace",
+    "visible": true
+  },
+  "image": {
+    "description": "Image attachment.",
+    "hidden": false,
+    "stata_type": "str244",
+    "storage_class": "string",
+    "structural": false,
+    "supports_constraint": true,
+    "surveycto_type": "image",
+    "visible": true
+  },
+  "integer": {
+    "description": "Whole number, no decimals.",
+    "hidden": false,
+    "stata_type": "long",
+    "storage_class": "numeric",
+    "structural": false,
+    "supports_constraint": true,
+    "surveycto_type": "integer",
+    "visible": true
+  },
+  "note": {
+    "description": "Display-only text; no data response.",
+    "hidden": false,
+    "stata_type": null,
+    "storage_class": "structural",
+    "structural": false,
+    "supports_constraint": false,
+    "surveycto_type": "note",
+    "visible": true
+  },
+  "phonenumber": {
+    "description": "Device SIM phone number, if available.",
+    "hidden": true,
+    "stata_type": "str32",
+    "storage_class": "string",
+    "structural": false,
+    "supports_constraint": false,
+    "surveycto_type": "phonenumber",
+    "visible": false
+  },
+  "select_multiple": {
+    "description": "Space-separated stored choice values.",
+    "hidden": false,
+    "stata_type": "byte",
+    "storage_class": "numeric",
+    "structural": false,
+    "supports_constraint": true,
+    "surveycto_type": "select_multiple",
+    "visible": true
+  },
+  "select_one": {
+    "description": "One stored choice value from `choices.list_name=listname`.",
+    "hidden": false,
+    "stata_type": "long",
+    "storage_class": "numeric",
+    "structural": false,
+    "supports_constraint": true,
+    "surveycto_type": "select_one",
+    "visible": true
+  },
+  "sensor_statistic": {
+    "description": "SurveyCTO-specific Android sensor summary statistic.",
+    "hidden": true,
+    "stata_type": "double",
+    "storage_class": "numeric",
+    "structural": false,
+    "supports_constraint": false,
+    "surveycto_type": "sensor_statistic",
+    "visible": false
+  },
+  "sensor_stream": {
+    "description": "SurveyCTO-specific sensor stream CSV attachment.",
+    "hidden": true,
+    "stata_type": "str244",
+    "storage_class": "string",
+    "structural": false,
+    "supports_constraint": false,
+    "surveycto_type": "sensor_stream",
+    "visible": false
+  },
+  "simserial": {
+    "description": "SIM serial number, if available.",
+    "hidden": true,
+    "stata_type": "str32",
+    "storage_class": "string",
+    "structural": false,
+    "supports_constraint": false,
+    "surveycto_type": "simserial",
+    "visible": false
+  },
+  "speed violations audit": {
+    "description": "SurveyCTO-specific invisible audio audit triggered by speed violations.",
+    "hidden": true,
+    "stata_type": "str244",
+    "storage_class": "string",
+    "structural": false,
+    "supports_constraint": false,
+    "surveycto_type": "speed violations audit",
+    "visible": false
+  },
+  "speed violations count": {
+    "description": "SurveyCTO-specific count of speed violations.",
+    "hidden": true,
+    "stata_type": "long",
+    "storage_class": "numeric",
+    "structural": false,
+    "supports_constraint": false,
+    "surveycto_type": "speed violations count",
+    "visible": false
+  },
+  "speed violations list": {
+    "description": "SurveyCTO-specific comma-separated list of fields with speed violations.",
+    "hidden": true,
+    "stata_type": "str244",
+    "storage_class": "string",
+    "structural": false,
+    "supports_constraint": false,
+    "surveycto_type": "speed violations list",
+    "visible": false
+  },
+  "start": {
+    "description": "Start date/time.",
+    "hidden": true,
+    "stata_type": "double",
+    "storage_class": "numeric",
+    "structural": false,
+    "supports_constraint": false,
+    "surveycto_type": "start",
+    "visible": false
+  },
+  "subscriberid": {
+    "description": "SIM subscriber ID, if available.",
+    "hidden": true,
+    "stata_type": "str32",
+    "storage_class": "string",
+    "structural": false,
+    "supports_constraint": false,
+    "surveycto_type": "subscriberid",
+    "visible": false
+  },
+  "text": {
+    "description": "Text string.",
+    "hidden": false,
+    "stata_type": "str32",
+    "storage_class": "string",
+    "structural": false,
+    "supports_constraint": true,
+    "surveycto_type": "text",
+    "visible": true
+  },
+  "text audit": {
+    "description": "SurveyCTO-specific CSV attachment with timing/event metadata.",
+    "hidden": true,
+    "stata_type": "str244",
+    "storage_class": "string",
+    "structural": false,
+    "supports_constraint": false,
+    "surveycto_type": "text audit",
+    "visible": false
+  },
+  "time": {
+    "description": "Time.",
+    "hidden": false,
+    "stata_type": "long",
+    "storage_class": "numeric",
+    "structural": false,
+    "supports_constraint": true,
+    "surveycto_type": "time",
+    "visible": true
+  },
+  "today": {
+    "description": "Standard XLSForm/ODK types sometimes seen in inherited forms.",
+    "hidden": false,
+    "stata_type": "long",
+    "storage_class": "numeric",
+    "structural": false,
+    "supports_constraint": false,
+    "surveycto_type": "today",
+    "visible": false
+  },
+  "username": {
+    "description": "Username of the user filling the form.",
+    "hidden": true,
+    "stata_type": "str32",
+    "storage_class": "string",
+    "structural": false,
+    "supports_constraint": false,
+    "surveycto_type": "username",
+    "visible": false
+  },
+  "video": {
+    "description": "Video attachment.",
+    "hidden": false,
+    "stata_type": "str244",
+    "storage_class": "string",
+    "structural": false,
+    "supports_constraint": true,
+    "surveycto_type": "video",
+    "visible": true
+  }
+}

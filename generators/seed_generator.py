@@ -2,49 +2,61 @@
 Seed Dataset Generator
 ======================
 Reads questions.json (form-level metadata) and emits a Stata .do file
-that creates a 1-row schema seed dataset.
+that creates a seed dataset with one or more rows. By default produces
+a 1-row schema seed; with `--rows N` produces N rows of plausible
+type-correct values.
 
 Usage (standalone):
     python -m surveycto_extractor.main --survey <key> --phases seed
+    python -m surveycto_extractor.main --survey <key> --phases seed --rows 5 --seed 42
 
 The generated .do file:
   - Uses only information from the JSON (no .dta needed)
-  - Declares explicit Stata storage types for every variable
+  - Declares explicit Stata storage types (from the vendored xlsform.md
+    type catalog at coding_guidelines/surveycto_refs/_type_catalog.json)
+  - Honours constraint expressions where they are simple numeric bounds
   - Expands repeat groups to N iterations (configured or auto-resolved)
   - Expands select_multiple questions into binary choice columns
 """
 
 import json
+import random
 import re
 from pathlib import Path
 from typing import Dict, List, Optional
 
 
+# ── Type catalog (lazy-loaded from xlsform.md) ───────────────────────────────
+
+_TYPE_CATALOG_PATH = (Path(__file__).resolve().parent.parent
+                      / "coding_guidelines" / "surveycto_refs"
+                      / "_type_catalog.json")
+_TYPE_CATALOG: Optional[Dict[str, Dict]] = None
+
+
+def _load_type_catalog() -> Dict[str, Dict]:
+    """Load the vendored type catalog; rebuild via build_type_catalog.py."""
+    global _TYPE_CATALOG
+    if _TYPE_CATALOG is None:
+        if _TYPE_CATALOG_PATH.exists():
+            with _TYPE_CATALOG_PATH.open("r", encoding="utf-8") as f:
+                _TYPE_CATALOG = json.load(f)
+        else:
+            _TYPE_CATALOG = {}
+    return _TYPE_CATALOG
+
+
 # ── Type mapping ─────────────────────────────────────────────────────────────
 
 def _stata_type(q_type: str, constraint: Optional[str] = None) -> str:
-    """Return Stata storage type for a SurveyCTO question type."""
-    mapping = {
-        "integer":      "long",
-        "decimal":      "double",
-        "date":         "long",
-        "datetime":     "double",
-        "time":         "long",
-        "select_one":   "long",
-        "repeat_count": "long",
-        "calculate":    "long",
-        "geopoint":     "double",
-        "geotrace":     "str64",
-        "geoshape":     "str64",
-        "barcode":      "str20",
-        "image":        "str20",
-        "audio":        "str20",
-        "video":        "str20",
-        "file":         "str20",
-    }
-    if q_type in mapping:
-        return mapping[q_type]
+    """Return Stata storage type for a SurveyCTO question type.
 
+    Uses the catalog at coding_guidelines/surveycto_refs/_type_catalog.json
+    (built by generators/build_type_catalog.py from the vendored xlsform.md)
+    as the source of truth; falls back to a small hardcoded table when the
+    catalog is missing or the type is not listed.
+    """
+    catalog = _load_type_catalog()
     if q_type == "text":
         # Try to infer max length from constraint like ". <= 10" or "string-length(.) <= 50"
         if constraint:
@@ -54,19 +66,155 @@ def _stata_type(q_type: str, constraint: Optional[str] = None) -> str:
                 return f"str{min(length, 2045)}"
         return "str32"
 
-    if q_type == "select_multiple":
-        # Binaries are byte
-        return "byte"
+    entry = catalog.get(q_type)
+    if entry and entry.get("stata_type"):
+        return entry["stata_type"]
 
-    # Fallback
-    return "str32"
+    # repeat_count is synthetic — not in the catalog
+    if q_type == "repeat_count":
+        return "long"
+
+    # Fallback: minimal hardcoded table
+    fallback = {
+        "integer": "long", "decimal": "double", "date": "long",
+        "datetime": "double", "time": "long", "select_one": "long",
+        "calculate": "long", "geopoint": "double", "select_multiple": "byte",
+    }
+    return fallback.get(q_type, "str32")
 
 
-def _stata_value(q_type: str, choices: Optional[List[Dict]] = None) -> str:
-    """Return a synthetic value literal for a Stata gen statement."""
+# ── Constraint-aware bound extraction ────────────────────────────────────────
+
+def _numeric_bounds(constraint: Optional[str]) -> tuple:
+    """Extract (lower, upper) numeric bounds from a constraint expression.
+
+    Recognises clauses like `. >= N`, `. > N`, `. <= N`, `. < N`,
+    `var >= N`, etc. on either side of `and`. Inclusive on >= and <=,
+    pinned by +/-1 for strict > / <. Returns (None, None) if no clean
+    bound can be extracted.
+    """
+    if not constraint:
+        return (None, None)
+
+    lo = None
+    hi = None
+    # `. op N` or `var op N` — match every relational clause
+    for m in re.finditer(
+        r'(?:\.|[A-Za-z_]\w*)\s*(>=|<=|>(?!=)|<(?!=))\s*(-?\d+(?:\.\d+)?)',
+        constraint
+    ):
+        op, val = m.group(1), float(m.group(2))
+        if op == '>=':
+            lo = val if lo is None else max(lo, val)
+        elif op == '>':
+            v = val + 1
+            lo = v if lo is None else max(lo, v)
+        elif op == '<=':
+            hi = val if hi is None else min(hi, val)
+        elif op == '<':
+            v = val - 1
+            hi = v if hi is None else min(hi, v)
+    return (lo, hi)
+
+
+def _text_max_length(constraint: Optional[str]) -> Optional[int]:
+    """Look for `string-length(.) <= N` or `<= N` patterns in the constraint."""
+    if not constraint:
+        return None
+    m = re.search(r'<=\s*(\d+)', constraint)
+    if m:
+        return int(m.group(1))
+    return None
+
+
+# ── Per-type random value generator ──────────────────────────────────────────
+
+def _random_value(
+    q_type: str,
+    choices: Optional[List[Dict]],
+    constraint: Optional[str],
+    rng: random.Random,
+) -> str:
+    """Return a Stata literal for one randomly-sampled, type-correct value.
+
+    For integer / decimal: samples within constraint bounds when extractable;
+    otherwise uses safe defaults. For select_one: draws uniformly from choice
+    values. For select_multiple: callers iterate per-binary-column. For
+    dates/times: draws within a reasonable window. For strings: short seeded
+    token, optionally length-capped by `string-length(.) <= N`.
+    """
     if q_type == "integer":
-        return "1"
+        lo, hi = _numeric_bounds(constraint)
+        lo = int(lo) if lo is not None else 0
+        hi = int(hi) if hi is not None else max(lo + 1, 100)
+        if lo > hi:
+            lo, hi = hi, lo
+        return str(rng.randint(lo, hi))
+
     if q_type == "decimal":
+        lo, hi = _numeric_bounds(constraint)
+        lo = lo if lo is not None else 0.0
+        hi = hi if hi is not None else max(lo + 1.0, 100.0)
+        if lo > hi:
+            lo, hi = hi, lo
+        return f"{rng.uniform(lo, hi):.4f}"
+
+    if q_type == "date":
+        # Random date between 2020-01-01 and today + 30 days
+        day_offset = rng.randint(0, 5 * 365)
+        # Stata date counts days since 1960-01-01. 2020-01-01 = 21915.
+        return str(21915 + day_offset)
+
+    if q_type == "datetime":
+        # Random datetime in ms since 1960-01-01. ~21915 days * 86_400_000 ms.
+        ms_offset = rng.randint(0, 5 * 365 * 86_400_000)
+        return str(21915 * 86_400_000 + ms_offset)
+
+    if q_type == "time":
+        # Random second-of-day in ms (Stata stores as %tcHH:MM:SS).
+        return str(rng.randint(0, 86_400) * 1000)
+
+    if q_type == "select_one":
+        if choices:
+            ints = [
+                str(c.get("value", "")).strip()
+                for c in choices
+                if str(c.get("value", "")).strip().lstrip("-").isdigit()
+            ]
+            if ints:
+                return rng.choice(ints)
+        return "1"
+
+    if q_type in ("repeat_count", "calculate"):
+        return "1"
+
+    if q_type == "geopoint":
+        # Caller splits into 4 component vars; this default is used per
+        # component. Random lat/lon in a sensible range.
+        return f"{rng.uniform(-90, 90):.6f}"
+
+    if q_type in ("barcode", "image", "audio", "video", "file"):
+        return f'"seed_file_{rng.randint(1, 9999)}"'
+
+    if q_type == "text":
+        n = _text_max_length(constraint)
+        token = f"seed_{rng.randint(0, 9999)}"
+        if n is not None:
+            return f'"{token[:n]}"'
+        return f'"{token}"'
+
+    if q_type == "select_multiple":
+        return "0"
+
+    return '"seed"'
+
+
+# Legacy entry point kept for backward compatibility — fixed placeholder
+# values, not sampled. Used for the n_rows == 1 default so the schema
+# seed remains byte-identical to pre-Tier-5 output.
+def _stata_value(q_type: str, choices: Optional[List[Dict]] = None) -> str:
+    """Return a synthetic value literal (fixed placeholders, no rng)."""
+    if q_type in ("integer", "decimal"):
         return "1"
     if q_type == "date":
         return "td(01jan2024)"
@@ -75,10 +223,8 @@ def _stata_value(q_type: str, choices: Optional[List[Dict]] = None) -> str:
     if q_type == "time":
         return "0"
     if q_type == "select_one":
-        # Use first choice value (integer) if available
         if choices:
-            first = choices[0]
-            val = str(first.get("value", "1")).strip()
+            val = str(choices[0].get("value", "1")).strip()
             if val and val.lstrip("-").isdigit():
                 return val
         return "1"
@@ -190,15 +336,62 @@ def _resolve_repeat_count(calculation: Optional[str], repeat_defaults: Dict[str,
 
 # ── Line builders ─────────────────────────────────────────────────────────────
 
-def _gen_line(var_name: str, stata_type: str, value: str, label: str) -> str:
-    """Build a single gen + label variable statement."""
+def _gen_line(var_name: str, stata_type: str, value: str, label: str,
+              extra_replaces: Optional[List[str]] = None) -> str:
+    """Build gen + label variable + optional per-row replace statements.
+
+    extra_replaces is a list of (row_index, value) tuples rendered as
+    `replace var = value in K` lines, used when n_rows > 1.
+    """
     safe_label = label.replace('"', "'").replace("\n", " ").strip()
     if len(safe_label) > 80:
         safe_label = safe_label[:77] + "..."
     lines = [f"gen {stata_type} {var_name} = {value}"]
     if safe_label:
         lines.append(f'label variable {var_name} "{safe_label}"')
+    if extra_replaces:
+        lines.extend(extra_replaces)
     return "\n".join(lines)
+
+
+def _value_for_row(
+    q_type: str,
+    choices: Optional[List[Dict]],
+    constraint: Optional[str],
+    stata_type: str,
+    rng: random.Random,
+) -> str:
+    """Generate one value formatted appropriately for the Stata type."""
+    raw = _random_value(q_type, choices, constraint, rng)
+    return _format_value(stata_type, raw)
+
+
+def _gen_values(
+    var_name: str,
+    stata_type: str,
+    q_type: str,
+    choices: Optional[List[Dict]],
+    constraint: Optional[str],
+    label: str,
+    n_rows: int,
+    rng: random.Random,
+) -> str:
+    """Emit gen + per-row replace statements for one variable across n_rows.
+
+    When n_rows == 1, uses the legacy deterministic placeholder (`1`, `"seed"`,
+    etc.) so the default 1-row schema seed remains byte-identical to the
+    pre-Tier-5 output. When n_rows > 1, samples constraint-aware values via
+    the rng.
+    """
+    if n_rows == 1:
+        first = _format_value(stata_type, _stata_value(q_type, choices))
+        return _gen_line(var_name, stata_type, first, label)
+    first = _value_for_row(q_type, choices, constraint, stata_type, rng)
+    replaces: List[str] = []
+    for i in range(2, n_rows + 1):
+        v = _value_for_row(q_type, choices, constraint, stata_type, rng)
+        replaces.append(f"replace {var_name} = {v} in {i}")
+    return _gen_line(var_name, stata_type, first, label, extra_replaces=replaces)
 
 
 def _format_value_with_format(var_name: str, q_type: str) -> Optional[str]:
@@ -219,9 +412,11 @@ def generate_seed_dofile(
     repeat_defaults: Optional[Dict[str, int]] = None,
     seed_dta_stata_path: str = "",
     data_path: Optional[Path] = None,
+    n_rows: int = 1,
+    seed: int = 0,
 ) -> Path:
     """
-    Generate a Stata .do file that creates a 1-row seed dataset.
+    Generate a Stata .do file that creates a seed dataset.
 
     Args:
         questions_json_path: Path to questions.json produced by Phase 2
@@ -232,12 +427,21 @@ def generate_seed_dofile(
         data_path: Optional path to existing .dta — used to infer max iterations
             for variable-driven repeat groups (e.g. repeat_count=${hh_size}).
             Safe to omit for new forms with no submissions yet.
+        n_rows: Number of rows in the generated dataset. Default 1 produces
+            the original schema seed (one row of placeholder values). Larger
+            values emit per-row `replace` statements with constraint-aware
+            random values drawn from `random.Random(seed)`.
+        seed: Random seed for reproducibility. Same seed → byte-identical
+            do-file output.
 
     Returns:
         Path to the written .do file
     """
     if repeat_defaults is None:
         repeat_defaults = {}
+    if n_rows < 1:
+        n_rows = 1
+    rng = random.Random(seed)
 
     with open(questions_json_path, "r", encoding="utf-8") as f:
         questions: List[Dict] = json.load(f)
@@ -282,13 +486,25 @@ def generate_seed_dofile(
               ", ".join(f"{k}={v}" for k, v in data_max_by_group.items()))
 
     # ── Build do-file lines ───────────────────────────────────────────────────
+    header_purpose = (
+        "1-row schema seed (default)"
+        if n_rows == 1
+        else f"{n_rows}-row seeded dataset (seed={seed})"
+    )
     lines = [
         f"* Seed dataset: {survey_name}",
-        "* Generated by surveycto_extractor — run this in Stata to create a 1-row schema seed",
+        f"* Generated by surveycto_extractor — {header_purpose}",
         "* Do NOT edit by hand; regenerate via: python -m surveycto_extractor.main --phases seed",
+    ]
+    if n_rows > 1:
+        lines.append(
+            "* Values are constraint-aware where bounds are extractable from "
+            "the form. Not real data; do NOT use for analysis."
+        )
+    lines += [
         "",
         "clear",
-        "set obs 1",
+        f"set obs {n_rows}",
         "",
     ]
 
@@ -317,7 +533,10 @@ def generate_seed_dofile(
             n = repeat_counts.get(repeat_name, 1)
             lines.append(f"\n* ── Repeat: {repeat_name} (N={n} iteration{'s' if n != 1 else ''}) {'─' * max(0, 40 - len(repeat_name))}")
 
-            # Emit the _count variable itself
+            # Emit the _count variable itself.
+            # Count is a structural integer that should be constant across
+            # all seeded rows (it tells Stata how many iterations exist),
+            # so we don't randomize it row-by-row.
             stata_type = "long"
             gen_line = _gen_line(var_name, stata_type, str(n), label)
             lines.append(gen_line)
@@ -329,12 +548,23 @@ def generate_seed_dofile(
 
         # ── geopoint → 4 component variables
         if q_type == "geopoint":
-            for suffix, comp_label in [
-                ("_lat", "latitude"), ("_lon", "longitude"),
-                ("_alt", "altitude"), ("_acc", "accuracy")
+            for suffix, comp_label, comp_range in [
+                ("_lat", "latitude",  (-90.0, 90.0)),
+                ("_lon", "longitude", (-180.0, 180.0)),
+                ("_alt", "altitude",  (0.0, 5000.0)),
+                ("_acc", "accuracy",  (1.0, 50.0)),
             ]:
                 comp_var = var_name + suffix
-                gen_line = _gen_line(comp_var, "double", "0", f"{label} ({comp_label})")
+                if n_rows == 1:
+                    # Legacy: literal 0 placeholder
+                    gen_line = _gen_line(comp_var, "double", "0", f"{label} ({comp_label})")
+                else:
+                    first = f"{rng.uniform(*comp_range):.6f}"
+                    replaces = []
+                    for i in range(2, n_rows + 1):
+                        replaces.append(f"replace {comp_var} = {rng.uniform(*comp_range):.6f} in {i}")
+                    gen_line = _gen_line(comp_var, "double", first, f"{label} ({comp_label})",
+                                         extra_replaces=replaces or None)
                 lines.append(gen_line)
             lines.append("")
             continue
@@ -354,23 +584,33 @@ def generate_seed_dofile(
                     choice_label = str(choice.get("label", "")).strip()
                     stata_suffix = choice_val.replace('-', '_')
                     base_col = f"{var_name}_{stata_suffix}"
-                    val = "1" if ci == 0 else "0"
                     for i in range(1, n + 1):
                         iter_var = f"{base_col}_{i}"
                         iter_label = f"{label}: {choice_label} (iteration {i})" if choice_label else f"{label}: {choice_val} (iteration {i})"
-                        gen_line = _gen_line(iter_var, "byte", val, iter_label)
+                        if n_rows == 1:
+                            # Legacy: first choice = 1, rest = 0
+                            first = "1" if ci == 0 else "0"
+                            gen_line = _gen_line(iter_var, "byte", first, iter_label)
+                        else:
+                            # Multi-row: Bernoulli per row, first choice is
+                            # weighted up so each seed row has at least one
+                            # selected most of the time.
+                            first = "1" if (ci == 0 and rng.random() < 0.7) else str(int(rng.random() < 0.5))
+                            replaces = []
+                            for r in range(2, n_rows + 1):
+                                replaces.append(f"replace {iter_var} = {int(rng.random() < 0.5)} in {r}")
+                            gen_line = _gen_line(iter_var, "byte", first, iter_label,
+                                                 extra_replaces=replaces or None)
                         lines.append(gen_line)
                 lines.append("")
                 continue
 
             stata_type = _stata_type(q_type, constraint)
-            base_value = _stata_value(q_type, choices if choices else None)
-            base_value = _format_value(stata_type, base_value)
-
             for i in range(1, n + 1):
                 iter_var = f"{var_name}_{i}"
                 iter_label = f"{label} (iteration {i})"
-                gen_line = _gen_line(iter_var, stata_type, base_value, iter_label)
+                gen_line = _gen_values(iter_var, stata_type, q_type, choices,
+                                       constraint, iter_label, n_rows, rng)
                 lines.append(gen_line)
                 fmt = _format_value_with_format(iter_var, q_type)
                 if fmt:
@@ -388,19 +628,25 @@ def generate_seed_dofile(
                 stata_suffix = choice_val.replace('-', '_')
                 col_var = f"{var_name}_{stata_suffix}"
                 col_label = f"{label}: {choice_label}" if choice_label else f"{label}: {choice_val}"
-                # First choice = 1 (seed has at least one selected), rest = 0
-                val = "1" if ci == 0 else "0"
-                gen_line = _gen_line(col_var, "byte", val, col_label)
+                if n_rows == 1:
+                    # Legacy: first choice = 1, rest = 0
+                    first = "1" if ci == 0 else "0"
+                    gen_line = _gen_line(col_var, "byte", first, col_label)
+                else:
+                    first = "1" if ci == 0 else str(int(rng.random() < 0.5))
+                    replaces = []
+                    for r in range(2, n_rows + 1):
+                        replaces.append(f"replace {col_var} = {int(rng.random() < 0.5)} in {r}")
+                    gen_line = _gen_line(col_var, "byte", first, col_label,
+                                         extra_replaces=replaces or None)
                 lines.append(gen_line)
             lines.append("")
             continue
 
         # ── Regular (non-repeat) variable
         stata_type = _stata_type(q_type, constraint)
-        value = _stata_value(q_type, choices if choices else None)
-        value = _format_value(stata_type, value)
-
-        gen_line = _gen_line(var_name, stata_type, value, label)
+        gen_line = _gen_values(var_name, stata_type, q_type, choices,
+                               constraint, label, n_rows, rng)
         lines.append(gen_line)
         fmt = _format_value_with_format(var_name, q_type)
         if fmt:
