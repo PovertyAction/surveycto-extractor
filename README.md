@@ -264,9 +264,10 @@ Stata cleaning modules must follow the guidelines in:
 - `surveycto_extractor/coding_guidelines/CLEANING.md` — language-independent cleaning principles
 - `surveycto_extractor/coding_guidelines/STATA.md` — Stata-specific patterns and guardrails
 - `surveycto_extractor/coding_guidelines/SURVEYCTO_RELEVANCE_TRANSLATION.md` — SurveyCTO → Stata skip logic translation rules
+- `surveycto_extractor/coding_guidelines/surveycto_refs/xlsform.md` and `expressions.md` — vendored SurveyCTO references (XLSForm columns / expression syntax) for cross-checking against the authoritative SurveyCTO docs
 ```
 
-These files need no modification — they are fully project-agnostic.
+These files need no modification — they are fully project-agnostic. The `surveycto_refs/` subdirectory is a vendored read-only mirror of SurveyCTO's official agent-skill references (Apache-2.0). See `coding_guidelines/surveycto_refs/README.md` for the pinned upstream commit and refresh procedure.
 
 ---
 
