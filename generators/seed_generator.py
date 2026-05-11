@@ -25,6 +25,9 @@ import re
 from pathlib import Path
 from typing import Dict, List, Optional
 
+from generators.sampling import numeric_bounds as _numeric_bounds  # noqa: F401
+from generators.sampling import text_max_length as _text_max_length  # noqa: F401
+
 
 # ── Type catalog (lazy-loaded from xlsform.md) ───────────────────────────────
 
@@ -83,51 +86,12 @@ def _stata_type(q_type: str, constraint: Optional[str] = None) -> str:
     return fallback.get(q_type, "str32")
 
 
-# ── Constraint-aware bound extraction ────────────────────────────────────────
-
-def _numeric_bounds(constraint: Optional[str]) -> tuple:
-    """Extract (lower, upper) numeric bounds from a constraint expression.
-
-    Recognises clauses like `. >= N`, `. > N`, `. <= N`, `. < N`,
-    `var >= N`, etc. on either side of `and`. Inclusive on >= and <=,
-    pinned by +/-1 for strict > / <. Returns (None, None) if no clean
-    bound can be extracted.
-    """
-    if not constraint:
-        return (None, None)
-
-    lo = None
-    hi = None
-    # `. op N` or `var op N` — match every relational clause
-    for m in re.finditer(
-        r'(?:\.|[A-Za-z_]\w*)\s*(>=|<=|>(?!=)|<(?!=))\s*(-?\d+(?:\.\d+)?)',
-        constraint
-    ):
-        op, val = m.group(1), float(m.group(2))
-        if op == '>=':
-            lo = val if lo is None else max(lo, val)
-        elif op == '>':
-            v = val + 1
-            lo = v if lo is None else max(lo, v)
-        elif op == '<=':
-            hi = val if hi is None else min(hi, val)
-        elif op == '<':
-            v = val - 1
-            hi = v if hi is None else min(hi, v)
-    return (lo, hi)
-
-
-def _text_max_length(constraint: Optional[str]) -> Optional[int]:
-    """Look for `string-length(.) <= N` or `<= N` patterns in the constraint."""
-    if not constraint:
-        return None
-    m = re.search(r'<=\s*(\d+)', constraint)
-    if m:
-        return int(m.group(1))
-    return None
-
-
 # ── Per-type random value generator ──────────────────────────────────────────
+
+# Bound extraction helpers (`_numeric_bounds`, `_text_max_length`) are now
+# imported from `generators.sampling` so the same parser is shared with the
+# CSV synthetic-data generator.
+
 
 def _random_value(
     q_type: str,

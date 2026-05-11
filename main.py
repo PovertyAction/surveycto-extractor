@@ -16,6 +16,7 @@ from extractors.json_extractor import JSONExtractor
 from generators.diagram_generator import DiagramGenerator
 from generators.section_splitter import SectionSplitter
 from generators.seed_generator import generate_seed_dofile
+from generators.synthetic_data import generate_synthetic_csv
 from transformers.logic_converter import clear_strip_log
 
 
@@ -167,10 +168,47 @@ def run_seed_phase(survey_key: str, n_rows: int = 1, seed: int = 0):
     print()
 
 
+def run_synthetic_phase(
+    survey_key: str, n_rows: int = 5, seed: int = 0, allow_missing_pulldata: bool = False
+):
+    """Generate a SurveyCTO-shaped synthetic export CSV from questions.json."""
+    survey_cfg = config.SURVEYS[survey_key]
+    dataset_cfg = config.DATASETS.get(survey_key)
+    if dataset_cfg is None:
+        print(f"[SKIP] No DATASETS entry for '{survey_key}' -- cannot locate questions_json for synthetic")
+        return
+
+    json_key = "questions_json" if "questions_json" in dataset_cfg else "json"
+    questions_json = Path(dataset_cfg[json_key])
+    if not questions_json.exists():
+        print(f"[SKIP] questions.json not found at {questions_json} -- run phase 2 first")
+        return
+
+    output_csv = survey_cfg["output_dir"] / f"{survey_key}_synthetic.csv"
+    # Search for pulldata CSVs in the configured dirs (default: dir of input_file)
+    search_dirs = survey_cfg.get("pulldata_search_dirs")
+    if not search_dirs:
+        search_dirs = [Path(survey_cfg["input_file"]).parent]
+    else:
+        search_dirs = [Path(d) for d in search_dirs]
+
+    print(f"\n=== Phase 2d: Synthetic Data Generator ({survey_key}) ===")
+    generate_synthetic_csv(
+        questions_json_path=questions_json,
+        output_csv_path=output_csv,
+        pulldata_search_dirs=search_dirs,
+        survey_name=survey_cfg["name"],
+        n_rows=n_rows,
+        seed=seed,
+        allow_missing_pulldata=allow_missing_pulldata,
+    )
+    print()
+
+
 def main():
     """Main entry point with CLI"""
     survey_keys = list(config.SURVEYS.keys())
-    valid_phases = ["csv", "json", "seed", "sections", "all"]
+    valid_phases = ["csv", "json", "seed", "sections", "synthetic", "all"]
 
     parser = argparse.ArgumentParser(
         description="Generate comprehensive documentation for SurveyCTO surveys"
@@ -204,6 +242,12 @@ def main():
         help="Random seed for reproducible seed dataset generation. Default 0. "
              "Same --seed produces byte-identical do-file output."
     )
+    parser.add_argument(
+        "--allow-missing-pulldata",
+        action="store_true",
+        help="For --phases synthetic: warn instead of failing when a pulldata "
+             "CSV referenced by the form is not found in the search dirs."
+    )
 
     args = parser.parse_args()
 
@@ -222,9 +266,15 @@ def main():
             # stale entries bleeding across instruments
             clear_strip_log()
 
-            # Seed-only: no need to load the survey XLSX
+            # Seed-only / synthetic-only: no need to load the survey XLSX
             if not run_all and phases == {"seed"}:
                 run_seed_phase(survey_key, n_rows=args.rows, seed=args.seed)
+                continue
+            if not run_all and phases == {"synthetic"}:
+                run_synthetic_phase(
+                    survey_key, n_rows=args.rows, seed=args.seed,
+                    allow_missing_pulldata=args.allow_missing_pulldata,
+                )
                 continue
 
             system = SurveyDocumentationSystem(survey_key)
@@ -236,6 +286,13 @@ def main():
             # Seed phase runs after JSON extraction
             if run_all or "seed" in phases:
                 run_seed_phase(survey_key, n_rows=args.rows, seed=args.seed)
+
+            # Synthetic CSV phase runs after JSON extraction
+            if "synthetic" in phases:
+                run_synthetic_phase(
+                    survey_key, n_rows=args.rows, seed=args.seed,
+                    allow_missing_pulldata=args.allow_missing_pulldata,
+                )
 
         except Exception as e:
             print(f"\nERROR processing {survey_key} survey: {str(e)}")
