@@ -55,6 +55,56 @@ class LogicConverter:
         return "_" + code_str.replace("-", "_")
 
     @staticmethod
+    def _find_balanced(s: str, open_idx: int) -> int:
+        """
+        Given `s` and the index of an opening `(`, return the index of the
+        matching closing `)`. Returns -1 if unbalanced.
+        """
+        depth = 0
+        for i in range(open_idx, len(s)):
+            if s[i] == '(':
+                depth += 1
+            elif s[i] == ')':
+                depth -= 1
+                if depth == 0:
+                    return i
+        return -1
+
+    @staticmethod
+    def _sub_function_balanced(
+        expr: str,
+        func_pattern: str,
+        replacer,
+    ) -> str:
+        """
+        Find every occurrence of `func_pattern(` in `expr` and replace the
+        entire balanced call (including nested parens) using `replacer(args)`
+        where `args` is the inner argument string.
+
+        `func_pattern` is a regex matching the function NAME alone (without
+        the opening paren).
+        """
+        out: List[str] = []
+        i = 0
+        rx = re.compile(rf'\b({func_pattern})\s*\(', re.IGNORECASE)
+        while i < len(expr):
+            m = rx.search(expr, i)
+            if not m:
+                out.append(expr[i:])
+                break
+            out.append(expr[i:m.start()])
+            open_paren = m.end() - 1
+            close_paren = LogicConverter._find_balanced(expr, open_paren)
+            if close_paren < 0:
+                # Unbalanced — preserve the rest verbatim
+                out.append(expr[m.start():])
+                break
+            args = expr[open_paren + 1:close_paren]
+            out.append(replacer(args))
+            i = close_paren + 1
+        return ''.join(out)
+
+    @staticmethod
     def _split_top_level_args(args_str: str) -> List[str]:
         """
         Split a comma-separated argument string respecting parenthesis depth.
@@ -160,20 +210,28 @@ class LogicConverter:
     @staticmethod
     def _translate_coalesce(match: re.Match, varname: str) -> str:
         """
-        coalesce(a, b)    → cond(missing(a), b, a)
-        coalesce(a, b, c) → cond(missing(a), cond(missing(b), c, b), a)
-        > 3 args          → _SENTINEL  (COALESCE_TOO_MANY)
+        N-ary coalesce: returns the first non-missing argument.
+
+        coalesce(a, b)        → cond(missing(a), b, a)
+        coalesce(a, b, c)     → cond(missing(a), cond(missing(b), c, b), a)
+        coalesce(a, b, c, d)  → cond(missing(a), cond(missing(b), cond(missing(c), d, c), b), a)
+        ...
+
+        SurveyCTO docs say coalesce takes any number of non-repeated arguments,
+        so we expand inductively from the right.
         """
         parts = LogicConverter._split_top_level_args(match.group(1))
-        if len(parts) == 2:
-            a, b = parts
-            return f"cond(missing({a}), {b}, {a})"
-        elif len(parts) == 3:
-            a, b, c = parts
-            return f"cond(missing({a}), cond(missing({b}), {c}, {b}), {a})"
-        else:
-            _log_strip(varname, match.group(0), "COALESCE_TOO_MANY")
+        if len(parts) < 2:
+            _log_strip(varname, match.group(0), "COALESCE_BAD_ARITY")
             return _SENTINEL
+
+        # Build the nested cond() from the right: result_n = parts[-1]
+        # result_{i-1} = cond(missing(parts[i-1]), result_i, parts[i-1])
+        result = parts[-1]
+        for arg in reversed(parts[:-1]):
+            result = f"cond(missing({arg}), {result}, {arg})"
+        return result
+
 
     @staticmethod
     def _translate_substr(match: re.Match) -> str:
@@ -218,9 +276,12 @@ class LogicConverter:
             return f"{var} {op} {val} & !missing({var})"
 
         # Match: identifier  (>=|<=|>|<)  numeric_literal
-        # Negative lookahead on > to avoid matching ==, !=
+        # LHS must start with a letter or underscore (not a digit), so we
+        # don't add a spurious !missing() guard when the LHS is a numeric
+        # literal (e.g. `100 < 5` from a stripped `<fn>() < 5`).
+        # Negative lookahead on > to avoid matching ==, !=.
         expr = re.sub(
-            r'\b(\w+)\s*(>=|<=|>(?!=)|<(?!=))\s*(-?\d+(?:\.\d+)?)',
+            r'\b([A-Za-z_]\w*)\s*(>=|<=|>(?!=)|<(?!=))\s*(-?\d+(?:\.\d+)?)',
             guard_sub,
             expr,
         )
@@ -233,9 +294,23 @@ class LogicConverter:
         dangling logical operators (&, |) and empty parentheses.
         Runs repeatedly until stable.
         """
+        # Comparison-cleanup tokens: _SENTINEL on either side of a relational
+        # operator means the comparison is meaningless. The RHS/LHS operand
+        # token is anything that isn't a logical operator or paren.
+        _OP = r'(?:>=|<=|!=|==|>(?!=)|<(?!=))'
+        _OPERAND = r'[^\s&|()]+'
+
         prev = None
         while prev != expr:
             prev = expr
+            # Strip _SENTINEL with adjacent comparison: `_SENTINEL op operand`
+            expr = re.sub(
+                rf'{re.escape(_SENTINEL)}\s*{_OP}\s*{_OPERAND}',
+                _SENTINEL, expr)
+            # Mirror: `operand op _SENTINEL`
+            expr = re.sub(
+                rf'{_OPERAND}\s*{_OP}\s*{re.escape(_SENTINEL)}',
+                _SENTINEL, expr)
             # Remove sentinel surrounded by whitespace
             expr = re.sub(r'\s*' + re.escape(_SENTINEL) + r'\s*', ' ', expr)
             # Dangling & or | at start / end of full expression
@@ -350,9 +425,27 @@ class LogicConverter:
         expr = re.sub(
             r'\bstring-length\s*\(\s*(\w+)\s*\)\s*=\s*0',
             r'missing(\1)', expr, flags=re.IGNORECASE)
+        # Remaining string-length(...) → strlen(...) [Stata's string length fn].
+        # Catches comparisons like `string-length(var) > 5`.
+        expr = re.sub(r'\bstring-length\s*\(', 'strlen(', expr, flags=re.IGNORECASE)
 
         # --- Step 5: empty(var) → missing(var) ------------------------------
         expr = re.sub(r'\bempty\s*\(\s*(\w+)\s*\)', r'missing(\1)', expr, flags=re.IGNORECASE)
+
+        # --- Step 5b: relevant(var) → !missing(var) -------------------------
+        # SurveyCTO `relevant(${x})` is true when the field is currently
+        # relevant AND has a value. In the Stata wide-export world, an
+        # irrelevant field is missing, so `!missing(x)` is a faithful proxy.
+        expr = re.sub(r'\brelevant\s*\(\s*(\w+)\s*\)', r'!missing(\1)', expr, flags=re.IGNORECASE)
+
+        # --- Step 5c: number(x) / int(x) — type-cast passthroughs -----------
+        # `number(x)` in SurveyCTO converts text to number; Stata is already
+        # numeric in numeric context, so drop the wrapper.
+        # `int(x)` in SurveyCTO truncates toward zero; Stata `int(x)` matches.
+        expr = re.sub(r'\bnumber\s*\(\s*([^)]+?)\s*\)', r'\1', expr, flags=re.IGNORECASE)
+        # int() — keep as-is; the regex below documents the intentional no-op
+        # so future readers see we considered it.
+        # expr = re.sub(r'\bint\s*\(([^)]+)\)', r'int(\1)', expr) — no change needed
 
         # --- Step 6: if() → cond() ------------------------------------------
         # Rename only; argument structure is identical.
@@ -409,6 +502,10 @@ class LogicConverter:
             return f'substr({v}, -{len(s_inner)}, .) == "{s_inner}"'
         expr = re.sub(r'\bends-with\s*\(([^)]+)\)', _ends_with_sub, expr, flags=re.IGNORECASE)
 
+        # lower(x) → strlower(x) ; upper(x) → strupper(x)
+        expr = re.sub(r'\blower\s*\(', 'strlower(', expr, flags=re.IGNORECASE)
+        expr = re.sub(r'\bupper\s*\(', 'strupper(', expr, flags=re.IGNORECASE)
+
         # --- Step 9: substr index adjustment ---------------------------------
         expr = re.sub(r'\bsubstr\s*\(([^)]+)\)', LogicConverter._translate_substr, expr, flags=re.IGNORECASE)
 
@@ -416,6 +513,25 @@ class LogicConverter:
         def _cs_sub(m: re.Match) -> str:
             return LogicConverter._translate_count_selected(m, choice_codes, varname)
         expr = re.sub(r'\bcount-selected\s*\(\s*(\w+)\s*\)', _cs_sub, expr, flags=re.IGNORECASE)
+
+        # --- Step 10b: indexed-repeat(target, group, idx) → target_<idx> ---
+        # Uses balanced-paren matching so nested calls like
+        # `indexed-repeat(${a}, ${g}, index())` are handled correctly.
+        def _ir_replacer(args: str) -> str:
+            parts = LogicConverter._split_top_level_args(args)
+            if len(parts) < 3:
+                _log_strip(varname, f"indexed-repeat({args})", "INDEXED_REPEAT_BAD_ARITY")
+                return _SENTINEL
+            if len(parts) > 3:
+                _log_strip(varname, f"indexed-repeat({args})", "INDEXED_REPEAT_NESTED")
+                return _SENTINEL
+            target, _grp, idx = parts
+            idx = idx.strip()
+            if re.match(r'^-?\d+$', idx):
+                return f"{target}_{idx}"
+            _log_strip(varname, f"indexed-repeat({args})", "INDEXED_REPEAT_DYNAMIC")
+            return _SENTINEL
+        expr = LogicConverter._sub_function_balanced(expr, r'indexed-repeat', _ir_replacer)
 
         # --- Step 11: selected() — Patterns A and B -------------------------
         def _sel_sub(m: re.Match) -> str:
@@ -473,6 +589,80 @@ class LogicConverter:
             return _SENTINEL
         expr = re.sub(r'\bselected-at\s*\([^)]+\)', _strip_sa, expr, flags=re.IGNORECASE)
 
+        # --- Step 12c: strip untranslatable function families with named reasons ---
+        # Each entry: (regex, reason). Patterns use non-greedy [^)]+? so they
+        # do not span balanced parens beyond a single function call.
+        _UNTRANSLATABLE_FUNCS = [
+            # repeat aggregates with conditional / multi-arg semantics that
+            # we cannot resolve without per-iteration expansion
+            (r'\bjoin\s*\([^)]+\)',          "JOIN"),
+            (r'\bjoin-if\s*\([^)]+\)',       "JOIN_IF"),
+            (r'\bcount-if\s*\([^)]+\)',      "COUNT_IF"),
+            (r'\bsum-if\s*\([^)]+\)',        "SUM_IF"),
+            (r'\bmin-if\s*\([^)]+\)',        "MIN_IF"),
+            (r'\bmax-if\s*\([^)]+\)',        "MAX_IF"),
+            (r'\brank-index(?:-if)?\s*\([^)]+\)', "RANK_INDEX"),
+            # `count(${group})` — bare count of repeat instances, no Stata equivalent
+            (r'\bcount\s*\(\s*\w+\s*\)',     "COUNT_REPEAT"),
+            # list-of-items helpers
+            (r'\bcount-items\s*\([^)]+\)',   "LIST_FUNCTION"),
+            (r'\bitem-at\s*\([^)]+\)',       "LIST_FUNCTION"),
+            (r'\bitem-index\s*\([^)]+\)',    "LIST_FUNCTION"),
+            (r'\bitem-present\s*\([^)]+\)',  "LIST_FUNCTION"),
+            (r'\bde-duplicate\s*\([^)]+\)',  "LIST_FUNCTION"),
+            (r'\brank-value\s*\([^)]+\)',    "LIST_FUNCTION"),
+            # geography
+            (r'\bdistance-between\s*\([^)]+\)', "GEO_FUNCTION"),
+            (r'\barea\s*\([^)]+\)',          "GEO_FUNCTION"),
+            (r'\bgeo-scatter\s*\([^)]+\)',   "GEO_FUNCTION"),
+            (r'\bshort-geopoint\s*\([^)]+\)',"GEO_FUNCTION"),
+            # date / time conversion functions — Stata's date model differs
+            (r'\bdecimal-date-time\s*\([^)]+\)', "DATE_FUNCTION"),
+            (r'\bdecimal-time\s*\([^)]+\)',  "DATE_FUNCTION"),
+            (r'\bdate-time\s*\([^)]+\)',     "DATE_FUNCTION"),
+            (r'\bformat-date-time\s*\([^)]+\)', "DATE_FUNCTION"),
+            (r'\bdate\s*\([^)]+\)',          "DATE_FUNCTION"),
+            (r'\bnow\s*\(\s*\)',             "DATE_FUNCTION"),
+            (r'\btoday\s*\(\s*\)',           "DATE_FUNCTION"),
+            (r'\bduration\s*\(\s*\)',        "DATE_FUNCTION"),
+            # enumerator / session metadata
+            (r'\benumerator-name\s*\(\s*\)', "METADATA_FUNCTION"),
+            (r'\benumerator-id\s*\(\s*\)',   "METADATA_FUNCTION"),
+            (r'\busername\s*\(\s*\)',        "METADATA_FUNCTION"),
+            (r'\bversion\s*\(\s*\)',         "METADATA_FUNCTION"),
+            (r'\bdevice-info\s*\(\s*\)',     "METADATA_FUNCTION"),
+            # phone-call (Android-only)
+            (r'\bphone-call-log\s*\(\s*\)', "PHONE_FUNCTION"),
+            (r'\bphone-call-duration\s*\(\s*\)', "PHONE_FUNCTION"),
+            (r'\bcollect-is-phone-app\s*\(\s*\)', "PHONE_FUNCTION"),
+            # randomization / identity / external data / plug-ins
+            (r'\bhash\s*\([^)]+\)',          "HASH"),
+            (r'\buuid\s*\(\s*\)',            "UUID"),
+            (r'\brandom\s*\(\s*\)',          "RANDOM"),
+            (r'\bpulldata\s*\([^)]+\)',      "PULLDATA"),
+            (r'\bsearch\s*\([^)]+\)',        "SEARCH"),
+            (r'\bplug-in-metadata\s*\([^)]+\)', "PLUGIN"),
+            # 1-arg aggregates over repeats: bare ident inside ()
+            # Stata can express these as rowtotal/rowmin/rowmax over enumerated
+            # suffix columns, but only when we know the iteration count.
+            # Without that, strip with a specific reason for visibility.
+            (r'\bsum\s*\(\s*\w+\s*\)',       "AGGREGATE_REPEAT"),
+            (r'\bmin\s*\(\s*\w+\s*\)',       "AGGREGATE_REPEAT"),
+            (r'\bmax\s*\(\s*\w+\s*\)',       "AGGREGATE_REPEAT"),
+            # string concat / formatting — no clean Stata translation in a
+            # boolean expression context
+            (r'\bconcat\s*\([^)]+\)',        "CONCAT"),
+            (r'\blinebreak\s*\(\s*\)',       "CONCAT"),
+            (r'\bformat-number\s*\([^)]+\)', "CONCAT"),
+        ]
+        for pattern, reason in _UNTRANSLATABLE_FUNCS:
+            def _make_stripper(rsn: str):
+                def _strip(m: re.Match) -> str:
+                    _log_strip(varname, m.group(0), rsn)
+                    return _SENTINEL
+                return _strip
+            expr = re.sub(pattern, _make_stripper(reason), expr, flags=re.IGNORECASE)
+
         # --- Step 12b: strip entire not(…) when its body contains a sentinel --
         # Stripping a clause from inside not() flips the boolean — unsafe.
         # Per §12.4 of the reference doc: strip the whole not(…) block instead.
@@ -491,14 +681,34 @@ class LogicConverter:
         # --- Step 14: single = → == -----------------------------------------
         expr = re.sub(r'(?<![!><=])=(?!=)', '==', expr)
 
+        # --- Step 14b: div → / ----------------------------------------------
+        # SurveyCTO's documented division operator is `div`. Stata uses `/`.
+        # Word boundaries protect against substrings like `divisor`.
+        expr = re.sub(r'\bdiv\b', '/', expr, flags=re.IGNORECASE)
+
+        # --- Step 14c: A mod B → mod(A, B) ----------------------------------
+        # SurveyCTO uses the infix `mod` operator; Stata uses the `mod()`
+        # function. We only convert when LHS and RHS are simple identifiers
+        # or numeric literals — complex sub-expressions on either side stay
+        # unchanged and will fail in Stata (rare in practice).
+        expr = re.sub(
+            r'\b(\w+)\s+mod\s+(-?\d+(?:\.\d+)?|\w+)\b',
+            r'mod(\1, \2)', expr, flags=re.IGNORECASE)
+
         # --- Step 15: and/or → &/| ------------------------------------------
         expr = re.sub(r'\band\b', '&', expr, flags=re.IGNORECASE)
         expr = re.sub(r'\bor\b',  '|', expr, flags=re.IGNORECASE)
 
+        # --- Step 15a: clean sentinels (and orphan comparisons) BEFORE guards.
+        # Running cleanup before missing-guards prevents the guard regex from
+        # producing nonsense like `& !missing(__STRIP__)` on a stripped LHS.
+        if _SENTINEL in expr:
+            expr = LogicConverter._clean_sentinels(expr)
+
         # --- Step 16: add !missing() guard for relational operators ----------
         expr = LogicConverter._add_missing_guards(expr)
 
-        # --- Step 17: clean up sentinels and dangling operators -------------
+        # --- Step 17: final sentinel sweep (defensive — usually a no-op) -----
         if _SENTINEL in expr:
             expr = LogicConverter._clean_sentinels(expr)
 
@@ -506,6 +716,48 @@ class LogicConverter:
         expr = ' '.join(expr.split())
 
         return expr if expr else None
+
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def convert_constraint_to_stata(
+        surveycto_expr: Optional[str],
+        var_name: str,
+        question_types: Dict[str, str],
+        choice_codes: Optional[Dict[str, List[str]]] = None,
+    ) -> Optional[str]:
+        """
+        Convert a SurveyCTO `constraint` expression to Stata syntax.
+
+        Constraint expressions use the same syntax as relevance, with one
+        extra token: `.` represents the proposed current value of the
+        field. We substitute it with the variable name and then run the
+        standard relevance pipeline.
+
+        Args:
+            surveycto_expr: Raw SurveyCTO constraint string.
+            var_name: Name of the Stata variable the constraint binds to.
+            question_types: As for convert_to_stata().
+            choice_codes: As for convert_to_stata().
+
+        Returns:
+            Stata-compatible expression, or None if input is None/empty.
+        """
+        if not surveycto_expr or not isinstance(surveycto_expr, str):
+            return None
+        expr = surveycto_expr.strip()
+        if not expr:
+            return None
+
+        # Substitute `.` (current proposed value) with the variable name.
+        # Guarded with lookbehind and lookahead so we don't hit decimal
+        # literals like `0.5` or the dot in `${a.b}` (XLSForm field names
+        # cannot contain dots, but be safe anyway).
+        substituted = re.sub(r'(?<![\w.])\.(?![\w])', var_name, expr)
+
+        return LogicConverter.convert_to_stata(
+            substituted, question_types, choice_codes, var_name
+        )
 
     # ------------------------------------------------------------------
 
@@ -530,6 +782,11 @@ class LogicConverter:
             ("choice-label()",re.compile(r'\bchoice-label\s*\(',  re.IGNORECASE)),
             ("selected-at()", re.compile(r'\bselected-at\s*\(',   re.IGNORECASE)),
             ("empty()",       re.compile(r'\bempty\s*\(',         re.IGNORECASE)),
+            ("indexed-repeat",re.compile(r'\bindexed-repeat\s*\(',re.IGNORECASE)),
+            ("pulldata()",    re.compile(r'\bpulldata\s*\(',      re.IGNORECASE)),
+            ("today()/now()", re.compile(r'\b(?:today|now|date|date-time|decimal-time|decimal-date-time|format-date-time)\s*\(', re.IGNORECASE)),
+            (" div ",         re.compile(r'\bdiv\b',              re.IGNORECASE)),
+            (" mod ",         re.compile(r'\bmod\s+\w',           re.IGNORECASE)),
         ]
         print("=== validate_translations ===")
         print(f"  Total conditions scanned: {len(conditions)}")
