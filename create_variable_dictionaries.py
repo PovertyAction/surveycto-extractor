@@ -562,6 +562,15 @@ def determine_variable_source(var_name: str, questions: List[Dict],
         'disabled': False,
         'form_order': None,
         'choice_index': None,
+        # Data-structure XLSForm columns (Tier 4 enrichment): constraint
+        # defines the valid-value universe; calculation is the formula that
+        # produced a calculate field; references is the union of ${var}
+        # tokens parsed from the expressions on this variable.
+        'constraint': None,
+        'stata_constraint': None,
+        'calculation': None,
+        'choice_filter': None,
+        'references': None,
     }
 
     question = find_question_for_variable(var_name, questions, _index=_index)
@@ -579,6 +588,36 @@ def determine_variable_source(var_name: str, questions: List[Dict],
     result['group_path'] = '/'.join(question.get('group_path', []))
     result['disabled'] = question.get('disabled', False)
     result['form_order'] = question.get('question_order')
+
+    # Tier 4: data-structure fields lifted from the question record.
+    result['constraint'] = question.get('constraint') or None
+    result['stata_constraint'] = question.get('stata_constraint') or None
+    # Calculation text — surface for calculate-typed variables; for other
+    # variables it would be a dynamic default (collection mechanic) so leave None.
+    if question.get('type') == 'calculate':
+        result['calculation'] = question.get('calculation') or None
+    result['choice_filter'] = question.get('choice_filter') or None
+
+    # references: deduped ${var} tokens parsed from every expression column
+    # on this variable. First-hop dependency view that complements the
+    # canonical variable graph.
+    _ref_sources = [
+        question.get('relevance'),
+        question.get('constraint'),
+        question.get('calculation'),
+        question.get('choice_filter'),
+    ]
+    refs = []
+    seen = set()
+    for src in _ref_sources:
+        if not src:
+            continue
+        for m in re.findall(r'[$][{]([^}]+)[}]', src):
+            name = m.strip()
+            if name and name not in seen:
+                seen.add(name)
+                refs.append(name)
+    result['references'] = refs if refs else None
 
     base_name = question['variable_name']
     if var_name != base_name:
@@ -724,6 +763,11 @@ def create_variable_dictionary(
             'repeat_metadata': None,
             'form_order': metadata['form_order'],
             'choice_index': metadata['choice_index'],
+            'constraint': metadata['constraint'],
+            'stata_constraint': metadata['stata_constraint'],
+            'calculation': metadata['calculation'],
+            'choice_filter': metadata['choice_filter'],
+            'references': json.dumps(metadata['references']) if metadata['references'] else None,
         }
         records.append(record)
 
@@ -947,6 +991,18 @@ def export_dictionary(var_dict: pd.DataFrame, df: pd.DataFrame, cfg: Dict, datas
             var_metadata['survey']['group_relevances_template'] = group_relevances_template
         if group_relevances_iteration_specific:
             var_metadata['survey']['group_relevances_iteration_specific'] = group_relevances_iteration_specific
+        # Tier 4 data-structure fields — omit when None so existing variables
+        # don't grow noisy keys.
+        if pd.notna(row.get('constraint')):
+            var_metadata['survey']['constraint'] = row['constraint']
+        if pd.notna(row.get('stata_constraint')):
+            var_metadata['survey']['stata_constraint'] = row['stata_constraint']
+        if pd.notna(row.get('calculation')):
+            var_metadata['survey']['calculation'] = row['calculation']
+        if pd.notna(row.get('choice_filter')):
+            var_metadata['survey']['choice_filter'] = row['choice_filter']
+        if pd.notna(row.get('references')):
+            var_metadata['survey']['references'] = json.loads(row['references'])
         if row['is_synthetic']:
             var_metadata['is_synthetic'] = True
             if repeat_metadata:

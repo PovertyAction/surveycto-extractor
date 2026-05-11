@@ -354,14 +354,43 @@ def print_question(q: dict, survey_label: str, stata_name: str = None,
     print(f"  form_type  : {q.get('type', '?')}")
     print(f"  question   : {(q.get('question_text') or '').strip()}")
     print(f"  choice_list: {q.get('choice_list') or 'none'}")
+    cfilt = q.get("choice_filter")
+    if cfilt:
+        print(f"  ch_filter  : {str(cfilt).strip()}")
     print(f"  choices    : {fmt_choices(q.get('choices'))}")
+    # If any choice carries filter-column dimensions, surface them on a
+    # second line per choice so the structural partition is visible.
+    ch = q.get('choices')
+    if isinstance(ch, list):
+        core_keys = {"value", "label"}
+        extra = []
+        for c in ch:
+            if isinstance(c, dict):
+                for k in c.keys():
+                    if k not in core_keys and k not in extra:
+                        extra.append(k)
+        if extra:
+            for c in ch:
+                if not isinstance(c, dict):
+                    continue
+                dims = [f"{k}={c[k]}" for k in extra if k in c]
+                if dims:
+                    print(f"             {str(c.get('value','')):>6} -> [{', '.join(dims)}]")
     print(f"  sentinels  : {sentinel_note(q.get('choices'), q.get('constraint'))}")
     print(f"  constraint : {q.get('constraint') or 'none'}")
+    # Prefer vardict-merged stata_constraint; fall back to questions.json
+    # for lookups by form name (no Stata-side variable matches).
+    stc = q.get("_stata_constraint") or q.get("stata_constraint")
+    if stc:
+        print(f"  st_constr  : {stc}")
     print(f"  relevance  : {q.get('relevance') or 'none'}")
     grp = q.get("group_relevances") or []
     if grp:
         print(f"  grp_relev  : {'; '.join(grp)}")
     print(f"  skip_logic : {q.get('stata_skip_logic') or 'none'}")
+    refs = q.get("_references") or q.get("references")
+    if refs:
+        print(f"  references : {', '.join(refs)}")
     path = q.get("group_path") or []
     print(f"  group_path : {' / '.join(path) if isinstance(path, list) else path}")
 
@@ -416,6 +445,13 @@ def search_var(stata_name: str, context: int = 0, survey_filter: str = None) -> 
         data_max       = None
         repeat_info    = None   # filled below if variable is from a repeat group
 
+        # Vardict-only data-structure fields lifted into the question dict
+        # at the end of pass 1 (so print_question can render them).
+        vdict_stata_constraint = None
+        vdict_references = None
+        vdict_choice_filter = None
+        vdict_choices_with_filter_cols = None
+
         if vpath.exists():
             vardict = load_json(vpath).get("variables", {})
             entry   = vardict.get(stata_name)
@@ -427,6 +463,15 @@ def search_var(stata_name: str, context: int = 0, survey_filter: str = None) -> 
                 orig           = entry.get("survey", {}).get("original_variable_name")
                 if orig:
                     original_name = orig
+                survey_blk = entry.get("survey", {}) or {}
+                vdict_stata_constraint = survey_blk.get("stata_constraint")
+                vdict_references = survey_blk.get("references")
+                vdict_choice_filter = survey_blk.get("choice_filter")
+                # The vardict choices block carries filter-column dimensions
+                # on each row when the underlying choices sheet had them.
+                vc = survey_blk.get("choices")
+                if isinstance(vc, list):
+                    vdict_choices_with_filter_cols = vc
 
                 # Repeat group detection — surface position-vs-code info prominently
                 repeat_iter = entry.get("repeat_iteration")
@@ -512,6 +557,18 @@ def search_var(stata_name: str, context: int = 0, survey_filter: str = None) -> 
             q = dict(q, _data_min=data_min, _data_max=data_max)
         if repeat_info is not None:
             q = dict(q, _repeat_info=repeat_info)
+        if vdict_stata_constraint:
+            q = dict(q, _stata_constraint=vdict_stata_constraint)
+        if vdict_references:
+            q = dict(q, _references=vdict_references)
+        if vdict_choice_filter and not q.get("choice_filter"):
+            q = dict(q, choice_filter=vdict_choice_filter)
+        # Prefer vardict choice rows when they carry filter-column dimensions
+        # that questions.json's copy may have dropped.
+        if vdict_choices_with_filter_cols:
+            existing = q.get("choices") or []
+            if any(set(c.keys()) - {"value", "label"} for c in vdict_choices_with_filter_cols if isinstance(c, dict)):
+                q = dict(q, choices=vdict_choices_with_filter_cols)
 
         print_question(
             q, label,

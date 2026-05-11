@@ -692,26 +692,53 @@ class SurveyStore:
 
             if cl:
                 lines.append(f"  choice_list  : {cl}")
+            # choice_filter (data-structure: constrains which choice codes
+            # can land in the dataset for this variable)
+            choice_filter = survey_data.get("choice_filter") or (q.get("choice_filter") if q else None)
+            if choice_filter:
+                lines.append(f"  choice_filter: {str(choice_filter).strip()}")
             if display_choices:
+                # If any choice carries extra non-core keys, those are filter
+                # dimensions from the choices worksheet — surface them inline.
+                core_keys = {'value', 'label'}
+                extra_keys = []
+                for c in display_choices:
+                    if isinstance(c, dict):
+                        for k in c.keys():
+                            if k not in core_keys and k not in extra_keys:
+                                extra_keys.append(k)
                 lines.append(f"  choices      :")
                 for c in display_choices:
-                    lines.append(f"    {str(c.get('value','')):>6} = {c.get('label','').strip()}")
+                    if not isinstance(c, dict):
+                        continue
+                    base = f"    {str(c.get('value','')):>6} = {str(c.get('label','')).strip()}"
+                    if extra_keys:
+                        dims = [f"{k}={c[k]}" for k in extra_keys if k in c]
+                        if dims:
+                            base += "   [" + ", ".join(dims) + "]"
+                    lines.append(base)
             elif isinstance(choices, dict):
                 lines.append(f"  choice_code  : {choices.get('value', '?')} = {choices.get('label', '').strip()}")
             elif not cl:
                 lines.append(f"  choices      : n/a")
 
             # Form-defined sentinels (from choices/constraint)
-            constraint = q.get("constraint") if q else None
+            constraint = survey_data.get("constraint") or (q.get("constraint") if q else None)
             form_sents = _sentinel_from_choices(display_choices, constraint)
             lines.append(f"  form_sents   : {form_sents}")
 
             # Data-detected sentinels (from vardict sentinel scan)
             lines.append(f"  data_sents   : {_fmt_sentinel_full(entry.get('sentinels'))}")
 
-            # Constraint (questions.json only)
+            # Constraint (raw + Stata-converted)
             if constraint:
                 lines.append(f"  constraint   : {constraint}")
+            stata_constraint = (
+                survey_data.get("stata_constraint")
+                or (q.get("stata_constraint") if q else None)
+            )
+            if stata_constraint:
+                lines.append(f"  stata_constr : {stata_constraint}")
 
             # Skip logic (prefer iteration-specific for repeat vars)
             skip_iter = survey_data.get("skip_logic_iteration_specific")
@@ -731,13 +758,18 @@ class SurveyStore:
 
             lines.append(f"  group_path   : {survey_data.get('group_path', '') or 'top-level'}")
 
-            # Calculation (questions.json only)
-            if q:
-                calc = q.get("calculation")
-                if calc:
-                    lines.append(f"  calculation  : {calc}")
-                if q.get("required"):
-                    lines.append(f"  required     : yes")
+            # Calculation (vardict preferred — only set for type:calculate;
+            # fall back to questions.json which has it for any field).
+            calc = survey_data.get("calculation") or (q.get("calculation") if q else None)
+            if calc:
+                lines.append(f"  calculation  : {calc}")
+            if q and q.get("required"):
+                lines.append(f"  required     : yes")
+
+            # references — first-hop deps parsed from this var's expressions
+            refs = survey_data.get("references") or (q.get("references") if q else None)
+            if refs:
+                lines.append(f"  references   : {', '.join(refs)}")
 
             # Repeat group info (pre-computed indexes = O(1))
             rinfo = self._get_repeat_info(label, entry)
