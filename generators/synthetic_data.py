@@ -80,14 +80,34 @@ FORMDEF_VERSION_COL = "formdef_version"
 
 
 # Question types whose values come from device / session metadata rather
-# than respondent input. The walker fills these from a per-respondent run
-# context rather than sampling.
-_METADATA_TYPES = {
-    "start", "end", "today", "deviceid", "subscriberid", "simserial",
-    "simid", "phonenumber", "devicephonenum", "username", "caseid",
-    "audio audit", "text audit", "speed violations count",
-    "speed violations list",
+# than respondent input. Multi-word SurveyCTO types like ``text audit``
+# are split by ``parsers/type_parser.py`` into ``(base_type, choice_list)``
+# (e.g. ``("text", "audit")``). Detect them via ``(type, choice_list)``
+# tuples; the single-word entries pair with ``None``.
+_METADATA_TYPE_PAIRS: Set[Tuple[str, Optional[str]]] = {
+    ("start", None), ("end", None), ("today", None),
+    ("deviceid", None), ("subscriberid", None), ("simserial", None),
+    ("simid", None), ("phonenumber", None), ("devicephonenum", None),
+    ("username", None), ("caseid", None),
+    ("text", "audit"), ("audio", "audit"),
+    ("speed", "violations count"), ("speed", "violations list"),
 }
+
+
+def _metadata_kind(question: Dict[str, Any]) -> Optional[str]:
+    """Return a discriminator string for metadata-type questions, or None.
+
+    Returns the original SurveyCTO type (e.g. ``"text audit"``) so the
+    value synthesiser can pick the right shape (audit fields get media
+    filenames, ``today``/``start``/``end`` get datestrings, etc.).
+    """
+    t = question.get("type", "") or ""
+    cl = question.get("choice_list")
+    if (t, None) in _METADATA_TYPE_PAIRS:
+        return t
+    if cl and (t, cl) in _METADATA_TYPE_PAIRS:
+        return f"{t} {cl}"
+    return None
 
 # Types whose columns appear in the SurveyCTO export but aren't typically
 # populated by the respondent: emit the column, leave it blank.
@@ -228,6 +248,11 @@ def _format_for_csv(value: Any) -> str:
     if isinstance(value, datetime.time):
         return format_time_for_csv(value)
     if isinstance(value, float):
+        # SurveyCTO writes empty cells for undefined calculates; NaN
+        # propagating from division-by-zero must not surface as the
+        # literal token "nan".
+        if value != value:  # NaN check
+            return ""
         if value.is_integer():
             return str(int(value))
         return f"{value:.4f}".rstrip("0").rstrip(".")
@@ -465,9 +490,13 @@ def _compute_value(
             on_error=lambda e, exc: strip_log.record(var_label, "calculation", e, exc),
         )
 
-    # Metadata types: synthesised from run-context
-    if q_type in _METADATA_TYPES:
-        return _metadata_value(q_type, var_label, runctx, rng)
+    # Metadata types: synthesised from run-context. Detection uses the
+    # (type, choice_list) tuple form so multi-word types like
+    # "text audit" -- which `parsers/type_parser.py` splits into
+    # ("text", "audit") -- are matched correctly.
+    meta_kind = _metadata_kind(question)
+    if meta_kind is not None:
+        return _metadata_value(meta_kind, var_label, runctx, rng)
 
     # select_one / select_multiple: narrow choices by choice_filter if present
     narrowed_choices = choices

@@ -39,8 +39,17 @@ def numeric_bounds(constraint: Optional[str]) -> Tuple[Optional[float], Optional
     ``<=``; for strict ``>`` / ``<`` we pin by ``+/- 1`` to land on an
     integer-safe inclusive bound. Returns ``(None, None)`` if no clean
     bound is extractable.
+
+    Bails on conditional constraints (``if(...)``): a regex pass would
+    pick bounds across unrelated branches and produce an inverted /
+    over-clamped range. Example: ``if(index()=1, .>=18, if(index()=2,
+    .>=3 and .<=6, .>=0 and .<=120))`` would otherwise yield ``lo=18,
+    hi=6`` -> swap -> ``(6, 18)``. Better to fall back to the type-default
+    range than to silently clamp.
     """
     if not constraint:
+        return (None, None)
+    if re.search(r"\bif\s*\(", constraint):
         return (None, None)
 
     lo: Optional[float] = None
@@ -68,6 +77,44 @@ def text_max_length(constraint: Optional[str]) -> Optional[int]:
     if m:
         return int(m.group(1))
     return None
+
+
+_SM_COUNT_RX = re.compile(
+    r"count-selected\(\s*\.\s*\)\s*(=|>=|<=|>(?!=)|<(?!=))\s*(\d+)"
+)
+
+
+def select_multiple_count_bounds(constraint: Optional[str]) -> Tuple[Optional[int], Optional[int]]:
+    """Extract ``(lo, hi)`` integer bounds on ``count-selected(.)`` from a
+    select_multiple constraint.
+
+    Recognises ``count-selected(.) = N`` (strict: lo=hi=N), ``>=``/``<=``
+    (inclusive), and ``>``/``<`` (shifted by 1). Bails on conditional
+    forms (``if(...)``) for the same reason :func:`numeric_bounds` does.
+    Returns ``(None, None)`` if no clean bound is extractable.
+    """
+    if not constraint:
+        return (None, None)
+    if re.search(r"\bif\s*\(", constraint):
+        return (None, None)
+
+    lo: Optional[int] = None
+    hi: Optional[int] = None
+    for m in _SM_COUNT_RX.finditer(constraint):
+        op, val = m.group(1), int(m.group(2))
+        if op == "=":
+            return (val, val)
+        if op == ">=":
+            lo = val if lo is None else max(lo, val)
+        elif op == ">":
+            v = val + 1
+            lo = v if lo is None else max(lo, v)
+        elif op == "<=":
+            hi = val if hi is None else min(hi, val)
+        elif op == "<":
+            v = val - 1
+            hi = v if hi is None else min(hi, v)
+    return (lo, hi)
 
 
 # ── Per-type sampler (Python values, for CSV output) ──────────────────────────
@@ -155,17 +202,14 @@ def sample_python_value(
     if q_type == "select_multiple":
         if not choices:
             return []
-        picked = [
-            str(c.get("value", "")).strip()
-            for c in choices
-            if rng.random() < 0.5
-        ]
-        if not picked:
-            # Always select at least one — empty multi-selects are common
-            # in real data but make HFC checks on count-selected useless,
-            # so we bias toward "at least one"
-            picked = [str(rng.choice(choices).get("value", "")).strip()]
-        return picked
+        lo_n, hi_n = select_multiple_count_bounds(constraint)
+        max_n = len(choices)
+        lo_n = 1 if lo_n is None else max(1, min(lo_n, max_n))
+        hi_n = max_n if hi_n is None else max(lo_n, min(hi_n, max_n))
+        n_pick = rng.randint(lo_n, hi_n)
+        # rng.sample preserves uniqueness and respects the chosen count
+        picks = rng.sample(choices, n_pick)
+        return [str(c.get("value", "")).strip() for c in picks]
 
     # calculate / repeat_count are walker-computed; metadata is run-context
     return ""
