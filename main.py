@@ -208,7 +208,6 @@ def _parse_force_values(specs):
 
 def run_synthetic_phase(
     survey_key: str, n_rows: int = 5, seed: int = 0,
-    allow_missing_pulldata: bool = False,
     force_values=None,
 ):
     """Generate a SurveyCTO-shaped synthetic export CSV from questions.json."""
@@ -257,7 +256,6 @@ def run_synthetic_phase(
         survey_name=survey_cfg["name"],
         n_rows=n_rows,
         seed=seed,
-        allow_missing_pulldata=allow_missing_pulldata,
         force_values=force_values,
         geo_bbox=geo_bbox,
         form_settings=form_settings,
@@ -301,12 +299,6 @@ def main():
         default=0,
         help="Random seed for reproducible seed dataset generation. Default 0. "
              "Same --seed produces byte-identical do-file / CSV output."
-    )
-    parser.add_argument(
-        "--allow-missing-pulldata",
-        action="store_true",
-        help="For --phases synthetic: warn instead of failing when a pulldata "
-             "CSV referenced by the form is not found in the search dirs."
     )
     parser.add_argument(
         "--force-value",
@@ -355,7 +347,6 @@ def main():
             if not run_all and phases == {"synthetic"}:
                 run_synthetic_phase(
                     survey_key, n_rows=synthetic_rows, seed=args.seed,
-                    allow_missing_pulldata=args.allow_missing_pulldata,
                     force_values=force_values,
                 )
                 continue
@@ -374,7 +365,6 @@ def main():
             if "synthetic" in phases:
                 run_synthetic_phase(
                     survey_key, n_rows=synthetic_rows, seed=args.seed,
-                    allow_missing_pulldata=args.allow_missing_pulldata,
                     force_values=force_values,
                 )
 

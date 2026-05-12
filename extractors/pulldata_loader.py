@@ -134,13 +134,14 @@ def scan_pulldata_refs(questions: Iterable[Dict[str, Any]]) -> Dict[str, Set[str
 def load_pulldata_tables(
     questions: Iterable[Dict[str, Any]],
     search_dirs: List[Path],
-    allow_missing: bool = False,
 ) -> Dict[str, PullDataTable]:
     """Load every CSV referenced by ``pulldata()`` in ``questions``.
 
-    For static-source refs, the CSV is required — raises
-    :class:`MissingPullDataError` (or, if ``allow_missing``, prints a warning
-    and skips) when a referenced CSV cannot be found in any search dir.
+    Static-source refs are mandatory: when the form references
+    ``pulldata('foo', ...)`` and ``foo.csv`` is not in any search dir,
+    raises :class:`MissingPullDataError`. Anyone exercising a form for
+    HFC dry-runs needs the pulldata sources -- the form is designed
+    around them.
 
     For dynamic-source refs, we also greedy-load every ``*.csv`` in the
     search dirs so runtime lookups can resolve ``pulldata(${csv_var}, …)``
@@ -162,27 +163,18 @@ def load_pulldata_tables(
         try:
             tables[name] = PullDataTable(name, _read_csv(path))
         except Exception as exc:
-            if allow_missing:
-                print(f"  [pulldata] WARNING: failed to load {path}: {exc}")
-            else:
-                raise MissingPullDataError(
-                    f"pulldata source {name!r} found at {path} but failed to "
-                    f"load: {exc}"
-                ) from exc
+            raise MissingPullDataError(
+                f"pulldata source {name!r} found at {path} but failed to "
+                f"load: {exc}"
+            ) from exc
 
     if missing:
-        if allow_missing:
-            print(
-                "  [pulldata] WARNING: missing CSVs (referenced by pulldata but "
-                f"not found in search dirs): {', '.join(missing)}"
-            )
-        else:
-            search_str = ", ".join(str(d) for d in search_dirs)
-            raise MissingPullDataError(
-                f"missing pulldata CSV(s): {', '.join(missing)}. "
-                f"Searched: {search_str}. Drop the CSVs into one of those "
-                f"directories, or run with --allow-missing-pulldata."
-            )
+        search_str = ", ".join(str(d) for d in search_dirs)
+        raise MissingPullDataError(
+            f"missing pulldata CSV(s): {', '.join(missing)}. "
+            f"Searched: {search_str}. Drop the CSVs into one of those "
+            f"directories."
+        )
 
     # 2. Dynamic-source refs — best-effort, also greedily preload any other
     #    CSVs in the search dirs in case form variables point at them.

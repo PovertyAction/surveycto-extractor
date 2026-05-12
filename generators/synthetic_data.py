@@ -990,7 +990,6 @@ def generate_synthetic_csv(
     survey_name: str = "Survey",
     n_rows: int = 5,
     seed: int = 0,
-    allow_missing_pulldata: bool = False,
     force_values: Optional[Dict[str, str]] = None,
     geo_bbox: Optional[Tuple[float, float, float, float]] = None,
     form_settings: Optional[Dict[str, Any]] = None,
@@ -1047,11 +1046,14 @@ def generate_synthetic_csv(
             if vn:
                 var_to_choice_list[vn] = cl
 
-    # Load pulldata CSVs once
+    # Load pulldata CSVs once. Pulldata is obligatory: when the form
+    # references pulldata, the synthetic CSV is essentially useless
+    # without it (gated cascades won't populate, dynamic choices can't
+    # expand, caseid sampling can't resolve). Hard-error rather than
+    # silently producing an empty-looking CSV.
     try:
         tables = load_pulldata_tables(
             questions, search_dirs=pulldata_search_dirs,
-            allow_missing=allow_missing_pulldata,
         )
     except MissingPullDataError as exc:
         raise SystemExit(f"[synthetic] {exc}") from exc
