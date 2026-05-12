@@ -201,6 +201,7 @@ def sample_python_value(
     epoch_start: Optional[datetime.date] = None,
     epoch_span_days: int = DEFAULT_EPOCH_SPAN_DAYS,
     geo_bbox: Tuple[float, float, float, float] = DEFAULT_GEO_BBOX,
+    appearance: Optional[str] = None,
 ) -> Any:
     """Sample one typed Python value for a SurveyCTO question type.
 
@@ -263,6 +264,17 @@ def sample_python_value(
 
     if q_type == "text":
         n = text_max_length(constraint)
+        # SurveyCTO ``appearance='numbers'`` / ``numbers_decimal`` /
+        # ``numbers_phone`` shows a numeric keypad on the device so the
+        # respondent can only type digits, but the storage type stays
+        # text (so leading zeros are preserved -- e.g. for phone numbers
+        # like ``0777816905``). Honour that here by emitting digit-only
+        # content; otherwise emit the ``text_NNNN`` token.
+        if appearance and "numbers" in str(appearance).lower():
+            digits = "".join(str(rng.randint(0, 9)) for _ in range(10))
+            if n is not None:
+                return digits[:n]
+            return digits
         token = f"text_{rng.randint(0, 9999)}"
         if n is not None:
             return token[:n]

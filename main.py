@@ -234,6 +234,21 @@ def run_synthetic_phase(
 
     geo_bbox = survey_cfg.get("geo_bbox")
 
+    # Read settings sheet from the original XLSForm so the synth can use
+    # the real form_id and version when building auto-generated metadata
+    # (formdef_version, text_audit URL, audio_audit URL).
+    form_settings = {}
+    try:
+        import pandas as _pd
+        s_df = _pd.read_excel(survey_cfg["input_file"], sheet_name="settings")
+        if len(s_df) > 0:
+            form_settings = {
+                k: (None if _pd.isna(v) else str(v).strip())
+                for k, v in s_df.iloc[0].to_dict().items()
+            }
+    except Exception:
+        form_settings = {}
+
     print(f"\n=== Phase 2d: Synthetic Data Generator ({survey_key}) ===")
     generate_synthetic_csv(
         questions_json_path=questions_json,
@@ -245,6 +260,7 @@ def run_synthetic_phase(
         allow_missing_pulldata=allow_missing_pulldata,
         force_values=force_values,
         geo_bbox=geo_bbox,
+        form_settings=form_settings,
     )
     print()
 

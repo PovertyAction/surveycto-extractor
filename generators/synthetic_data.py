@@ -160,9 +160,24 @@ class RunContext:
     caseid: str
     key: str
     formdef_version: str
+    # Form-level identifiers used to build SurveyCTO-shaped audit-URL
+    # values. Both fall back to a placeholder when the form's settings
+    # sheet doesn't carry the field.
+    form_id: str = "synthetic_form"
+    server_host: str = "synthetic.surveycto.com"
+    # Mutable per-respondent counter: snapshots of elapsed seconds for
+    # successive ``once(duration())`` calls inside ``calculate_here``.
+    # Real SurveyCTO returns the cumulative seconds AT THE MOMENT the
+    # field is first reached, so each downstream calc_here yields a
+    # larger value than upstream ones. Walker advances this; subtraction
+    # between two snapshots gives module duration.
+    duration_progress: int = 0
 
 
-def _build_run_context(rng: random.Random, index: int) -> RunContext:
+def _build_run_context(
+    rng: random.Random, index: int, caseid: Optional[str] = None,
+    form_settings: Optional[Dict[str, Any]] = None,
+) -> RunContext:
     base_dt = datetime.datetime(2026, 5, 11, 9, 0, 0)
     start = base_dt + datetime.timedelta(
         days=rng.randint(0, 30), seconds=rng.randint(0, 8 * 3600)
@@ -171,6 +186,23 @@ def _build_run_context(rng: random.Random, index: int) -> RunContext:
     end = start + datetime.timedelta(seconds=duration)
     submission = end + datetime.timedelta(seconds=rng.randint(0, 600))
     device_n = rng.randint(100000, 999999)
+    # Prefer the real settings.version when available so synth's
+    # ``formdef_version`` matches what the form authors stamped (and
+    # what downstream HFC code may filter on); otherwise sample a
+    # recent YYYYMMDD.
+    settings = form_settings or {}
+    settings_version = (settings.get("version") or "").strip() if settings else ""
+    if settings_version:
+        # SurveyCTO normalises the value in the export; strip a ``.0``
+        # suffix in case pandas read it as a float.
+        if settings_version.endswith(".0"):
+            settings_version = settings_version[:-2]
+        formdef_version_val = settings_version
+    else:
+        formdef_version_val = (
+            base_dt - datetime.timedelta(days=rng.randint(0, 3 * 365))
+        ).strftime("%Y%m%d")
+    form_id = (settings.get("form_id") or "synthetic_form").strip() if settings else "synthetic_form"
     return RunContext(
         submission_date=submission,
         start_time=start,
@@ -181,20 +213,212 @@ def _build_run_context(rng: random.Random, index: int) -> RunContext:
         devicephonenum=f"+1555{rng.randint(1000000, 9999999)}",
         username=f"enum{rng.randint(1, 50):03d}",
         duration=duration,
-        caseid=f"case-{index:04d}",
+        caseid=caseid if caseid is not None else f"case-{index:04d}",
         # version=4 sets the RFC 4122 variant/version bits; real SurveyCTO
         # KEY values are v4 UUIDs and HFC checks may assert this.
         key=f"uuid:{uuid.UUID(int=rng.getrandbits(128), version=4)}",
-        # Sample a real date in the recent past so days 29-31 actually
-        # appear (the previous `randint(1, 28)` capped at 28 to avoid
-        # invalid dates).
-        formdef_version=(
-            base_dt - datetime.timedelta(days=rng.randint(0, 3 * 365))
-        ).strftime("%Y%m%d"),
+        formdef_version=formdef_version_val,
+        form_id=form_id,
     )
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
+# pulldata('table', 'col', 'key_col', ${caseid}) — capture (table, key_col)
+# for any call whose lookup expression is the form's caseid variable.
+import re as _re
+
+_CASEID_PULLDATA_RX = _re.compile(
+    r"""pulldata\(\s*['"]([^'"]+)['"]\s*,\s*['"][^'"]+['"]\s*,\s*"""
+    r"""['"]([^'"]+)['"]\s*,\s*\$\{\s*caseid\s*\}\s*\)""",
+    _re.IGNORECASE,
+)
+
+
+def _build_caseid_pool(
+    questions: List[Dict[str, Any]],
+    tables: Dict[str, Any],
+) -> List[str]:
+    """Collect caseid candidates from any pulldata table the form looks up
+    with ``${caseid}`` as the key. Returns unique stringified key values,
+    or ``[]`` if no caseid-keyed pulldata reference exists or the table
+    didn't load.
+    """
+    pairs: Set[Tuple[str, str]] = set()
+    for q in questions:
+        for field_name in ("calculation", "relevance", "constraint", "choice_filter"):
+            expr = q.get(field_name)
+            if not expr:
+                continue
+            for m in _CASEID_PULLDATA_RX.finditer(str(expr)):
+                pairs.add((m.group(1), m.group(2)))
+    pool: List[str] = []
+    seen: Set[str] = set()
+    for tbl_name, key_col in sorted(pairs):
+        tbl = tables.get(tbl_name) if tables else None
+        if tbl is None or key_col not in tbl.df.columns:
+            continue
+        for v in tbl.df[key_col].tolist():
+            if v is None:
+                continue
+            try:
+                import math as _m
+                if isinstance(v, float) and _m.isnan(v):
+                    continue
+            except Exception:
+                pass
+            s = str(v).strip()
+            if not s or s in seen:
+                continue
+            seen.add(s)
+            pool.append(s)
+    return pool
+
+
+# ── search() pulldata choice expansion ────────────────────────────────────────
+# SurveyCTO's ``search('CSV', 'matches', col, val[, col, val]*)`` appearance
+# directive populates a select's choices at run time from a media-bundle
+# CSV. The static XLSForm choice list typically contains a placeholder row
+# (e.g. ``peer_id`` / ``peer_name``) plus a few sentinel rows (``0``, ``-88``).
+# At run time SurveyCTO replaces the placeholder with rows from the CSV,
+# using the placeholder row's ``value`` and ``label`` text as the names of
+# the CSV columns to read.
+
+_SEARCH_RX = _re.compile(r"""search\(\s*['"]([^'"]+)['"]\s*(.*?)\)""", _re.IGNORECASE | _re.DOTALL)
+
+
+def _parse_search_appearance(appearance: Optional[str]) -> Optional[Tuple[str, List[Tuple[str, str]]]]:
+    """Parse a ``search('csv', 'matches', col, val, col, val, ...)`` directive.
+
+    Returns ``(csv_name, [(col, value_expr), ...])`` or ``None`` if the
+    appearance doesn't contain a search call. The 'matches' literal is
+    optional in SurveyCTO syntax for a no-filter search; we accept both
+    bare ``search('csv')`` and the filtered form. Value expressions are
+    returned verbatim so the caller can evaluate ``${var}`` refs against
+    the current row state.
+    """
+    if not appearance:
+        return None
+    m = _SEARCH_RX.search(str(appearance))
+    if not m:
+        return None
+    csv_name = m.group(1).strip()
+    tail = m.group(2).strip()
+    matches: List[Tuple[str, str]] = []
+    if tail:
+        # Strip a leading ", 'matches'," if present
+        tail = _re.sub(r"^\s*,\s*['\"]matches['\"]\s*,?\s*", "", tail)
+        # Split on commas at top level (no nested parens here in practice).
+        # Pairs are (col_name, value_expr).
+        parts = [p.strip() for p in tail.split(",") if p.strip()]
+        for i in range(0, len(parts) - 1, 2):
+            col = parts[i].strip().strip("'\"")
+            val = parts[i + 1].strip().strip("'\"")
+            matches.append((col, val))
+    return (csv_name, matches)
+
+
+def _resolve_search_choices(
+    question: Dict[str, Any],
+    tables: Dict[str, Any],
+    row: Optional[Dict[str, Any]] = None,
+    apply_matches: bool = True,
+) -> Optional[List[Dict[str, Any]]]:
+    """If ``question`` has a ``search()`` appearance and the named CSV is
+    loaded, return a list of synthetic choice dicts derived from CSV rows.
+
+    The placeholder choice row (typically the first non-numeric-value
+    entry in the static choice list) is replaced by one ``{value, label}``
+    per CSV row, using the placeholder's ``value``/``label`` fields as
+    the CSV column names to read. Sentinel rows (``0``, ``-88``, ...) are
+    preserved.
+
+    When ``apply_matches`` is True, the per-respondent ``matches`` filter
+    is evaluated against ``row`` and only matching CSV rows are kept.
+    Set False at column-order-build time to get the full possible
+    indicator-column space.
+    """
+    parsed = _parse_search_appearance(question.get("appearance"))
+    if not parsed:
+        return None
+    csv_name, matches = parsed
+    table = tables.get(csv_name) if tables else None
+    if table is None:
+        return None
+
+    df = table.df
+    static_choices = question.get("choices") or []
+    # Find the placeholder row: a static row whose ``value`` field is a
+    # column name in the CSV. That field name doubles as the CSV column
+    # to read for synthetic choice values; ``label`` does the same for
+    # labels. Sentinels (rows whose ``value`` isn't a CSV column) survive.
+    placeholder = None
+    sentinels: List[Dict[str, Any]] = []
+    csv_cols = set(df.columns)
+    for c in static_choices:
+        v = str(c.get("value", "")).strip()
+        if placeholder is None and v in csv_cols:
+            placeholder = c
+        else:
+            sentinels.append(c)
+    if placeholder is None:
+        return None
+    val_col = str(placeholder["value"]).strip()
+    lbl_col = str(placeholder.get("label", val_col)).strip()
+    if lbl_col not in csv_cols:
+        lbl_col = val_col
+
+    # Apply ``matches`` against the row state. Skip clauses whose value
+    # expression doesn't resolve (e.g. unsupported function) so we don't
+    # silently filter to nothing.
+    sub = df
+    if apply_matches and matches and row is not None:
+        for col, val_expr in matches:
+            if col not in df.columns:
+                continue
+            resolved = _resolve_match_value(val_expr, row)
+            if resolved is None:
+                continue
+            sub = sub[sub[col].astype(str).str.strip() == str(resolved).strip()]
+            if len(sub) == 0:
+                break
+
+    dynamic: List[Dict[str, Any]] = []
+    for _, r in sub.iterrows():
+        v = r[val_col]
+        if v is None:
+            continue
+        try:
+            import math as _m
+            if isinstance(v, float) and _m.isnan(v):
+                continue
+        except Exception:
+            pass
+        sv = str(v).strip()
+        if not sv:
+            continue
+        sl = "" if lbl_col == val_col else str(r.get(lbl_col, "")).strip()
+        dynamic.append({"value": sv, "label": sl})
+    # Sentinels at the end so they don't dominate the indicator column
+    # ordering of the export header.
+    return dynamic + sentinels
+
+
+def _resolve_match_value(expr: str, row: Dict[str, Any]) -> Optional[str]:
+    """Resolve a search() match-value expression against the current row.
+
+    Handles bare literals and ``${var}`` references. Returns None for
+    unresolvable expressions so the caller can skip the clause.
+    """
+    s = str(expr).strip()
+    if not s:
+        return None
+    m = _re.fullmatch(r"\$\{\s*([A-Za-z_][\w]*)\s*\}", s)
+    if m:
+        v = row.get(m.group(1), "")
+        return str(v) if v not in (None, "") else None
+    return s
+
 
 def _find_innermost_repeat(group_path: List[str], repeats: Set[str]) -> Optional[str]:
     for g in reversed(group_path or []):
@@ -329,8 +553,23 @@ def _metadata_value(q_type: str, q_name: str, runctx: RunContext, rng: random.Ra
         return runctx.username
     if q_type == "caseid":
         return runctx.caseid
-    if q_type in ("audio audit", "text audit"):
-        return f"media-{rng.randint(1000, 9999)}.m4a"
+    # Audit fields are exported by SurveyCTO as full attachment URLs
+    # of the form:
+    #   text audit:  https://<host>/api/v2/forms/<form_id>/submissions/<key>/attachments/TA_<uuid>.csv
+    #   audio audit: https://<host>/api/v2/forms/<form_id>/submissions/<key>/attachments/AA_<uuid>_AFTER_<seconds>S.m4a
+    # ``key`` has the form ``uuid:<uuid>``; we strip the ``uuid:`` prefix
+    # when embedding it in the bare ``TA_`` / ``AA_`` filename to match
+    # the empirical format observed in real ltfu_hh exports.
+    key_uuid = runctx.key[5:] if runctx.key.startswith("uuid:") else runctx.key
+    base = f"https://{runctx.server_host}/api/v2/forms/{runctx.form_id}/submissions/{runctx.key}/attachments"
+    if q_type == "text audit":
+        return f"{base}/TA_{key_uuid}.csv"
+    if q_type == "audio audit":
+        # Real exports include the second-offset when audit was captured.
+        # We don't know which audio_audit instance this is, so randomise
+        # within the respondent's duration window.
+        secs = rng.randint(60, max(60, runctx.duration))
+        return f"{base}/AA_{key_uuid}_AFTER_{secs}S.m4a"
     if q_type in ("speed violations count",):
         return "0"
     if q_type == "speed violations list":
@@ -351,6 +590,7 @@ def _walk_one(
     strip_log: StripLog,
     force_values: Optional[Dict[str, str]] = None,
     geo_bbox: Optional[Tuple[float, float, float, float]] = None,
+    pulldata_tables: Optional[Dict[str, Any]] = None,
 ) -> WalkResult:
     """Generate one respondent's row.
 
@@ -367,6 +607,14 @@ def _walk_one(
     row: Dict[str, Any] = {}
     repeat_counts: Dict[str, int] = {}
     force_values = force_values or {}
+    # Pre-seed force_values into the row so questions earlier in the
+    # form that reference a force-targeted variable in their ``relevance``
+    # see the forced value (e.g. ``text_audit`` at position 4 referencing
+    # ``${consentsurvey}=1`` where ``consentsurvey`` is at position 102).
+    # The walker still re-asserts the forced value when it reaches the
+    # variable's own position, so this is idempotent.
+    for _fv_name, _fv_value in force_values.items():
+        row[_fv_name] = _fv_value
 
     def _make_ctx(current_var: Optional[str], repeat_stack: List[Tuple[str, int]]):
         return EvalContext(
@@ -392,6 +640,14 @@ def _walk_one(
         group_path = q.get("group_path") or []
         choices = q.get("choices") or []
         constraint = q.get("constraint")
+        # Expand search()-appearance choice lists from pulldata. Done per
+        # respondent so the matches-clause filter sees the current row.
+        # Falls back to the static list when no search() applies or the
+        # named CSV isn't loaded.
+        if q_type in ("select_one", "select_multiple") and pulldata_tables and q.get("appearance"):
+            dynamic = _resolve_search_choices(q, pulldata_tables, row=row, apply_matches=True)
+            if dynamic:
+                choices = dynamic
 
         # ── repeat_count: resolve N for this respondent. If the repeat
         # group is gated by a relevance that evaluated false, the count
@@ -519,11 +775,28 @@ def _compute_value(
 ) -> Any:
     """Compute a Python value for one (relevance-true) question."""
 
-    # Calculate: evaluate the expression
-    if q_type == "calculate":
+    # Calculate / calculate_here: evaluate the expression. calculate_here
+    # is SurveyCTO-specific (fixed-location calculate). Two practical
+    # differences from plain calculate:
+    #   1. The typical formula is ``once(format-date-time(now(), '...'))``
+    #      to capture a module-start timestamp (~95% of real-world use).
+    #   2. The other common pattern is ``once(duration())`` to capture
+    #      cumulative elapsed seconds at that field. SurveyCTO returns
+    #      successively larger values as the form progresses — we mirror
+    #      that here by advancing ``runctx.duration_progress`` per call,
+    #      so HFC code that does ``end_modN - start_modN`` gets a
+    #      sensible non-zero module duration.
+    if q_type in ("calculate", "calculate_here"):
         calc = question.get("calculation")
         if not calc:
             return ""
+        if q_type == "calculate_here" and "duration()" in calc:
+            remaining = max(0, runctx.duration - runctx.duration_progress)
+            advance = max(1, int(remaining * rng.uniform(0.05, 0.20))) if remaining > 0 else 0
+            runctx.duration_progress = min(
+                runctx.duration_progress + advance, runctx.duration
+            )
+            return runctx.duration_progress
         return safe_evaluate(
             calc, ctx, default="",
             on_error=lambda e, exc: strip_log.record(var_label, "calculation", e, exc),
@@ -550,6 +823,9 @@ def _compute_value(
     sampler_kwargs = {}
     if geo_bbox is not None:
         sampler_kwargs["geo_bbox"] = geo_bbox
+    app = question.get("appearance")
+    if app:
+        sampler_kwargs["appearance"] = app
     return sample_python_value(q_type, narrowed_choices, constraint, rng, **sampler_kwargs)
 
 
@@ -588,6 +864,7 @@ def _build_column_order(
     questions: List[Dict[str, Any]],
     repeats: Set[str],
     max_iter: Dict[str, int],
+    pulldata_tables: Optional[Dict[str, Any]] = None,
 ) -> List[str]:
     """Materialise the column list for the wide CSV in form order, with
     repeat-suffix unrolling and select_multiple indicator columns.
@@ -596,6 +873,12 @@ def _build_column_order(
     (e.g. a form-defined ``duration`` calculate) reuse that slot rather
     than producing a duplicate column — the form's value, if any, will
     fill the metadata column at write time.
+
+    When a select question has a ``search('CSV', ...)`` appearance and
+    the named CSV is loaded, the choice list is expanded to include one
+    indicator column per CSV row (no matches-clause filter at header
+    time — every possible ID gets a slot, matching real SurveyCTO
+    export shape).
     """
     cols: List[str] = []
     seen: Set[str] = set()
@@ -617,6 +900,10 @@ def _build_column_order(
 
         group_path = q.get("group_path") or []
         choices = q.get("choices") or []
+        if q_type in ("select_one", "select_multiple") and pulldata_tables and q.get("appearance"):
+            dynamic = _resolve_search_choices(q, pulldata_tables, apply_matches=False)
+            if dynamic:
+                choices = dynamic
 
         if q_type == "repeat_count":
             _push(var_name)
@@ -706,6 +993,7 @@ def generate_synthetic_csv(
     allow_missing_pulldata: bool = False,
     force_values: Optional[Dict[str, str]] = None,
     geo_bbox: Optional[Tuple[float, float, float, float]] = None,
+    form_settings: Optional[Dict[str, Any]] = None,
 ) -> Path:
     """Walk the form and write ``n_rows`` synthetic respondents to a wide CSV.
 
@@ -769,6 +1057,22 @@ def generate_synthetic_csv(
         raise SystemExit(f"[synthetic] {exc}") from exc
     pulldata_lookup = make_lookup(tables) if tables else None
 
+    # Caseid sampling: if the form looks up any pulldata table with
+    # ``${caseid}`` as the key, draw caseid values from that table's key
+    # column so pulldata lookups resolve. Otherwise fall back to the
+    # synthetic ``case-NNNN`` form. Picked once, deterministically, off
+    # the master seed -- so re-running with the same seed selects the
+    # same caseids in the same order.
+    caseid_pool = _build_caseid_pool(questions, tables or {})
+    if caseid_pool:
+        pool_rng = random.Random(f"{seed}::caseid_pool")
+        shuffled = list(caseid_pool)
+        pool_rng.shuffle(shuffled)
+        # Without replacement when pool >= n_rows; cycle otherwise.
+        caseid_per_row = [shuffled[i % len(shuffled)] for i in range(n_rows)]
+    else:
+        caseid_per_row = [None] * n_rows
+
     def _walk_for_respondent(rs: int, i: int, log: StripLog) -> WalkResult:
         # Two RNGs per respondent, derived from the per-respondent seed:
         # `meta_rng` -> run-context only; `sample_rng` -> sampling + the
@@ -777,11 +1081,12 @@ def generate_synthetic_csv(
         # byte-stable across edits to the run-context generator.
         meta_rng = random.Random(f"{rs}::meta")
         sample_rng = random.Random(f"{rs}::sample")
-        rctx = _build_run_context(meta_rng, i + 1)
+        rctx = _build_run_context(meta_rng, i + 1, caseid=caseid_per_row[i], form_settings=form_settings)
         return _walk_one(
             questions, repeats, sample_rng, rctx, pulldata_lookup,
             choices_lookup, var_to_choice_list, log,
             force_values=force_values, geo_bbox=geo_bbox,
+            pulldata_tables=tables,
         )
 
     # ── Pass 1: collect repeat_counts per respondent; drop rows.
@@ -794,7 +1099,7 @@ def generate_synthetic_csv(
                 max_iter[k] = v
         # row dropped at end of scope
 
-    column_order = _build_column_order(questions, repeats, max_iter)
+    column_order = _build_column_order(questions, repeats, max_iter, pulldata_tables=tables)
 
     # ── Pass 2: walk and write streaming. Each row is materialised once,
     # written to disk, then released.
@@ -806,11 +1111,12 @@ def generate_synthetic_csv(
         for i, rs in enumerate(respondent_seeds):
             meta_rng = random.Random(f"{rs}::meta")
             sample_rng = random.Random(f"{rs}::sample")
-            rctx = _build_run_context(meta_rng, i + 1)
+            rctx = _build_run_context(meta_rng, i + 1, caseid=caseid_per_row[i], form_settings=form_settings)
             result = _walk_one(
                 questions, repeats, sample_rng, rctx, pulldata_lookup,
                 choices_lookup, var_to_choice_list, strip_log,
                 force_values=force_values, geo_bbox=geo_bbox,
+                pulldata_tables=tables,
             )
             writer.writerow(_row_to_csv_dict(result.row, rctx, column_order))
 
