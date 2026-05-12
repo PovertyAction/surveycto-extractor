@@ -86,7 +86,6 @@ SURVEYS = {
         "sections_dir":         Path("path/to/survey_documentation/my_survey/sections"),
         "name":                 "My Survey Full Name",
         "max_section_depth":    3,
-        "repeat_defaults":      {},   # {repeat_group_name: n} to override auto-detection
     },
 }
 ```
@@ -125,7 +124,7 @@ python main.py --survey all                                  # all surveys in co
 
 Phases 1–3 only require the SurveyCTO `.xlsx` instrument — they can run before any data is collected. Valid phase names: `csv`, `json`, `sections`, `synthetic`, `all`.
 
-Produces `*_questions.json`, `*_structure.txt`, and `sections/*.json`.
+`--phases all` (the CLI default) runs `csv`, `json`, `sections`, **and** `synthetic`. Produces `*_questions.json`, `*_structure.txt`, `sections/*.json`, **and** `*_synthetic.csv`. If your form uses `pulldata()`, the default flow needs those CSVs configured (see [`docs/synthetic-generator.md`](docs/synthetic-generator.md)) — otherwise `--phases all` will hard-error on the synthetic step. Run the lighter `--phases csv json sections` subset to skip synth.
 
 ### Synthetic export CSV
 
@@ -280,10 +279,6 @@ These files need no modification — they are fully project-agnostic. The `surve
 **`search_survey.py` finds no surveys**
 Check that `DOCS` points to the directory containing `*_variable_dictionary.json` files.
 Run phase 4 first if the dictionary doesn't exist yet.
-
-**Seed emits only 1 iteration for a variable-driven repeat group**
-The generator scans the `.dta` for max iterations but needs the file to exist.
-Override in config: `"repeat_defaults": {"my_repeat_group": 5}`.
 
 **Phase 5 do-file has wrong `${input_data}` path**
 Add `"output_do"` and `"sumstats_dir_stata"` keys to your DATASETS entry.

@@ -24,7 +24,6 @@ SURVEYS = {
         "sections_dir":         SAMPLE_DIR / "output" / "sections",
         "name":                 "Household Survey (IPA HFC sample)",
         "max_section_depth":    3,
-        "repeat_defaults":      {},
         # Optional per-survey settings used by --phases synthetic:
         #   "pulldata_search_dirs": [DATA_DIR / "form_attachments"],
         #       Directories searched for pulldata CSVs (defaults to the
