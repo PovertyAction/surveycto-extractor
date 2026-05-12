@@ -106,10 +106,15 @@ def text_max_length(constraint: Optional[str]) -> Optional[int]:
     constraint and return ``N`` as a cap. Equality is treated as a cap
     (sampled values up to N chars) since we can't always meet exact
     length and a shorter value still satisfies most downstream uses.
+
+    The negative lookbehind ``(?<![>!<])`` is required to prevent the
+    bare ``=`` alternative from matching the ``=`` inside ``>= N`` or
+    ``!= N`` — a TEXT field with constraint ``. >= 1`` would otherwise
+    be capped at 1 character.
     """
     if not constraint:
         return None
-    m = re.search(r"(?:<=|=)\s*(\d+)", constraint)
+    m = re.search(r"(?<![>!<])(?:<=|=)\s*(\d+)", constraint)
     if m:
         return int(m.group(1))
     return None
