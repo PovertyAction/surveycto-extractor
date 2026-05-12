@@ -15,7 +15,7 @@ from extractors.csv_extractor import CSVExtractor
 from extractors.json_extractor import JSONExtractor
 from generators.diagram_generator import DiagramGenerator
 from generators.section_splitter import SectionSplitter
-from generators.seed_generator import generate_seed_dofile
+from generators.synthetic_data import generate_synthetic_csv
 from transformers.logic_converter import clear_strip_log
 
 
@@ -136,33 +136,100 @@ class SurveyDocumentationSystem:
         print()
 
 
-def run_seed_phase(survey_key: str, n_rows: int = 1, seed: int = 0):
-    """Phase 2c: generate seed .do file from questions.json (no dataset needed)."""
+def _parse_force_values(specs):
+    """Parse ``--force-value`` arguments into a dict.
+
+    Accepts a list of strings (from ``action='append'``) or a single string
+    (legacy). Within one spec, comma-separated ``VAR=VAL`` pairs are
+    accepted only when every comma-segment contains ``=`` — so values that
+    embed commas can be passed unambiguously by repeating the flag (which
+    avoids the parse conflict).
+    """
+    out = {}
+    if specs is None:
+        return out
+    if isinstance(specs, str):
+        specs = [specs]
+    for spec in specs:
+        if not spec:
+            continue
+        parts = [p for p in spec.split(",") if p.strip()]
+        # Only treat commas as entry separators when every segment is a
+        # well-formed VAR=VAL — otherwise the comma probably belongs to a
+        # value, and we treat the whole spec as a single VAR=VAL.
+        if len(parts) > 1 and all("=" in p for p in parts):
+            entries = parts
+        else:
+            entries = [spec]
+        for entry in entries:
+            entry = entry.strip()
+            if not entry:
+                continue
+            if "=" not in entry:
+                raise ValueError(
+                    f"--force-value entry {entry!r} must be in VAR=VAL form"
+                )
+            k, v = entry.split("=", 1)
+            out[k.strip()] = v.strip()
+    return out
+
+
+def run_synthetic_phase(
+    survey_key: str, n_rows: int = 5, seed: int = 0,
+    force_values=None,
+):
+    """Generate a SurveyCTO-shaped synthetic export CSV from questions.json."""
     survey_cfg = config.SURVEYS[survey_key]
     dataset_cfg = config.DATASETS.get(survey_key)
     if dataset_cfg is None:
-        print(f"[SKIP] No DATASETS entry for '{survey_key}' -- cannot locate questions_json for seed")
+        print(f"[SKIP] No DATASETS entry for '{survey_key}' -- cannot locate questions_json for synthetic")
         return
 
-    json_key = 'questions_json' if 'questions_json' in dataset_cfg else 'json'
+    json_key = "questions_json" if "questions_json" in dataset_cfg else "json"
     questions_json = Path(dataset_cfg[json_key])
     if not questions_json.exists():
         print(f"[SKIP] questions.json not found at {questions_json} -- run phase 2 first")
         return
 
-    output_do = survey_cfg["output_dir"] / f"{survey_key}_create_seed.do"
-    repeat_defaults = survey_cfg.get("repeat_defaults", {})
-    data_path = Path(dataset_cfg["data"]) if "data" in dataset_cfg else None
+    output_csv = survey_cfg["output_dir"] / f"{survey_key}_synthetic.csv"
+    # Search for pulldata CSVs in the configured dirs (default: dir of input_file)
+    search_dirs = survey_cfg.get("pulldata_search_dirs")
+    if not search_dirs:
+        search_dirs = [Path(survey_cfg["input_file"]).parent]
+    else:
+        search_dirs = [Path(d) for d in search_dirs]
 
-    print(f"\n=== Phase 2c: Seed Dataset Generator ({survey_key}) ===")
-    generate_seed_dofile(
+    geo_bbox = survey_cfg.get("geo_bbox")
+
+    # Read settings sheet from the original XLSForm so the synth can use
+    # the real form_id and version when building auto-generated metadata
+    # (formdef_version, text_audit URL, audio_audit URL). XLSForm
+    # settings sheets are conventionally single-row (form-wide settings,
+    # not per-question), so we only read row 0. A malformed multi-row
+    # settings sheet would silently pick the first row.
+    form_settings = {}
+    try:
+        import pandas as _pd
+        s_df = _pd.read_excel(survey_cfg["input_file"], sheet_name="settings")
+        if len(s_df) > 0:
+            form_settings = {
+                k: (None if _pd.isna(v) else str(v).strip())
+                for k, v in s_df.iloc[0].to_dict().items()
+            }
+    except Exception:
+        form_settings = {}
+
+    print(f"\n=== Phase 2d: Synthetic Data Generator ({survey_key}) ===")
+    generate_synthetic_csv(
         questions_json_path=questions_json,
-        output_do_path=output_do,
+        output_csv_path=output_csv,
+        pulldata_search_dirs=search_dirs,
         survey_name=survey_cfg["name"],
-        repeat_defaults=repeat_defaults,
-        data_path=data_path,
         n_rows=n_rows,
         seed=seed,
+        force_values=force_values,
+        geo_bbox=geo_bbox,
+        form_settings=form_settings,
     )
     print()
 
@@ -170,7 +237,7 @@ def run_seed_phase(survey_key: str, n_rows: int = 1, seed: int = 0):
 def main():
     """Main entry point with CLI"""
     survey_keys = list(config.SURVEYS.keys())
-    valid_phases = ["csv", "json", "seed", "sections", "all"]
+    valid_phases = ["csv", "json", "sections", "synthetic", "all"]
 
     parser = argparse.ArgumentParser(
         description="Generate comprehensive documentation for SurveyCTO surveys"
@@ -185,24 +252,35 @@ def main():
         "--phases",
         nargs="+",
         default=["all"],
-        metavar="PHASE",
+        choices=valid_phases,
         help=f"Phases to run: {', '.join(valid_phases)} (default: all). "
-             f"'seed' requires questions.json from phase 'json'."
+             f"'synthetic' requires questions.json from phase 'json'."
     )
     parser.add_argument(
         "--rows",
         type=int,
-        default=1,
-        help="Number of rows in the seed dataset (seed phase only). Default 1 "
-             "produces the original schema seed; larger values emit per-row "
-             "replace statements with constraint-aware random values."
+        default=None,
+        help="Number of rows for --phases synthetic. Default 5."
     )
     parser.add_argument(
         "--seed",
         type=int,
         default=0,
-        help="Random seed for reproducible seed dataset generation. Default 0. "
-             "Same --seed produces byte-identical do-file output."
+        help="Random seed for reproducible synthetic CSV generation. Default 0. "
+             "Same --seed produces byte-identical CSV output."
+    )
+    parser.add_argument(
+        "--force-value",
+        action="append",
+        default=None,
+        metavar="VAR=VAL[,VAR=VAL...]",
+        help="For --phases synthetic: force one or more variables to specific "
+             "values, overriding random sampling. Bypasses relevance so gated "
+             "cascades populate even when their parent gates would otherwise "
+             "evaluate false (useful for HFC dry-runs of consent-gated "
+             "sections). May be repeated; multiple VAR=VAL pairs in one flag "
+             "can be comma-separated (use repeated flags if values contain "
+             "commas). Example: --force-value c_consent=1,hh_consent=1"
     )
 
     args = parser.parse_args()
@@ -215,6 +293,9 @@ def main():
     phases = set(args.phases)
     run_all = "all" in phases
 
+    synthetic_rows = args.rows if args.rows is not None else 5
+    force_values = _parse_force_values(args.force_value)
+
     errors = []
     for survey_key in surveys:
         try:
@@ -222,9 +303,12 @@ def main():
             # stale entries bleeding across instruments
             clear_strip_log()
 
-            # Seed-only: no need to load the survey XLSX
-            if not run_all and phases == {"seed"}:
-                run_seed_phase(survey_key, n_rows=args.rows, seed=args.seed)
+            # synthetic-only: no need to load the survey XLSX
+            if not run_all and phases == {"synthetic"}:
+                run_synthetic_phase(
+                    survey_key, n_rows=synthetic_rows, seed=args.seed,
+                    force_values=force_values,
+                )
                 continue
 
             system = SurveyDocumentationSystem(survey_key)
@@ -233,9 +317,12 @@ def main():
             else:
                 system.run_phases(phases)
 
-            # Seed phase runs after JSON extraction
-            if run_all or "seed" in phases:
-                run_seed_phase(survey_key, n_rows=args.rows, seed=args.seed)
+            # Synthetic CSV phase runs after JSON extraction
+            if run_all or "synthetic" in phases:
+                run_synthetic_phase(
+                    survey_key, n_rows=synthetic_rows, seed=args.seed,
+                    force_values=force_values,
+                )
 
         except Exception as e:
             print(f"\nERROR processing {survey_key} survey: {str(e)}")

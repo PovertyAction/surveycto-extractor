@@ -45,7 +45,6 @@ SURVEYS = {
     #     "sections_dir":         OUTPUT_DIR / "my_survey" / "sections",
     #     "name":                 "My Survey Full Name",
     #     "max_section_depth":    3,     # limit section nesting depth
-    #     "repeat_defaults":      {},    # {repeat_group_name: n_iterations} overrides
     # },
 }
 

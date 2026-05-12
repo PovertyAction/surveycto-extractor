@@ -381,6 +381,13 @@ class JSONExtractor:
         # downstream consumers (vardict choice-list rendering uses it to
         # surface the filter dimensions from the choices sheet).
         choice_filter = row.get("choice_filter", None) or None
+        # appearance is a presentation column but carries the SurveyCTO
+        # ``search('CSV', 'matches', col, val, ...)`` directive that
+        # dynamically populates a select's choice list from a media-bundle
+        # CSV. The synthetic generator uses this to expand placeholder
+        # choice lists (e.g. peer rosters, enumerator lists) at run time
+        # against the actual pulldata table.
+        appearance = row.get("appearance", None) or None
 
         # For calculate type, use calculation expression as label fallback
         if base_type == "calculate" and not question_text and calculation:
@@ -449,6 +456,7 @@ class JSONExtractor:
             "required": required,
             "calculation": calculation,
             "choice_filter": choice_filter,
+            "appearance": appearance,
             "references": references,
             "group_path": group_path,
             "stata_skip_logic": stata_skip_logic,

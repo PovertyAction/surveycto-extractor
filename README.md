@@ -1,9 +1,10 @@
 # SurveyCTO Extractor
 
 A Python toolkit that turns a SurveyCTO `.xlsx` instrument into a suite of Stata-ready
-outputs: structured survey documentation, a variable dictionary, a schema seed dataset,
-and summary-stats do-files. Designed to be copied into any IPA-style cleaning project
-and used alongside an AI coding agent (Claude Code or similar).
+outputs: structured survey documentation, a variable dictionary, a synthetic
+SurveyCTO-shaped export CSV for HFC dry-runs, and summary-stats do-files. Designed
+to be copied into any IPA-style cleaning project and used alongside an AI coding
+agent (Claude Code or similar).
 
 ---
 
@@ -33,7 +34,7 @@ training dataset.
 | `*_questions.json` | `main.py` | Machine-readable question metadata with Stata skip logic — primary input to everything else |
 | `*_structure.txt` | `main.py` | Human-readable group hierarchy of the form |
 | `sections/*.json` | `main.py` | Per-section slices of the question JSON |
-| `*_create_seed.do` | `main.py --phases seed` | Stata do-file that builds a 1-row schema dataset — run this before your real data arrives to test your cleaning pipeline |
+| `*_synthetic.csv` | `main.py --phases synthetic` | SurveyCTO-shaped wide-export CSV with N synthetic respondents — run this before your real data arrives to dry-run HFC and cleaning pipelines against the real export schema |
 | `*_variable_dictionary.json` | `create_variable_dictionaries.py` | Maps every Stata variable to its source question, skip logic, choice list, and sentinel counts — in form order, not dataset column order |
 | `*_variable_dictionary.xlsx` | `create_variable_dictionaries.py --xlsx` | Same dictionary as a spreadsheet for sharing with field teams or PIs |
 | `*_variable_graph.json` | `create_variable_dictionaries.py` | Variable relationship graph — calculation dependencies, gating chains, repeat structure, shared choice domains (requires `networkx`) |
@@ -74,7 +75,7 @@ Copy `config.template.py` to `config.py` and fill in your paths.
 
 The config has two dicts that reflect a meaningful split in the pipeline:
 
-**`SURVEYS`** — instrument side, required for phases 1–3 and seed. Only needs the `.xlsx` form — can be configured on day 1, before any data is collected.
+**`SURVEYS`** — instrument side, required for phases 1–3 and synthetic. Only needs the `.xlsx` form — can be configured on day 1, before any data is collected.
 
 ```python
 SURVEYS = {
@@ -85,7 +86,6 @@ SURVEYS = {
         "sections_dir":         Path("path/to/survey_documentation/my_survey/sections"),
         "name":                 "My Survey Full Name",
         "max_section_depth":    3,
-        "repeat_defaults":      {},   # {repeat_group_name: n} to override auto-detection
     },
 }
 ```
@@ -114,29 +114,32 @@ The `questions_json` path is the bridge between the two sides: it points to the 
 ### Phases 1–3: Extract survey structure
 
 ```bash
-python main.py --survey my_survey                        # all phases (default)
-python main.py --survey my_survey --phases csv           # CSV only
-python main.py --survey my_survey --phases json          # questions JSON + diagram only
-python main.py --survey my_survey --phases sections      # section split only (reads questions JSON from disk)
-python main.py --survey my_survey --phases json seed     # JSON then seed
-python main.py --survey all                              # all surveys in config
+python main.py --survey my_survey                            # all phases (default)
+python main.py --survey my_survey --phases csv               # CSV only
+python main.py --survey my_survey --phases json              # questions JSON + diagram only
+python main.py --survey my_survey --phases sections          # section split only (reads questions JSON from disk)
+python main.py --survey my_survey --phases json synthetic    # JSON then synthetic CSV
+python main.py --survey all                                  # all surveys in config
 ```
 
-Phases 1–3 only require the SurveyCTO `.xlsx` instrument — they can run before any data is collected. Valid phase names: `csv`, `json`, `sections`, `seed`, `all`.
+Phases 1–3 only require the SurveyCTO `.xlsx` instrument — they can run before any data is collected. Valid phase names: `csv`, `json`, `sections`, `synthetic`, `all`.
 
-Produces `*_questions.json`, `*_structure.txt`, and `sections/*.json`.
+`--phases all` (the CLI default) runs `csv`, `json`, `sections`, **and** `synthetic`. Produces `*_questions.json`, `*_structure.txt`, `sections/*.json`, **and** `*_synthetic.csv`. If your form uses `pulldata()`, the default flow needs those CSVs configured (see [`docs/synthetic-generator.md`](docs/synthetic-generator.md)) — otherwise `--phases all` will hard-error on the synthetic step. Run the lighter `--phases csv json sections` subset to skip synth.
 
-### Seed dataset
+### Synthetic export CSV
 
 ```bash
-python main.py --survey my_survey --phases seed
+python main.py --survey my_survey --phases synthetic --rows 20 --seed 42
 ```
 
-Generates `*_create_seed.do` — a Stata do-file that builds a 1-row dataset covering
-every variable in the form, including conditionally-triggered ones. Run it in Stata
-**before your real data arrives** to test that your cleaning do-files run end-to-end
-against the complete variable schema. Repeat groups are expanded to N iterations
-(auto-detected from the `.dta` if available, or set via `repeat_defaults` in config).
+Generates `*_synthetic.csv` — a SurveyCTO-shaped wide export CSV with N synthetic
+respondents. Run it **before your real data arrives** to dry-run HFC and cleaning
+pipelines against the real export schema (column order, select_multiple unrolling,
+repeat-suffix expansion, pulldata-resolved values, audit URLs, etc.).
+
+See [`docs/synthetic-generator.md`](docs/synthetic-generator.md) for full details on
+CLI flags (`--force-value`, `--rows`, `--seed`), the `search()` choice expansion,
+type concordance against real exports, and the determinism guarantees.
 
 ### Variable dictionary
 
@@ -277,10 +280,6 @@ These files need no modification — they are fully project-agnostic. The `surve
 Check that `DOCS` points to the directory containing `*_variable_dictionary.json` files.
 Run phase 4 first if the dictionary doesn't exist yet.
 
-**Seed emits only 1 iteration for a variable-driven repeat group**
-The generator scans the `.dta` for max iterations but needs the file to exist.
-Override in config: `"repeat_defaults": {"my_repeat_group": 5}`.
-
 **Phase 5 do-file has wrong `${input_data}` path**
 Add `"output_do"` and `"sumstats_dir_stata"` keys to your DATASETS entry.
 
@@ -290,7 +289,7 @@ the JSON extractor to distinguish `select_one` from `select_multiple`.
 
 **`calculate` fields missing from `questions.json`**
 Remove `"calculate"` from `EXCLUDED_TYPES` in `config.py`. Calculate fields are
-needed for skip logic resolution and seed generation.
+needed for skip logic resolution and synthetic generation.
 
 **`FileNotFoundError: Bridge file not found`**
 Phase 4 (`create_variable_dictionaries.py`) requires the `*_questions.json` file
