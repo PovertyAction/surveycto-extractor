@@ -2,9 +2,8 @@
 Shared value-sampling helpers
 =============================
 
-Constraint-aware sampling and bound extraction used by both the Stata
-seed do-file generator (``seed_generator.py``) and the SurveyCTO-shaped
-synthetic-data CSV generator (``synthetic_data.py``).
+Constraint-aware sampling and bound extraction used by the synthetic
+SurveyCTO-shaped CSV generator (``synthetic_data.py``).
 
 ``numeric_bounds`` and ``text_max_length`` are pure parsers over a raw
 SurveyCTO constraint string — they recognise the simple ``>= N`` / ``<= N``
@@ -12,8 +11,8 @@ patterns that show up in most real forms and ignore anything more exotic
 (which would fall through to the evaluator instead).
 
 ``sample_python_value`` returns a typed Python value (int, float, str,
-``datetime``, etc.). The Stata generator wraps these with literal-formatting;
-the CSV generator writes them through pandas as-is.
+``datetime``, etc.). The CSV writer in ``synthetic_data.py`` serialises
+each typed value with the appropriate SurveyCTO-export format.
 """
 
 from __future__ import annotations

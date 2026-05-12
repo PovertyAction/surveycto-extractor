@@ -1,10 +1,11 @@
 """
 Build a JSON type catalog from coding_guidelines/surveycto_refs/xlsform.md.
 
-The catalog is consumed by seed_generator.py to map SurveyCTO `type` values
-to Stata storage types and to classify whether a field is numeric/string/
-structural/hidden. Regenerate this file whenever the vendored xlsform.md
-is refreshed.
+The catalog records each SurveyCTO ``type`` value's default Stata storage
+type plus structural classifications (numeric / string / structural /
+hidden / supports_constraint). Useful as a reference artifact for
+documentation and dictionary tooling; not currently loaded at run time
+by any pipeline. Regenerate whenever the vendored xlsform.md changes.
 """
 from __future__ import annotations
 
@@ -22,7 +23,7 @@ OUTPUT = REPO_ROOT / "coding_guidelines" / "surveycto_refs" / "_type_catalog.jso
 # Default Stata storage types per SurveyCTO field type.
 # Numeric integer-coded fields get `long`; numeric continuous get `double`;
 # strings get a default `str32` (text size hints come from constraint at use
-# time in seed_generator, not here). Structural rows have no storage type.
+# time downstream, not here). Structural rows have no storage type.
 _STATA_TYPE_DEFAULTS: Dict[str, str] = {
     "text":          "str32",
     "integer":       "long",
@@ -30,7 +31,7 @@ _STATA_TYPE_DEFAULTS: Dict[str, str] = {
     "select_one":    "long",
     "select_multiple": "byte",   # binary per-choice columns
     "enumerator":    "str32",
-    "geopoint":      "double",   # split into 4 components by seed_generator
+    "geopoint":      "double",   # may be split into 4 components on import
     "geoshape":      "str244",
     "geotrace":      "str244",
     "barcode":       "str32",

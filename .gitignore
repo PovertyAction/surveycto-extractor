@@ -40,7 +40,6 @@ data/
 *_variable_dictionary.json
 *_variable_dictionary.xlsx
 *_structure.txt
-*_create_seed.do
 *_summary_stats.do
 *_survey.csv
 *_choices.csv

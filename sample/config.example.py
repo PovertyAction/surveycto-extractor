@@ -15,7 +15,7 @@ from pathlib import Path
 # Sample files live in sample/ relative to the repo root.
 SAMPLE_DIR = Path(__file__).parent / "sample"
 
-# Instrument side — only needs the .xlsx; can run before data collection (Phases 1-3, seed)
+# Instrument side — only needs the .xlsx; can run before data collection (Phases 1-3, synthetic)
 SURVEYS = {
     "household_survey": {
         "input_file":           SAMPLE_DIR / "Household_Survey.xlsx",

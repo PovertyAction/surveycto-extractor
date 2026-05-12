@@ -15,7 +15,6 @@ from extractors.csv_extractor import CSVExtractor
 from extractors.json_extractor import JSONExtractor
 from generators.diagram_generator import DiagramGenerator
 from generators.section_splitter import SectionSplitter
-from generators.seed_generator import generate_seed_dofile
 from generators.synthetic_data import generate_synthetic_csv
 from transformers.logic_converter import clear_strip_log
 
@@ -137,37 +136,6 @@ class SurveyDocumentationSystem:
         print()
 
 
-def run_seed_phase(survey_key: str, n_rows: int = 1, seed: int = 0):
-    """Phase 2c: generate seed .do file from questions.json (no dataset needed)."""
-    survey_cfg = config.SURVEYS[survey_key]
-    dataset_cfg = config.DATASETS.get(survey_key)
-    if dataset_cfg is None:
-        print(f"[SKIP] No DATASETS entry for '{survey_key}' -- cannot locate questions_json for seed")
-        return
-
-    json_key = 'questions_json' if 'questions_json' in dataset_cfg else 'json'
-    questions_json = Path(dataset_cfg[json_key])
-    if not questions_json.exists():
-        print(f"[SKIP] questions.json not found at {questions_json} -- run phase 2 first")
-        return
-
-    output_do = survey_cfg["output_dir"] / f"{survey_key}_create_seed.do"
-    repeat_defaults = survey_cfg.get("repeat_defaults", {})
-    data_path = Path(dataset_cfg["data"]) if "data" in dataset_cfg else None
-
-    print(f"\n=== Phase 2c: Seed Dataset Generator ({survey_key}) ===")
-    generate_seed_dofile(
-        questions_json_path=questions_json,
-        output_do_path=output_do,
-        survey_name=survey_cfg["name"],
-        repeat_defaults=repeat_defaults,
-        data_path=data_path,
-        n_rows=n_rows,
-        seed=seed,
-    )
-    print()
-
-
 def _parse_force_values(specs):
     """Parse ``--force-value`` arguments into a dict.
 
@@ -266,7 +234,7 @@ def run_synthetic_phase(
 def main():
     """Main entry point with CLI"""
     survey_keys = list(config.SURVEYS.keys())
-    valid_phases = ["csv", "json", "seed", "sections", "synthetic", "all"]
+    valid_phases = ["csv", "json", "sections", "synthetic", "all"]
 
     parser = argparse.ArgumentParser(
         description="Generate comprehensive documentation for SurveyCTO surveys"
@@ -281,24 +249,22 @@ def main():
         "--phases",
         nargs="+",
         default=["all"],
-        metavar="PHASE",
+        choices=valid_phases,
         help=f"Phases to run: {', '.join(valid_phases)} (default: all). "
-             f"'seed' requires questions.json from phase 'json'."
+             f"'synthetic' requires questions.json from phase 'json'."
     )
     parser.add_argument(
         "--rows",
         type=int,
         default=None,
-        help="Number of rows. Default depends on phase: 1 for seed (preserves "
-             "the byte-identical schema-seed output), 5 for synthetic. Explicit "
-             "values are used as-is for either phase."
+        help="Number of rows for --phases synthetic. Default 5."
     )
     parser.add_argument(
         "--seed",
         type=int,
         default=0,
-        help="Random seed for reproducible seed dataset generation. Default 0. "
-             "Same --seed produces byte-identical do-file / CSV output."
+        help="Random seed for reproducible synthetic CSV generation. Default 0. "
+             "Same --seed produces byte-identical CSV output."
     )
     parser.add_argument(
         "--force-value",
@@ -324,13 +290,7 @@ def main():
     phases = set(args.phases)
     run_all = "all" in phases
 
-    # Phase-aware defaults for --rows: seed expects 1 (byte-identical
-    # schema seed); synthetic expects 5 ("multiple respondents" is the
-    # design intent). Explicit --rows N overrides for either phase.
-    explicit_rows = args.rows
-    seed_rows = explicit_rows if explicit_rows is not None else 1
-    synthetic_rows = explicit_rows if explicit_rows is not None else 5
-
+    synthetic_rows = args.rows if args.rows is not None else 5
     force_values = _parse_force_values(args.force_value)
 
     errors = []
@@ -340,10 +300,7 @@ def main():
             # stale entries bleeding across instruments
             clear_strip_log()
 
-            # Seed-only / synthetic-only: no need to load the survey XLSX
-            if not run_all and phases == {"seed"}:
-                run_seed_phase(survey_key, n_rows=seed_rows, seed=args.seed)
-                continue
+            # synthetic-only: no need to load the survey XLSX
             if not run_all and phases == {"synthetic"}:
                 run_synthetic_phase(
                     survey_key, n_rows=synthetic_rows, seed=args.seed,
@@ -357,12 +314,8 @@ def main():
             else:
                 system.run_phases(phases)
 
-            # Seed phase runs after JSON extraction
-            if run_all or "seed" in phases:
-                run_seed_phase(survey_key, n_rows=seed_rows, seed=args.seed)
-
             # Synthetic CSV phase runs after JSON extraction
-            if "synthetic" in phases:
+            if run_all or "synthetic" in phases:
                 run_synthetic_phase(
                     survey_key, n_rows=synthetic_rows, seed=args.seed,
                     force_values=force_values,
