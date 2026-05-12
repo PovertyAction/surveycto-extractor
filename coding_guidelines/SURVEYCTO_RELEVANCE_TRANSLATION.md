@@ -10,7 +10,7 @@ in `tabstat` or `replace if` contexts.
 **Sources**:
 - SurveyCTO Expressions Reference — https://docs.surveycto.com/02-designing-forms/01-core-concepts/09.expressions.html
 - SurveyCTO Data Export Format — https://docs.surveycto.com/05-exporting-and-publishing-data/01-overview/09.data-format.html
-- **Vendored authoritative function catalog**: [`surveycto_refs/expressions.md`](surveycto_refs/expressions.md) — when extending the converter, this is the truth for what each function does, what its arguments look like, and which SurveyCTO operators diverge from ODK/XPath. [`surveycto_refs/xlsform.md`](surveycto_refs/xlsform.md) is the truth for XLSForm column semantics.
+- **In-house function catalog**: [`surveycto_refs/expressions.md`](surveycto_refs/expressions.md) — derivative primer we maintain by hand against the SurveyCTO docs; when extending the converter, treat it as the working reference for what each function does, what its arguments look like, and which SurveyCTO operators diverge from ODK/XPath. [`surveycto_refs/xlsform.md`](surveycto_refs/xlsform.md) plays the same role for XLSForm column semantics. Verify against the canonical pages on https://docs.surveycto.com if anything looks stale.
 
 **Downstream consumer**: `transformers/logic_converter.py`
 

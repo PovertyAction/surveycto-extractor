@@ -109,8 +109,12 @@ def _eval_filter_and(s: str, row: Dict[str, str]) -> tuple:
 
 def _eval_filter_unary(s: str, row: Dict[str, str]) -> tuple:
     s = s.lstrip()
-    if s.startswith('not('):
-        inner, rest = _eval_filter_or(s[4:], row)
+    # ``not(...)`` and ``not (...)`` (with a space) are both legal in
+    # SurveyCTO. Match either form by checking the keyword first and
+    # then skipping any whitespace between ``not`` and the opening paren.
+    m = re.match(r"not\s*\(", s)
+    if m:
+        inner, rest = _eval_filter_or(s[m.end():], row)
         rest = rest.lstrip()
         if not rest.startswith(')'):
             raise _UnhandledFilter("unbalanced not(")

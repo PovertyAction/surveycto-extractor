@@ -1,6 +1,6 @@
-# SurveyCTO Reference Docs (vendored)
+# SurveyCTO Reference Primers
 
-This directory contains read-only copies of two reference files from SurveyCTO's official agent-skill. Our SurveyCTO-to-Stata converter uses them as the authoritative source for XLSForm column semantics and expression syntax.
+This directory contains two reference primers we maintain as the authoritative source for `transformers/logic_converter.py` and the seed-generator type catalog. They are **derivative summaries** distilled from the SurveyCTO documentation site, not verbatim mirrors of any upstream file.
 
 ## Files
 
@@ -9,32 +9,25 @@ This directory contains read-only copies of two reference files from SurveyCTO's
 | `xlsform.md` | XLSForm worksheet structure, column reference, field type catalog, choice filters, settings, groups and repeats. |
 | `expressions.md` | Expression language: references, operators, function catalog, ODK/XPath divergences, worked patterns, common pitfalls. |
 
-## Source
+Each file's header records the regeneration date and points back at the canonical SurveyCTO docs pages as the source of truth.
 
-- Upstream repo: https://github.com/surveycto/surveycto-agent-skill (Apache-2.0)
-- Branch: `develop`
-- Pinned commit: `6d2e6d37bc26abd4a67e1517f43a12f93c5f241d`
-- Upstream paths: `references/xlsform.md`, `references/expressions.md`
+## Source and attribution
+
+These primers are written and maintained in-house from the public SurveyCTO documentation at https://docs.surveycto.com — primarily the *Designing forms: core concepts* section, with the specific pages cited in each primer's "Canonical docs" header line.
+
+SurveyCTO's documentation is © SurveyCTO. We treat these primers as derivative summaries for the limited internal purpose of grounding our XLSForm-to-Stata converter; they are not redistributed as a SurveyCTO product. If `docs.surveycto.com` semantics change, the primers can drift — review the linked pages whenever the converter behaves unexpectedly on a new form.
 
 ## Rules
 
-1. Do not edit these files in place. They are a mirror.
-2. To refresh: rerun the download against a newer commit on `develop`, update the pinned SHA above, and review the diff for changes that affect `transformers/logic_converter.py` coverage or the type catalog at `_type_catalog.json`.
-3. The vendored content is Apache-2.0 licensed by SurveyCTO. Attribution is preserved by this README and the source-comment at the top of each file.
-
-## What was NOT vendored and why
-
-The upstream skill bundles other content that we deliberately exclude:
-
-- `SKILL.md` — SurveyCTO's authoring/debugging orchestrator. We consume forms; we do not author them. Their orchestrator targets form creation from templates, plug-in development, dataset XML, and Data Explorer dashboards, all of which are out of scope here.
-- `references/field-plugins.md` — Plug-ins generate values that fall back into the standard XLSForm type system anyway, so the plug-in surface adds nothing to the variable dictionary.
-- `references/data-explorer.md`, `references/datasets-xml.md`, `references/mcp.md`, `references/overview.md` — Server-side, dashboard, and tooling concerns that are not part of our extractor pipeline.
+1. Edits are allowed and expected. These are living primers — refine them when the converter hits an XLSForm pattern they don't cover.
+2. When you edit, bump the `STATUS: regenerated <YYYY-MM-DD>` line at the top of the file so reviewers can see how fresh the content is.
+3. If `xlsform.md` changes in a way that affects the field-type table, rerun `python generators/build_type_catalog.py` to regenerate `_type_catalog.json`.
 
 ## Refresh procedure
 
-```powershell
-Invoke-WebRequest -Uri "https://raw.githubusercontent.com/surveycto/surveycto-agent-skill/develop/references/xlsform.md" -OutFile "coding_guidelines\surveycto_refs\xlsform.md"
-Invoke-WebRequest -Uri "https://raw.githubusercontent.com/surveycto/surveycto-agent-skill/develop/references/expressions.md" -OutFile "coding_guidelines\surveycto_refs\expressions.md"
-```
+There is no automated refresh — these are written by hand against the current SurveyCTO docs. To resync:
 
-After refresh, also rerun `python generators/build_type_catalog.py` to regenerate `_type_catalog.json` from the updated `xlsform.md`.
+1. Read the relevant pages on https://docs.surveycto.com/02-designing-forms/01-core-concepts/ (XLSForm columns, field types, expressions, constraints, relevance, groups/repeats).
+2. Update the primer text to match.
+3. Bump the `STATUS: regenerated <YYYY-MM-DD>` line.
+4. Rerun `python generators/build_type_catalog.py` if `xlsform.md`'s field-type table changed.
