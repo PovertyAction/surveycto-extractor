@@ -203,7 +203,10 @@ def run_synthetic_phase(
 
     # Read settings sheet from the original XLSForm so the synth can use
     # the real form_id and version when building auto-generated metadata
-    # (formdef_version, text_audit URL, audio_audit URL).
+    # (formdef_version, text_audit URL, audio_audit URL). XLSForm
+    # settings sheets are conventionally single-row (form-wide settings,
+    # not per-question), so we only read row 0. A malformed multi-row
+    # settings sheet would silently pick the first row.
     form_settings = {}
     try:
         import pandas as _pd

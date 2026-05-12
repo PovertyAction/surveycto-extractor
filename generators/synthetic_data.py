@@ -38,7 +38,9 @@ from __future__ import annotations
 import csv
 import datetime
 import json
+import math
 import random
+import re
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -225,13 +227,12 @@ def _build_run_context(
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 # pulldata('table', 'col', 'key_col', ${caseid}) — capture (table, key_col)
-# for any call whose lookup expression is the form's caseid variable.
-import re as _re
-
-_CASEID_PULLDATA_RX = _re.compile(
+# for any call whose lookup expression is the form's caseid variable. Accept
+# both ``${caseid}`` and ``${case_id}`` (the underscore variant some forms use).
+_CASEID_PULLDATA_RX = re.compile(
     r"""pulldata\(\s*['"]([^'"]+)['"]\s*,\s*['"][^'"]+['"]\s*,\s*"""
-    r"""['"]([^'"]+)['"]\s*,\s*\$\{\s*caseid\s*\}\s*\)""",
-    _re.IGNORECASE,
+    r"""['"]([^'"]+)['"]\s*,\s*\$\{\s*case_?id\s*\}\s*\)""",
+    re.IGNORECASE,
 )
 
 
@@ -239,39 +240,57 @@ def _build_caseid_pool(
     questions: List[Dict[str, Any]],
     tables: Dict[str, Any],
 ) -> List[str]:
-    """Collect caseid candidates from any pulldata table the form looks up
+    """Collect caseid candidates from the pulldata table the form looks up
     with ``${caseid}`` as the key. Returns unique stringified key values,
     or ``[]`` if no caseid-keyed pulldata reference exists or the table
     didn't load.
+
+    If the form references multiple ``(table, key_col)`` pairs (rare but
+    possible — e.g. a form that pulls from both ``cases.csv`` and
+    ``preloads.csv`` keyed on ``${caseid}``), we use only the first pair
+    encountered in form-order. Merging pools across tables would produce
+    caseids unresolvable in some of them (a caseid from ``cases.csv``
+    looked up against ``preloads.csv`` returns blank cells with no
+    explanation). A stderr warning lists the ignored extras.
     """
-    pairs: Set[Tuple[str, str]] = set()
+    pairs: List[Tuple[str, str]] = []
+    seen_pairs: Set[Tuple[str, str]] = set()
     for q in questions:
         for field_name in ("calculation", "relevance", "constraint", "choice_filter"):
             expr = q.get(field_name)
             if not expr:
                 continue
             for m in _CASEID_PULLDATA_RX.finditer(str(expr)):
-                pairs.add((m.group(1), m.group(2)))
+                pair = (m.group(1), m.group(2))
+                if pair not in seen_pairs:
+                    seen_pairs.add(pair)
+                    pairs.append(pair)
+    if not pairs:
+        return []
+    chosen_tbl, chosen_col = pairs[0]
+    if len(pairs) > 1:
+        import sys
+        extras = ", ".join(f"{t}[{c}]" for t, c in pairs[1:])
+        print(
+            f"[WARN] Multiple caseid-keyed pulldata tables found; using "
+            f"{chosen_tbl}[{chosen_col}], ignoring: {extras}",
+            file=sys.stderr,
+        )
+    tbl = tables.get(chosen_tbl) if tables else None
+    if tbl is None or chosen_col not in tbl.df.columns:
+        return []
     pool: List[str] = []
     seen: Set[str] = set()
-    for tbl_name, key_col in sorted(pairs):
-        tbl = tables.get(tbl_name) if tables else None
-        if tbl is None or key_col not in tbl.df.columns:
+    for v in tbl.df[chosen_col].tolist():
+        if v is None:
             continue
-        for v in tbl.df[key_col].tolist():
-            if v is None:
-                continue
-            try:
-                import math as _m
-                if isinstance(v, float) and _m.isnan(v):
-                    continue
-            except Exception:
-                pass
-            s = str(v).strip()
-            if not s or s in seen:
-                continue
-            seen.add(s)
-            pool.append(s)
+        if isinstance(v, float) and math.isnan(v):
+            continue
+        s = str(v).strip()
+        if not s or s in seen:
+            continue
+        seen.add(s)
+        pool.append(s)
     return pool
 
 
@@ -284,7 +303,86 @@ def _build_caseid_pool(
 # using the placeholder row's ``value`` and ``label`` text as the names of
 # the CSV columns to read.
 
-_SEARCH_RX = _re.compile(r"""search\(\s*['"]([^'"]+)['"]\s*(.*?)\)""", _re.IGNORECASE | _re.DOTALL)
+_SEARCH_HEAD_RX = re.compile(r"search\s*\(", re.IGNORECASE)
+
+
+def _extract_search_call(appearance: str) -> Optional[Tuple[str, str]]:
+    """Locate the first ``search(...)`` call in ``appearance`` and return
+    ``(csv_name, raw_args)`` where ``raw_args`` is the comma-separated
+    text **after** the CSV-name argument, with the outer ``search(`` and
+    matching ``)`` stripped.
+
+    Walks the argument list paren-aware so nested calls (e.g.
+    ``search('roster', 'matches', col, if(${x}=1, ${y}, 0))``) are not
+    truncated at the first inner ``)``. Returns ``None`` if no search
+    call is present or the parentheses are unbalanced.
+    """
+    head = _SEARCH_HEAD_RX.search(appearance)
+    if not head:
+        return None
+    i = head.end()
+    n = len(appearance)
+    depth = 1
+    in_str: Optional[str] = None
+    body_start = i
+    while i < n and depth > 0:
+        ch = appearance[i]
+        if in_str:
+            if ch == in_str and appearance[i - 1] != "\\":
+                in_str = None
+        elif ch in ("'", '"'):
+            in_str = ch
+        elif ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                break
+        i += 1
+    if depth != 0:
+        return None
+    body = appearance[body_start:i]
+    # First top-level comma separates the CSV name from the rest.
+    parts = _split_top_level(body, ",")
+    if not parts:
+        return None
+    csv_name = parts[0].strip().strip("'\"")
+    raw_args = ",".join(parts[1:]).strip()
+    return (csv_name, raw_args)
+
+
+def _split_top_level(s: str, sep: str) -> List[str]:
+    """Split ``s`` on ``sep`` only when the separator is at paren depth 0
+    and not inside a quoted string. Preserves nested expressions intact."""
+    out: List[str] = []
+    buf: List[str] = []
+    depth = 0
+    in_str: Optional[str] = None
+    i = 0
+    n = len(s)
+    while i < n:
+        ch = s[i]
+        if in_str:
+            buf.append(ch)
+            if ch == in_str and (i == 0 or s[i - 1] != "\\"):
+                in_str = None
+        elif ch in ("'", '"'):
+            buf.append(ch)
+            in_str = ch
+        elif ch == "(":
+            depth += 1
+            buf.append(ch)
+        elif ch == ")":
+            depth -= 1
+            buf.append(ch)
+        elif ch == sep and depth == 0:
+            out.append("".join(buf))
+            buf = []
+        else:
+            buf.append(ch)
+        i += 1
+    out.append("".join(buf))
+    return out
 
 
 def _parse_search_appearance(appearance: Optional[str]) -> Optional[Tuple[str, List[Tuple[str, str]]]]:
@@ -295,25 +393,29 @@ def _parse_search_appearance(appearance: Optional[str]) -> Optional[Tuple[str, L
     optional in SurveyCTO syntax for a no-filter search; we accept both
     bare ``search('csv')`` and the filtered form. Value expressions are
     returned verbatim so the caller can evaluate ``${var}`` refs against
-    the current row state.
+    the current row state. Nested function calls inside value
+    expressions (e.g. ``if(${x}=1, ${y}, 0)``) are preserved intact.
     """
     if not appearance:
         return None
-    m = _SEARCH_RX.search(str(appearance))
-    if not m:
+    extracted = _extract_search_call(str(appearance))
+    if extracted is None:
         return None
-    csv_name = m.group(1).strip()
-    tail = m.group(2).strip()
+    csv_name, raw_args = extracted
     matches: List[Tuple[str, str]] = []
-    if tail:
-        # Strip a leading ", 'matches'," if present
-        tail = _re.sub(r"^\s*,\s*['\"]matches['\"]\s*,?\s*", "", tail)
-        # Split on commas at top level (no nested parens here in practice).
-        # Pairs are (col_name, value_expr).
-        parts = [p.strip() for p in tail.split(",") if p.strip()]
+    if raw_args:
+        # Strip a leading "'matches'," if present (it's the SurveyCTO
+        # search-mode token that precedes the col/val pairs).
+        raw_args = re.sub(r"^\s*['\"]matches['\"]\s*,?\s*", "", raw_args)
+        parts = [p.strip() for p in _split_top_level(raw_args, ",") if p.strip()]
         for i in range(0, len(parts) - 1, 2):
             col = parts[i].strip().strip("'\"")
-            val = parts[i + 1].strip().strip("'\"")
+            val = parts[i + 1].strip()
+            # Strip outer quotes only when they wrap the entire expr; a
+            # nested expr like ``if(${x}=1, '${y}', 0)`` must stay verbatim.
+            if (len(val) >= 2 and val[0] in ("'", '"') and val[-1] == val[0]
+                    and "(" not in val):
+                val = val[1:-1]
             matches.append((col, val))
     return (csv_name, matches)
 
@@ -388,12 +490,8 @@ def _resolve_search_choices(
         v = r[val_col]
         if v is None:
             continue
-        try:
-            import math as _m
-            if isinstance(v, float) and _m.isnan(v):
-                continue
-        except Exception:
-            pass
+        if isinstance(v, float) and math.isnan(v):
+            continue
         sv = str(v).strip()
         if not sv:
             continue
@@ -407,16 +505,23 @@ def _resolve_search_choices(
 def _resolve_match_value(expr: str, row: Dict[str, Any]) -> Optional[str]:
     """Resolve a search() match-value expression against the current row.
 
-    Handles bare literals and ``${var}`` references. Returns None for
-    unresolvable expressions so the caller can skip the clause.
+    Handles bare quoted/unquoted literals and ``${var}`` references.
+    Returns None for unresolvable expressions (nested function calls
+    like ``if(...)``, ``concat(...)``) so the caller can skip the
+    clause rather than filter against a raw expression string.
     """
     s = str(expr).strip()
     if not s:
         return None
-    m = _re.fullmatch(r"\$\{\s*([A-Za-z_][\w]*)\s*\}", s)
+    m = re.fullmatch(r"\$\{\s*([A-Za-z_][\w]*)\s*\}", s)
     if m:
         v = row.get(m.group(1), "")
         return str(v) if v not in (None, "") else None
+    # A bare literal (already unquoted by _parse_search_appearance, or a
+    # number) — usable as-is. Anything containing parens / operators is a
+    # nested expression we can't evaluate here.
+    if "(" in s or ")" in s:
+        return None
     return s
 
 
@@ -594,12 +699,22 @@ def _walk_one(
 ) -> WalkResult:
     """Generate one respondent's row.
 
-    ``force_values`` maps ``variable_name -> string value``; when the
-    walker reaches a listed variable that would otherwise be sampled,
-    the forced value is used instead. Relevance is still evaluated, so
-    a forced value only takes effect when the question would have been
-    populated anyway. Useful for ensuring consent-gated sections
-    populate during HFC dry-runs (e.g. ``c_consent=1``).
+    ``force_values`` maps ``variable_name -> string value``. Forced
+    variables **bypass their own relevance check** so a gated cascade
+    populates regardless of upstream sampling (the typical use case is
+    pinning a consent variable so the consent-gated section fills in
+    every row). The forced value is pre-seeded into the row dict at
+    walk start so questions earlier in the form whose relevance
+    references the forced variable see the value at evaluation time.
+
+    Repeat-scope caveat: pre-seeding writes ``row[fv_name]`` only
+    (unsuffixed). Inside a repeat iteration ``i``, ``ctx.get_var`` tries
+    ``row[fv_name_i]`` first and falls back to the unsuffixed value when
+    the suffixed key is absent — so an in-repeat question whose
+    relevance references a force-targeted variable that's normally
+    defined per-iteration will see the pre-seeded value as a fallback.
+    Acceptable in practice because force_values are typically used on
+    top-level variables (consent flags), not repeat-scoped ones.
 
     ``geo_bbox`` overrides the global default for geopoint sampling.
     """
@@ -790,7 +905,7 @@ def _compute_value(
         calc = question.get("calculation")
         if not calc:
             return ""
-        if q_type == "calculate_here" and "duration()" in calc:
+        if q_type == "calculate_here" and re.search(r"\bonce\s*\(\s*duration\s*\(", calc):
             remaining = max(0, runctx.duration - runctx.duration_progress)
             advance = max(1, int(remaining * rng.uniform(0.05, 0.20))) if remaining > 0 else 0
             runctx.duration_progress = min(
@@ -914,10 +1029,14 @@ def _build_column_order(
             n = max_iter.get(repeat_parent, 1)
             for i in range(1, n + 1):
                 # select_multiple inside a repeat: SurveyCTO export emits ONLY
-                # the per-choice indicator columns (no `var_<iter>` parent).
-                # Verified against ugs_ltfu_hh_WIDE.csv (`plot_use` in
-                # `plot_list_r`): `plot_use_<value>_<i>` indicators exist;
-                # `plot_use_<i>` parent does not.
+                # the per-choice indicator columns (no ``var_<iter>`` parent).
+                # This is NOT a bug — it's how real SurveyCTO wide exports are
+                # shaped. Empirically verified against the production export
+                # ``ugs_ltfu_hh_WIDE.csv`` on ``plot_use`` inside
+                # ``plot_list_r``: ``plot_use_<value>_<i>`` indicators exist;
+                # ``plot_use_<i>`` parent does not. Reviewers periodically
+                # flag this as missing-output — please keep this comment so
+                # the design intent is obvious.
                 if q_type == "select_multiple":
                     for c in choices:
                         cv = str(c.get("value", "")).strip()
@@ -950,11 +1069,17 @@ def _row_to_csv_dict(
 ) -> Dict[str, str]:
     """Project a walk-result row into the final wide column order.
 
-    Form-side values win when present in ``row`` (including the empty
-    string — a form ``calculate`` that legitimately evaluates to empty
-    stays empty, matching real SurveyCTO export behaviour). Metadata
-    columns NOT defined by the form fall back to the synthesised
-    run-context value.
+    Form-side values win when present and non-empty. For known metadata
+    columns (``duration``, ``caseid``, ``username``, etc.), if the form
+    defines a calculate by that name but it evaluates to empty (eval
+    error, unsupported function, ...), we fall back to the synthesised
+    run-context value rather than emit a blank cell. This favors HFC
+    usability over strict form fidelity in the rare case where a
+    form-defined metadata calc fails to evaluate.
+
+    Non-metadata columns pass through an empty ``row[c]`` as an empty
+    cell — a form ``calculate`` that legitimately evaluates to empty
+    stays empty.
     """
     runctx_defaults: Dict[str, str] = {
         "CompletionDate": runctx.end_time.strftime("%b %d, %Y %I:%M:%S %p"),
@@ -975,7 +1100,11 @@ def _row_to_csv_dict(
     out: Dict[str, str] = {}
     for c in column_order:
         if c in row:
-            out[c] = _format_for_csv(row[c])
+            formatted = _format_for_csv(row[c])
+            if formatted == "" and c in runctx_defaults:
+                out[c] = runctx_defaults[c]
+            else:
+                out[c] = formatted
         else:
             out[c] = runctx_defaults.get(c, "")
     return out

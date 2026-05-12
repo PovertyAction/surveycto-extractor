@@ -30,6 +30,36 @@ _NUM_BOUND_RX = re.compile(
 )
 
 
+def _has_top_level_or(constraint: str) -> bool:
+    """Return True when an ``or`` appears at paren depth 0 in the
+    constraint. We use this to bail out of bound extraction for
+    disjunctive constraints (e.g. ``. <= 0 or . >= 18``), where ANDing
+    the partial bounds would produce a wrong over-clamped range.
+    """
+    depth = 0
+    i = 0
+    n = len(constraint)
+    lower = constraint.lower()
+    while i < n:
+        ch = constraint[i]
+        if ch == "(":
+            depth += 1
+            i += 1
+            continue
+        if ch == ")":
+            depth -= 1
+            i += 1
+            continue
+        if depth == 0 and lower[i:i + 2] == "or":
+            # require word boundaries on either side
+            before_ok = i == 0 or not (constraint[i - 1].isalnum() or constraint[i - 1] == "_")
+            after_ok = (i + 2 == n) or not (constraint[i + 2].isalnum() or constraint[i + 2] == "_")
+            if before_ok and after_ok:
+                return True
+        i += 1
+    return False
+
+
 def numeric_bounds(constraint: Optional[str]) -> Tuple[Optional[float], Optional[float]]:
     """Extract ``(lower, upper)`` numeric bounds from a constraint expression.
 
@@ -39,16 +69,19 @@ def numeric_bounds(constraint: Optional[str]) -> Tuple[Optional[float], Optional
     integer-safe inclusive bound. Returns ``(None, None)`` if no clean
     bound is extractable.
 
-    Bails on conditional constraints (``if(...)``): a regex pass would
-    pick bounds across unrelated branches and produce an inverted /
-    over-clamped range. Example: ``if(index()=1, .>=18, if(index()=2,
-    .>=3 and .<=6, .>=0 and .<=120))`` would otherwise yield ``lo=18,
-    hi=6`` -> swap -> ``(6, 18)``. Better to fall back to the type-default
-    range than to silently clamp.
+    Bails on conditional constraints (``if(...)``) and on disjunctive
+    constraints (top-level ``or``): a regex pass would pick bounds across
+    unrelated branches and produce an inverted / over-clamped range.
+    Example: ``if(index()=1, .>=18, if(index()=2, .>=3 and .<=6, .>=0
+    and .<=120))`` would otherwise yield ``lo=18, hi=6`` -> swap ->
+    ``(6, 18)``. Same hazard for ``. <= 0 or . >= 18``. Better to fall
+    back to the type-default range than to silently clamp.
     """
     if not constraint:
         return (None, None)
     if re.search(r"\bif\s*\(", constraint):
+        return (None, None)
+    if _has_top_level_or(constraint):
         return (None, None)
 
     lo: Optional[float] = None
@@ -69,10 +102,14 @@ def numeric_bounds(constraint: Optional[str]) -> Tuple[Optional[float], Optional
 
 
 def text_max_length(constraint: Optional[str]) -> Optional[int]:
-    """Recognise ``string-length(.) <= N`` / ``<= N`` in a constraint."""
+    """Recognise ``string-length(.) <= N`` / ``<= N`` / ``= N`` in a
+    constraint and return ``N`` as a cap. Equality is treated as a cap
+    (sampled values up to N chars) since we can't always meet exact
+    length and a shorter value still satisfies most downstream uses.
+    """
     if not constraint:
         return None
-    m = re.search(r"<=\s*(\d+)", constraint)
+    m = re.search(r"(?:<=|=)\s*(\d+)", constraint)
     if m:
         return int(m.group(1))
     return None
@@ -128,8 +165,19 @@ _COND_SM_RX = re.compile(
 )
 
 _SELECTED_LITERAL_RX = re.compile(
-    r"selected\(\s*\.\s*,\s*['\"]?(-?\d+)['\"]?\s*\)"
+    # selected(., LIT): accept integer literals (quoted or bare) AND
+    # quoted string literals (e.g. ``selected(., 'dontknow')``). The
+    # three alternation groups capture: single-quoted | double-quoted |
+    # bare integer. Callers should read whichever group matched.
+    r"""selected\(\s*\.\s*,\s*(?:'([^']+)'|"([^"]+)"|(-?\d+))\s*\)"""
 )
+
+
+def _selected_literal_value(match: re.Match) -> str:
+    """Return the captured literal value from a ``_SELECTED_LITERAL_RX``
+    match, regardless of which alternation matched (single-quoted,
+    double-quoted, or bare integer)."""
+    return match.group(1) or match.group(2) or match.group(3) or ""
 
 
 def select_multiple_conditional_bounds(
@@ -166,7 +214,7 @@ def select_multiple_conditional_bounds(
     if stripped:
         return ([], None, None)
 
-    exclusives = [m2.group(1) for m2 in _SELECTED_LITERAL_RX.finditer(pred)]
+    exclusives = [_selected_literal_value(m2) for m2 in _SELECTED_LITERAL_RX.finditer(pred)]
 
     def _bound(op: str, n: int, side: str) -> Tuple[Optional[int], Optional[int]]:
         if op == "=":
@@ -190,6 +238,18 @@ def select_multiple_conditional_bounds(
 DEFAULT_GEO_BBOX: Tuple[float, float, float, float] = (-90.0, 90.0, -180.0, 180.0)
 DEFAULT_EPOCH_START = datetime.date(2024, 1, 1)
 DEFAULT_EPOCH_SPAN_DAYS = 5 * 365
+
+
+def _appearance_tokens(appearance: Optional[str]) -> set:
+    """Split a SurveyCTO appearance string into lowercase tokens. The
+    appearance column can chain multiple appearances with whitespace
+    (e.g. ``"multiline numbers_decimal"``); we tokenise on whitespace
+    so exact-token checks (``"numbers" in tokens``) don't fire on
+    unrelated appearances that happen to contain the substring.
+    """
+    if not appearance:
+        return set()
+    return {tok.strip().lower() for tok in str(appearance).split() if tok.strip()}
 
 
 def sample_python_value(
@@ -230,14 +290,21 @@ def sample_python_value(
 
     if q_type == "date":
         base = epoch_start or DEFAULT_EPOCH_START
-        offset = rng.randint(0, epoch_span_days)
+        # Cap the span so we never emit a date in the future. SurveyCTO
+        # real exports can't contain post-collection-day dates, and HFC
+        # checks routinely flag future dates as out-of-range.
+        today = datetime.date.today()
+        max_offset = max(0, min(epoch_span_days, (today - base).days))
+        offset = rng.randint(0, max_offset)
         return base + datetime.timedelta(days=offset)
 
     if q_type == "datetime":
         base = datetime.datetime.combine(
             epoch_start or DEFAULT_EPOCH_START, datetime.time()
         )
-        secs = rng.randint(0, epoch_span_days * 86_400)
+        now = datetime.datetime.now()
+        max_secs = max(0, min(epoch_span_days * 86_400, int((now - base).total_seconds())))
+        secs = rng.randint(0, max_secs)
         return base + datetime.timedelta(seconds=secs)
 
     if q_type == "time":
@@ -268,8 +335,21 @@ def sample_python_value(
         # respondent can only type digits, but the storage type stays
         # text (so leading zeros are preserved -- e.g. for phone numbers
         # like ``0777816905``). Honour that here by emitting digit-only
-        # content; otherwise emit the ``text_NNNN`` token.
-        if appearance and "numbers" in str(appearance).lower():
+        # content. ``numbers_decimal`` also accepts ``.``; emit a real
+        # ``dd.dd`` form so downstream type-inference doesn't flag the
+        # synth value as integer-shaped where real respondents typed a
+        # decimal point. Exact-token match (not substring) so other
+        # appearances containing the substring "numbers" don't falsely
+        # trip this branch.
+        appearance_tokens = _appearance_tokens(appearance)
+        if "numbers_decimal" in appearance_tokens:
+            int_n = rng.randint(0, 10)
+            dec_n = rng.randint(0, 99)
+            out = f"{int_n}.{dec_n:02d}"
+            if n is not None:
+                return out[:n]
+            return out
+        if appearance_tokens & {"numbers", "numbers_phone"}:
             digits = "".join(str(rng.randint(0, 9)) for _ in range(10))
             if n is not None:
                 return digits[:n]
