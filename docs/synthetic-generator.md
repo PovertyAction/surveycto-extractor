@@ -47,19 +47,24 @@ Per respondent the walker:
 | Flag | Default | What it does |
 |---|---|---|
 | `--survey {key,all}` | required | Survey to process. Must match a key in `config.SURVEYS`. |
-| `--phases synthetic` | required | Run the synthetic generator. (`json` must have been run already.) |
+| `--phases synthetic` | included in default `all` | Run the synthetic generator. (`json` must have been run already.) `--phases all` (the CLI default) runs `csv`, `json`, `sections`, **and** `synthetic`; explicit `--phases synthetic` runs only the generator. |
 | `--rows N` | 5 | Number of synthetic respondents. |
-| `--seed K` | 0 | RNG seed. Same `--seed` produces **byte-identical** CSV output across runs. |
+| `--seed K` | 0 | RNG seed. Same `--seed` produces **byte-identical** CSV output across runs on the same day. |
 | `--force-value VAR=VAL` | — | Force one or more variables to specific values, bypassing relevance. May be repeated, or comma-separate multiple pairs in one flag. Example: `--force-value c_consent=1,hh_consent=1`. |
 
 ## Reproducibility
 
-For a given `--seed K`, the output is byte-identical across reruns on the
-same machine (and across machines once `PYTHONHASHSEED` is fixed). Each
-respondent gets a deterministic per-respondent seed derived from the
-master seed; within that, two further RNGs split run-context generation
-(timestamps, IDs) from question sampling, so adding or removing a
-metadata field doesn't shift the byte-output of question-level samples.
+For a given `--seed K`, the output is byte-identical across reruns on
+the same day (the date sampler is clamped to today, so reruns next year
+would draw from a longer past-range — within a day, output is stable).
+The seed is fed via `random.Random` string seeds, which use SHA-512
+hashing under the hood, so determinism does **not** depend on
+`PYTHONHASHSEED` and holds across processes and across Python 3.2+
+versions. Each respondent gets a deterministic per-respondent seed
+derived from the master seed; within that, two further RNGs split
+run-context generation (timestamps, IDs) from question sampling, so
+adding or removing a metadata field doesn't shift the byte-output of
+question-level samples.
 
 Verify with `md5sum`:
 
@@ -69,15 +74,18 @@ md5sum <output_dir>/my_survey_synthetic.csv
 # Re-run — md5 must match
 ```
 
-## Pulldata is obligatory
+## Pulldata: obligatory when referenced
 
-If your form references `pulldata('foo', ...)` (in calculation, relevance,
-constraint, or choice_filter), the generator **must** find `foo.csv` in one of
-the configured `pulldata_search_dirs`. Missing CSVs raise
-`MissingPullDataError` with the list of search directories. There's no
-override flag — the synthetic CSV is essentially useless without pulldata
-(gated cascades won't populate, `search()` choice expansion can't resolve,
-and pulldata-derived columns stay blank).
+If your form has no `pulldata()` calls, this section doesn't apply — the
+generator runs fine with zero CSVs configured.
+
+If your form references `pulldata('foo', ...)` (in calculation,
+relevance, constraint, or choice_filter), the generator **must** find
+`foo.csv` in one of the configured `pulldata_search_dirs`. Missing CSVs
+raise `MissingPullDataError` with the list of search directories. There's
+no override flag — the synthetic CSV is essentially useless without
+pulldata (gated cascades won't populate, `search()` choice expansion
+can't resolve, and pulldata-derived columns stay blank).
 
 Configure search dirs per-survey in `config.py`:
 
@@ -121,12 +129,25 @@ Affected question count (representative): ~40 in a typical g2r-style form,
 
 ## `caseid` sampling from pulldata
 
-If the form does `pulldata('TBL', 'col', 'id', ${caseid})` anywhere, the
-generator detects this and draws `caseid` values from `TBL.df['id']` —
-one per synthetic respondent, without replacement when the pool is large
-enough, deterministically off the master seed. This makes downstream
-pulldata lookups (wave, surveyor, preloaded phone numbers, etc.)
-resolve to real values instead of leaving those columns blank.
+If the form does `pulldata('TBL', 'col', 'id', ${caseid})` anywhere (the
+`${case_id}` underscore variant is also recognised), the generator
+detects this and draws `caseid` values from `TBL.df['id']` — one per
+synthetic respondent, without replacement when the pool is large enough,
+deterministically off the master seed. This makes downstream pulldata
+lookups (wave, surveyor, preloaded phone numbers, etc.) resolve to real
+values instead of leaving those columns blank.
+
+**Pool exhaustion**: when `--rows N` is larger than the caseid pool,
+caseids are cycled (`pool[i % len(pool)]`). Multiple synthetic
+respondents will share the same caseid, and the lookups against that
+caseid return identical preloaded values. HFC checks that flag duplicate
+caseids will fire on synthetic data when this happens — keep `--rows`
+within the pulldata pool size if your HFC needs unique caseids.
+
+**Multiple caseid-keyed tables**: when the form references more than one
+`(table, key_col)` pair, the generator uses only the first pair seen in
+form-order and warns to stderr about the rest. Merging pools across
+tables would produce caseids unresolvable in some of them.
 
 Falls back to a synthetic `case-NNNN` form when no caseid-keyed pulldata
 reference exists.
@@ -164,7 +185,10 @@ the project's import pipeline applies its own `tostring` / `destring`,
 the conversion happens **on the project side**, not in the synth.
 
 Type-concordance benchmarks against real SurveyCTO wide-export CSVs
-(synth-vs-real-CSV, populated-both-columns):
+(synth-vs-real-CSV, populated-both-columns). These compare against
+internal IPA production exports that aren't in this repository; the
+numbers are reproducible if you have access to the underlying real
+`WIDE.csv` (and the same form's `*_questions.json`).
 
 | Survey | Concordance |
 |---|---:|
@@ -197,8 +221,15 @@ real exports do:
 | `audio_audit*` (form type `audio audit`) | `https://<host>/api/v2/forms/<form_id>/submissions/<KEY>/attachments/AA_<uuid>_AFTER_<seconds>S.m4a` |
 | `speed_violations_list` (form type `speed violations list`) | empty (matches real default when no violations occurred) |
 
-The audit URL `<form_id>` comes from the XLSForm settings sheet's `form_id`
-field; `<host>` defaults to a placeholder `synthetic.surveycto.com`.
+URL placeholders:
+- `<KEY>` is the full submission key in the form `uuid:<UUID>` (matches
+  the `KEY` column value).
+- `<uuid>` in the filename is the **bare** UUID (the `uuid:` prefix
+  stripped).
+- `<form_id>` comes from the XLSForm settings sheet's `form_id` field.
+- `<host>` is currently a non-configurable placeholder
+  (`synthetic.surveycto.com`). HFC code that parses real audit-URL hosts
+  should treat this as opaque.
 
 ## `geo_bbox` for plausible geopoints
 
@@ -242,6 +273,16 @@ means the run was clean.
   conversion on the synthetic CSV when you import it. The synth produces
   the wide CSV; type drift between wide CSV and `.dta` is the import's
   responsibility.
+- **Schema is not stable across different seeds.** The output column
+  count depends on the maximum repeat-group iteration sampled in that
+  run: a run that happens to sample `f_hr_rpt_count = 5` produces
+  `*_1`..`*_5` columns for each variable in the repeat; a run that tops
+  out at 2 produces only `*_1` and `*_2`. Same `--seed K` yields the
+  same schema on the same day, but cleaning code that pins a fixed
+  column list will break across seeds. Workaround: use
+  `--force-value <count_var>=<N>` on each repeat-count driver to lock
+  the schema, or pass a large `--rows N` so the rare high-count
+  iterations are reliably sampled.
 
 ## Concordance verification (optional)
 
@@ -261,8 +302,15 @@ patterns we use.
 | `extractors/pulldata_loader.py` | Pulldata CSV discovery, indexed lookup, key normalisation |
 | `transformers/expression_evaluator.py` | XLSForm-expression AST evaluator (most of `expressions.md` minus runtime-only functions) |
 
-## Related notes
+## Design history
 
-- [search() pulldata choice expansion pipeline](../obsidian/work/IPA/projects/surveycto-extractor/active/synthetic-csv-generator/pipelines/2026-05-12-search-pulldata-choice-expansion.md)
-- [calculate_here and audit-URL design decision](../obsidian/work/IPA/projects/surveycto-extractor/active/synthetic-csv-generator/decisions/2026-05-12-calculate-here-and-audit-url-design.md)
-- [`--force-value` bypass-relevance decision](../obsidian/work/IPA/projects/surveycto-extractor/active/synthetic-csv-generator/decisions/2026-05-11-force-value-bypass-relevance.md)
+Key design decisions and pipeline notes are captured in the commit
+messages on this branch:
+
+- `a2ac4d3` — pulldata `search()` choice expansion, `calculate_here` /
+  `once(duration())` handling, audit-URL formatting, `caseid` pool
+  sampling, force-value pre-seeding.
+- `3d54f53` — making pulldata obligatory.
+- `c86339f` / `7d0c3f4` / `351cb13` / `7108692` — earlier review-round
+  fixes (select_multiple parent state, sm-in-repeat column emission,
+  conditional exclusive-choice constraints).
