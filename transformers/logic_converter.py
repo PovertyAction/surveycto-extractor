@@ -217,8 +217,9 @@ class LogicConverter:
         coalesce(a, b, c, d)  → cond(missing(a), cond(missing(b), cond(missing(c), d, c), b), a)
         ...
 
-        SurveyCTO docs say coalesce takes any number of non-repeated arguments,
-        so we expand inductively from the right.
+        SurveyCTO requires coalesce to have at least 2 arguments and accepts
+        any larger number of non-repeated arguments. We expand inductively
+        from the right; 0- or 1-arg calls are reported as a strip reason.
         """
         parts = LogicConverter._split_top_level_args(match.group(1))
         if len(parts) < 2:
@@ -523,7 +524,11 @@ class LogicConverter:
                 _log_strip(varname, f"indexed-repeat({args})", "INDEXED_REPEAT_BAD_ARITY")
                 return _SENTINEL
             if len(parts) > 3:
-                _log_strip(varname, f"indexed-repeat({args})", "INDEXED_REPEAT_NESTED")
+                # >3 args at the top level is an arity error, not a nested
+                # call. Nesting (indexed-repeat inside another function) is
+                # handled by _sub_function_balanced walking inner calls
+                # separately, before this replacer runs.
+                _log_strip(varname, f"indexed-repeat({args})", "INDEXED_REPEAT_BAD_ARITY")
                 return _SENTINEL
             target, _grp, idx = parts
             idx = idx.strip()
@@ -683,8 +688,11 @@ class LogicConverter:
 
         # --- Step 14b: div → / ----------------------------------------------
         # SurveyCTO's documented division operator is `div`. Stata uses `/`.
-        # Word boundaries protect against substrings like `divisor`.
-        expr = re.sub(r'\bdiv\b', '/', expr, flags=re.IGNORECASE)
+        # Word boundaries protect against substrings like `divisor`; the
+        # negative-lookahead `(?!\s*\()` guards against the (undocumented)
+        # case of someone writing `div(...)` as if it were a function call,
+        # which would otherwise translate to a nonsense `/(...)`.
+        expr = re.sub(r'\bdiv\b(?!\s*\()', '/', expr, flags=re.IGNORECASE)
 
         # --- Step 14c: A mod B → mod(A, B) ----------------------------------
         # SurveyCTO uses the infix `mod` operator; Stata uses the `mod()`
@@ -770,6 +778,13 @@ class LogicConverter:
         Args:
             conditions: list of stata_skip_logic strings from the variable dictionary
         """
+        # Each entry's regex matches the UNTRANSLATED SurveyCTO form. A
+        # hit means the converter left an untranslated call in the output
+        # (so the translation step for that function is missing or buggy).
+        # The two infix-operator entries are deliberately written to
+        # match the SurveyCTO infix form (``A div B`` / ``A mod B``), not
+        # the converted form (``A / B`` / ``mod(A, B)``); a hit here means
+        # the operator conversion at step 14b/14c did not fire.
         CHECKS = [
             ("selected()",    re.compile(r'\bselected\s*\(',      re.IGNORECASE)),
             ("not()",         re.compile(r'\bnot\s*\(',           re.IGNORECASE)),
@@ -785,7 +800,7 @@ class LogicConverter:
             ("indexed-repeat",re.compile(r'\bindexed-repeat\s*\(',re.IGNORECASE)),
             ("pulldata()",    re.compile(r'\bpulldata\s*\(',      re.IGNORECASE)),
             ("today()/now()", re.compile(r'\b(?:today|now|date|date-time|decimal-time|decimal-date-time|format-date-time)\s*\(', re.IGNORECASE)),
-            (" div ",         re.compile(r'\bdiv\b',              re.IGNORECASE)),
+            (" div ",         re.compile(r'\bdiv\b(?!\s*\()',     re.IGNORECASE)),
             (" mod ",         re.compile(r'\bmod\s+\w',           re.IGNORECASE)),
         ]
         print("=== validate_translations ===")
