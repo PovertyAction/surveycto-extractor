@@ -207,15 +207,22 @@ def run_synthetic_phase(
     # settings sheets are conventionally single-row (form-wide settings,
     # not per-question), so we only read row 0. A malformed multi-row
     # settings sheet would silently pick the first row.
+    #
+    # Route through SurveyParser._normalize_string_cells so settings cells
+    # share the same NaN-coerce + whitespace-strip contract as survey and
+    # choices cells. Single normalization point at the parse boundary.
     form_settings = {}
     try:
         import pandas as _pd
-        s_df = _pd.read_excel(survey_cfg["input_file"], sheet_name="settings")
+        s_df = _pd.read_excel(
+            survey_cfg["input_file"],
+            sheet_name="settings",
+            dtype=str,
+            keep_default_na=False,
+        )
+        s_df = SurveyParser._normalize_string_cells(s_df)
         if len(s_df) > 0:
-            form_settings = {
-                k: (None if _pd.isna(v) else str(v).strip())
-                for k, v in s_df.iloc[0].to_dict().items()
-            }
+            form_settings = {k: (v or None) for k, v in s_df.iloc[0].to_dict().items()}
     except Exception:
         form_settings = {}
 

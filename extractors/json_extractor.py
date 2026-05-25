@@ -487,24 +487,34 @@ class JSONExtractor:
 
             # Handle group boundaries
             if row_type == "begin group":
-                group_name = row.get("name", f"unnamed_group_{idx}")
+                # The parser normalizes NaN/whitespace to "" upstream, so
+                # ``row.get(..., default)`` never falls back to the default —
+                # gate on the empty string explicitly and log when the
+                # diagnostic placeholder fires so malformed forms are visible.
+                group_name = row.get("name", "") or f"unnamed_group_{idx}"
+                if group_name.startswith("unnamed_group_"):
+                    print(f"  [WARN] begin group at row {idx} has blank `name` cell - using placeholder '{group_name}'")
                 group_label = row.get("label", "")
                 group_relevance = row.get("relevance", None) or None
                 self.group_stack.push(group_name, group_label, group_relevance)
                 continue
 
             elif row_type == "end group":
+                # Some XLSForms leave 'name' blank on end group rows. Parser
+                # normalizes NaN -> "" upstream, so blank cells now arrive as
+                # the empty string. Pop without a name to skip the mismatch
+                # error that GroupStack.pop() would otherwise raise.
                 group_name = row.get("name", "")
-                # Some instruments have empty 'name' on end group rows;
-                # pop without a name to avoid mismatched group_path
-                if not group_name or (isinstance(group_name, float) and pd.isna(group_name)):
+                if not group_name:
                     self.group_stack.pop("")
                 else:
                     self.group_stack.pop(group_name)
                 continue
 
             elif row_type == "begin repeat":
-                repeat_name = row.get("name", f"unnamed_repeat_{idx}")
+                repeat_name = row.get("name", "") or f"unnamed_repeat_{idx}"
+                if repeat_name.startswith("unnamed_repeat_"):
+                    print(f"  [WARN] begin repeat at row {idx} has blank `name` cell - using placeholder '{repeat_name}'")
                 repeat_label = row.get("label", "")
                 repeat_relevance = row.get("relevance", None) or None
                 repeat_count_expr = row.get("repeat_count", None) or None
