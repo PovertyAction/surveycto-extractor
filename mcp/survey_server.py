@@ -1508,7 +1508,7 @@ server = FastMCP(
         "variables, max iterations, join keys) before writing reshape or merge code. "
         "Use get_survey_info for a dataset overview before diving in. "
         "All tools accept an optional 'survey' parameter to filter by survey key "
-        "(partial match, e.g., survey='ltfu' matches 'ltfu_hh' and 'ltfu_adult')."
+        "(partial match, e.g., survey='endline' matches 'endline_hh' and 'endline_adult')."
     ),
 )
 
@@ -1554,7 +1554,7 @@ def lookup_variable(name: str, context: int = 0,
     resolve gate variables (why the question is asked). Recommended: context=3.
 
     Use the survey parameter to filter to a specific survey (partial match,
-    e.g., survey="ltfu" matches "ltfu_hh" and "ltfu_adult").
+    e.g., survey="endline" matches "endline_hh" and "endline_adult").
 
     Use this for deep investigation of a specific variable.
     For checking many variables at once, use lookup_variables instead.

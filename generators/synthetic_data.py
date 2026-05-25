@@ -664,7 +664,7 @@ def _metadata_value(q_type: str, q_name: str, runctx: RunContext, rng: random.Ra
     #   audio audit: https://<host>/api/v2/forms/<form_id>/submissions/<key>/attachments/AA_<uuid>_AFTER_<seconds>S.m4a
     # ``key`` has the form ``uuid:<uuid>``; we strip the ``uuid:`` prefix
     # when embedding it in the bare ``TA_`` / ``AA_`` filename to match
-    # the empirical format observed in real ltfu_hh exports.
+    # the empirical format observed in real SurveyCTO production exports.
     key_uuid = runctx.key[5:] if runctx.key.startswith("uuid:") else runctx.key
     base = f"https://{runctx.server_host}/api/v2/forms/{runctx.form_id}/submissions/{runctx.key}/attachments"
     if q_type == "text audit":
@@ -1031,12 +1031,12 @@ def _build_column_order(
                 # select_multiple inside a repeat: SurveyCTO export emits ONLY
                 # the per-choice indicator columns (no ``var_<iter>`` parent).
                 # This is NOT a bug — it's how real SurveyCTO wide exports are
-                # shaped. Empirically verified against the production export
-                # ``ugs_ltfu_hh_WIDE.csv`` on ``plot_use`` inside
-                # ``plot_list_r``: ``plot_use_<value>_<i>`` indicators exist;
-                # ``plot_use_<i>`` parent does not. Reviewers periodically
-                # flag this as missing-output — please keep this comment so
-                # the design intent is obvious.
+                # shaped. Empirically verified against a production wide
+                # export on a `select_multiple` inside a repeat group:
+                # `<var>_<value>_<i>` indicators exist; the `<var>_<i>` parent
+                # does not. Reviewers periodically flag this as
+                # missing-output — please keep this comment so the design
+                # intent is obvious.
                 if q_type == "select_multiple":
                     for c in choices:
                         cv = str(c.get("value", "")).strip()

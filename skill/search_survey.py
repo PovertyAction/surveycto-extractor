@@ -149,8 +149,8 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 
 # TODO: Update this path to your project's survey_documentation directory.
 # Examples:
-#   REPO_ROOT / "docs" / "ltfu" / "survey_documentation"   (g2r-main LTFU)
-#   REPO_ROOT / "8. Baseline" / "survey_documentation"      (brac_try)
+#   REPO_ROOT / "docs" / "endline" / "survey_documentation"
+#   REPO_ROOT / "8. Baseline" / "survey_documentation"
 DOCS = REPO_ROOT / "docs" / "survey_documentation"  # TODO: adjust
 
 
@@ -179,7 +179,7 @@ SURVEY_FILES = _auto_discover_surveys(DOCS)
 
 # ---------------------------------------------------------------------------
 # Option B: override SURVEY_FILES manually if auto-discovery doesn't work.
-# Example for brac_try:
+# Example for a multi-instrument baseline project:
 #
 # DOCS_GIRLS = REPO_ROOT / "8. Baseline" / "survey_documentation" / "girls"
 # DOCS_NORMS = REPO_ROOT / "8. Baseline" / "survey_documentation" / "norms"
