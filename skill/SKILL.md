@@ -122,7 +122,7 @@ Requires `networkx` (`pip install networkx`) and the `*_variable_graph.json` fil
 
 Use `--repeat-tree` to see the full repeat group topology tree for all loaded surveys. Shows the hierarchy of repeat groups with nesting depth, count variables, count expressions, max iterations, Stata suffix patterns, and join key notes. Essential before writing reshape, merge, or cross-level aggregation code.
 
-Use `--survey KEY` to filter to a specific survey when your project has multiple instruments. Partial match on the survey key (e.g., `--survey ltfu` matches `ltfu_hh` and `ltfu_adult`).
+Use `--survey KEY` to filter to a specific survey when your project has multiple instruments. Partial match on the survey key (e.g., `--survey endline` matches `endline_hh` and `endline_adult`).
 
 Fall back to Grep / Read only for structure files or section files.
 
