@@ -5,6 +5,19 @@ from typing import List, Dict, Optional
 from dataclasses import dataclass
 
 
+def _to_str(value) -> str:
+    """Coerce None / NaN / non-string scalars to a clean str.
+
+    pandas reads blank XLSForm cells as ``float('nan')``; callers that assume
+    string semantics need a single coercion point.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, float) and value != value:  # NaN check
+        return ""
+    return str(value)
+
+
 @dataclass
 class Group:
     """Represents a survey group with its metadata"""
@@ -22,7 +35,15 @@ class GroupStack:
         self.errors: List[str] = []
 
     def push(self, name: str, label: str, relevance: Optional[str]) -> None:
-        """Add a group to the stack"""
+        """Add a group to the stack.
+
+        Coerces None / NaN inputs to '' so ``Group.name`` and ``Group.label``
+        honor their ``str`` type annotation. Without this, blank ``name`` cells
+        in XLSForms (which pandas reads as ``float('nan')``) flow into the
+        stack and crash downstream consumers that call ``'/'.join(group_path)``.
+        """
+        name = _to_str(name)
+        label = _to_str(label)
         depth = len(self.stack)
         group = Group(name=name, label=label, relevance=relevance, depth=depth)
         self.stack.append(group)

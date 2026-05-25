@@ -23,6 +23,22 @@ class SurveyParser:
         self.choices_df = None
         self.settings_df = None
 
+    @staticmethod
+    def _normalize_string_cells(df: pd.DataFrame) -> pd.DataFrame:
+        """Strip whitespace and coerce NaN/None to '' in every string cell.
+
+        XLSForms occasionally carry stray '\\n' or trailing spaces in `name`
+        cells, and blank cells in `begin group` rows arrive as float('nan').
+        Normalize once at the load boundary so consumers never see either.
+        ``.str.strip()`` only removes leading/trailing whitespace, so multiline
+        labels and hints with internal newlines are preserved.
+        """
+        if df is None or df.empty:
+            return df
+        return df.apply(
+            lambda col: col.where(col.notna(), "").astype(str).str.strip()
+        )
+
     def load(self) -> Tuple[pd.DataFrame, pd.DataFrame]:
         """
         Load survey and choices sheets from XLSX
@@ -38,6 +54,7 @@ class SurveyParser:
                 dtype=str,
                 keep_default_na=False
             )
+            self.survey_df = self._normalize_string_cells(self.survey_df)
 
             # Load choices sheet
             self.choices_df = pd.read_excel(
@@ -46,6 +63,7 @@ class SurveyParser:
                 dtype=str,
                 keep_default_na=False
             )
+            self.choices_df = self._normalize_string_cells(self.choices_df)
 
             # Load and merge external choices if provided
             if self.external_choices_csv and self.external_choices_csv.exists():
@@ -60,6 +78,7 @@ class SurveyParser:
                     dtype=str,
                     keep_default_na=False
                 )
+                self.settings_df = self._normalize_string_cells(self.settings_df)
             except ValueError:
                 self.settings_df = None
 
