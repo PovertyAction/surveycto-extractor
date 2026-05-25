@@ -28,8 +28,9 @@ import re
 import argparse
 import sys
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Union
 
 try:
     import pyreadstat
@@ -403,13 +404,44 @@ def batch_sentinel_scan(
     return var_dict_df
 
 
-def _build_question_index(questions: List[Dict]) -> Dict[str, Dict]:
-    """Build a {variable_name: question} dict for O(1) lookups."""
-    return {q['variable_name']: q for q in questions if 'variable_name' in q}
+@dataclass
+class QuestionIndex:
+    """Three views over the question list, built once for O(1) resolution.
+
+    - exact:   form-case name -> question (the original index)
+    - lower:   lowercase name -> question. Stata stores variable names
+               lowercase, so camelCase form names (e.g. ``m9_vitAveg``)
+               are invisible to an exact-match lookup.
+    - trunc32: first-32-chars-of-name -> question, for names longer than
+               32 chars. Stata .dta version 14 (this toolkit's default)
+               clips variable names to 32 chars; the resolver needs a
+               prefix view to match the clipped Stata column back to the
+               original form question.
+    """
+    exact:   Dict[str, Dict]
+    lower:   Dict[str, Dict]
+    trunc32: Dict[str, Dict]
+    lower_trunc32: Dict[str, Dict] = field(default_factory=dict)
+
+    def __contains__(self, key) -> bool:  # back-compat for any `key in _index`
+        return key in self.exact
+
+    def __getitem__(self, key):  # back-compat for any `_index[key]`
+        return self.exact[key]
+
+
+def _build_question_index(questions: List[Dict]) -> QuestionIndex:
+    """Build per-resolution views over the question list (see QuestionIndex)."""
+    exact = {q['variable_name']: q for q in questions if 'variable_name' in q}
+    lower = {k.lower(): v for k, v in exact.items()}
+    trunc32 = {k[:32]: v for k, v in exact.items() if len(k) > 32}
+    lower_trunc32 = {k.lower(): v for k, v in trunc32.items()}
+    return QuestionIndex(exact=exact, lower=lower, trunc32=trunc32,
+                         lower_trunc32=lower_trunc32)
 
 
 def find_question_for_variable(var_name: str, questions: List[Dict],
-                               _index: Dict[str, Dict] = None) -> Optional[Dict]:
+                               _index: Optional[QuestionIndex] = None) -> Optional[Dict]:
     """
     Find the source question for a given variable.
 
@@ -418,24 +450,29 @@ def find_question_for_variable(var_name: str, questions: List[Dict],
     - Repeat group iterations (var_1, var_2, etc.)
     - Select_multiple choices (var_1, var_2, var_97, etc.)
     - Double-suffix (var_1_2 = repeat 1, choice 2)
+    - Stata 32-char variable-name truncation (form names > 32 chars get
+      clipped in .dta v14 — match the 32-char prefix back to the original)
+    - Case-insensitivity (Stata stores variable names lowercase; camelCase
+      form names would otherwise miss)
 
-    When _index is provided (a {variable_name: question} dict), all lookups
-    are O(1) instead of O(N) linear scans.  Build it once with
-    _build_question_index() and pass to all calls.
+    When _index is provided (a QuestionIndex), all lookups are O(1) instead
+    of O(N) linear scans. Build it once with _build_question_index() and
+    pass to all calls.
     """
     if _index is None:
         _index = _build_question_index(questions)
+    exact = _index.exact
 
     # First try exact match
-    if var_name in _index:
-        return _index[var_name]
+    if var_name in exact:
+        return exact[var_name]
 
     # Try matching base name (remove numeric suffix with underscore: var_1, var_2)
     match = re.match(r'(.+?)_(\d+)$', var_name)
     if match:
         base_name = match.group(1)
-        if base_name in _index:
-            return _index[base_name]
+        if base_name in exact:
+            return exact[base_name]
 
     # Try matching base name (digit appended directly without underscore: var_r1, var_r2)
     # Handles SurveyCTO repeat variables whose names end in a non-digit character,
@@ -443,15 +480,36 @@ def find_question_for_variable(var_name: str, questions: List[Dict],
     match_direct = re.match(r'^(.+?)(\d+)$', var_name)
     if match_direct:
         base_name = match_direct.group(1)
-        if base_name in _index:
-            return _index[base_name]
+        if base_name in exact:
+            return exact[base_name]
 
     # Try even longer base names (for nested structures)
     parts = var_name.split('_')
     for i in range(len(parts) - 1, 0, -1):
         potential_base = '_'.join(parts[:i])
-        if potential_base in _index:
-            return _index[potential_base]
+        if potential_base in exact:
+            return exact[potential_base]
+
+    # Stata 32-char truncation fallback. If var_name is exactly 32 chars,
+    # the form name was likely longer and clipped on write — check whether
+    # any form name >32 chars shares this 32-char prefix.
+    if len(var_name) == 32 and var_name in _index.trunc32:
+        return _index.trunc32[var_name]
+
+    # Case-insensitive fallback. Stata stores variables lowercase, but XLSForm
+    # `name` cells sometimes use camelCase (e.g. form m9_vitAveg -> Stata
+    # m9_vitaveg). Re-run the exact + suffix + truncation strategies against
+    # the lowercase view as a last resort.
+    lower = _index.lower
+    vn = var_name.lower()
+    if vn in lower:
+        return lower[vn]
+    if match and match.group(1).lower() in lower:
+        return lower[match.group(1).lower()]
+    if match_direct and match_direct.group(1).lower() in lower:
+        return lower[match_direct.group(1).lower()]
+    if len(vn) == 32 and vn in _index.lower_trunc32:
+        return _index.lower_trunc32[vn]
 
     return None
 
@@ -467,7 +525,7 @@ def get_choice_label(question: Dict, choice_code: str) -> Optional[str]:
 
 
 def adjust_variable_refs(logic_str: str, repeat_group: str, iteration: int,
-                         questions: List[Dict], _index: Dict[str, Dict] = None) -> str:
+                         questions: List[Dict], _index: Optional[QuestionIndex] = None) -> str:
     """Adjust variable references in skip logic for repeat iteration."""
     if not logic_str:
         return logic_str
@@ -495,7 +553,7 @@ def replace_index_function(logic_str: str, iteration: int) -> str:
 
 
 def adjust_skip_logic_for_repeats(metadata: Dict, var_name: str, questions: List[Dict],
-                                  _index: Dict[str, Dict] = None) -> Dict:
+                                  _index: Optional[QuestionIndex] = None) -> Dict:
     """Generate both template and iteration-specific skip logic for repeat variables."""
     if not metadata['is_repeat']:
         return metadata
@@ -536,7 +594,7 @@ def get_special_code_meaning(choice_code: str) -> Optional[str]:
 
 
 def determine_variable_source(var_name: str, questions: List[Dict],
-                              _index: Dict[str, Dict] = None) -> Dict:
+                              _index: Optional[QuestionIndex] = None) -> Dict:
     """Determine the source and metadata for a variable."""
     result = {
         'variable_name': var_name,
