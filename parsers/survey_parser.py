@@ -27,11 +27,16 @@ class SurveyParser:
     def _normalize_string_cells(df: pd.DataFrame) -> pd.DataFrame:
         """Strip whitespace and coerce NaN/None to '' in every string cell.
 
+        Behavior contract:
+          - NaN / None cells become ``""``.
+          - Every cell is passed through ``str(...).str.strip()``: any
+            leading/trailing whitespace, including leading/trailing newlines,
+            is removed. Interior whitespace (including ``\\n`` inside a
+            multiline label or hint) is preserved untouched.
+
         XLSForms occasionally carry stray '\\n' or trailing spaces in `name`
-        cells, and blank cells in `begin group` rows arrive as float('nan').
+        cells, and blank cells in `begin group` rows arrive as ``float('nan')``.
         Normalize once at the load boundary so consumers never see either.
-        ``.str.strip()`` only removes leading/trailing whitespace, so multiline
-        labels and hints with internal newlines are preserved.
         """
         if df is None or df.empty:
             return df

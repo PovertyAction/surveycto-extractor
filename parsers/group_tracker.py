@@ -18,6 +18,21 @@ def _to_str(value) -> str:
     return str(value)
 
 
+def _to_optional_str(value) -> Optional[str]:
+    """Coerce None / NaN / empty string to None; otherwise return str(value).
+
+    For ``Optional[str]`` fields where a NaN slipping through would be
+    incorrectly truthy under ``if value:`` checks (``bool(float('nan'))`` is
+    ``True``).
+    """
+    if value is None:
+        return None
+    if isinstance(value, float) and value != value:  # NaN check
+        return None
+    s = str(value)
+    return s if s else None
+
+
 @dataclass
 class Group:
     """Represents a survey group with its metadata"""
@@ -25,6 +40,17 @@ class Group:
     label: str
     relevance: Optional[str]
     depth: int
+
+    def __post_init__(self):
+        """Honor type annotations regardless of construction path.
+
+        Direct ``Group(name=NaN, ...)`` construction bypasses
+        ``GroupStack.push``; normalize here so the dataclass itself enforces
+        the contract.
+        """
+        self.name = _to_str(self.name)
+        self.label = _to_str(self.label)
+        self.relevance = _to_optional_str(self.relevance)
 
 
 class GroupStack:
@@ -37,13 +63,17 @@ class GroupStack:
     def push(self, name: str, label: str, relevance: Optional[str]) -> None:
         """Add a group to the stack.
 
-        Coerces None / NaN inputs to '' so ``Group.name`` and ``Group.label``
-        honor their ``str`` type annotation. Without this, blank ``name`` cells
-        in XLSForms (which pandas reads as ``float('nan')``) flow into the
-        stack and crash downstream consumers that call ``'/'.join(group_path)``.
+        Coerces ``name`` / ``label`` to ``str`` and ``relevance`` to
+        ``Optional[str]`` so the ``Group`` dataclass annotations hold even
+        when callers bypass the parser layer. Without this, blank ``name``
+        cells in XLSForms (which pandas reads as ``float('nan')``) flow into
+        the stack and crash downstream consumers that call
+        ``'/'.join(group_path)``; a NaN ``relevance`` would slip past
+        ``if g.relevance`` filters as truthy (``bool(float('nan')) is True``).
         """
         name = _to_str(name)
         label = _to_str(label)
+        relevance = _to_optional_str(relevance)
         depth = len(self.stack)
         group = Group(name=name, label=label, relevance=relevance, depth=depth)
         self.stack.append(group)
