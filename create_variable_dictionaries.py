@@ -30,7 +30,7 @@ import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Union
+from typing import Dict, List, Optional
 
 try:
     import pyreadstat
@@ -408,36 +408,85 @@ def batch_sentinel_scan(
 class QuestionIndex:
     """Three views over the question list, built once for O(1) resolution.
 
-    - exact:   form-case name -> question (the original index)
-    - lower:   lowercase name -> question. Stata stores variable names
-               lowercase, so camelCase form names (e.g. ``m9_vitAveg``)
-               are invisible to an exact-match lookup.
-    - trunc32: first-32-chars-of-name -> question, for names longer than
-               32 chars. Stata .dta version 14 (this toolkit's default)
-               clips variable names to 32 chars; the resolver needs a
-               prefix view to match the clipped Stata column back to the
-               original form question.
+    - exact:   form-case name -> question (the original index).
+    - lower:   lowercase name -> list of questions. Stata stores variable
+               names lowercase, so camelCase form names (e.g. ``m9_vitAveg``)
+               are invisible to an exact-match lookup. Stored as a list so
+               that case-only collisions (a form containing both
+               ``m9_vitAveg`` and ``m9_vitaveg``) are detected rather than
+               silently overwritten.
+    - trunc32: first-32-chars-of-name -> list of questions, for names
+               longer than 32 chars. Stata .dta version 14 (this toolkit's
+               default) clips variable names to 32 chars; two form names
+               with the same 32-char prefix collide on write and the
+               resolver must not silently pick one.
+
+    When a bucket contains more than one entry the resolver returns
+    ``None`` (variable shows up as unmatched) rather than guessing.
+    Build-time collisions are logged via ``[WARN]`` so the user can
+    investigate the form.
     """
-    exact:   Dict[str, Dict]
-    lower:   Dict[str, Dict]
-    trunc32: Dict[str, Dict]
-    lower_trunc32: Dict[str, Dict] = field(default_factory=dict)
-
-    def __contains__(self, key) -> bool:  # back-compat for any `key in _index`
-        return key in self.exact
-
-    def __getitem__(self, key):  # back-compat for any `_index[key]`
-        return self.exact[key]
+    exact:         Dict[str, Dict]
+    lower:         Dict[str, List[Dict]]
+    trunc32:       Dict[str, List[Dict]]
+    lower_trunc32: Dict[str, List[Dict]] = field(default_factory=dict)
 
 
 def _build_question_index(questions: List[Dict]) -> QuestionIndex:
-    """Build per-resolution views over the question list (see QuestionIndex)."""
-    exact = {q['variable_name']: q for q in questions if 'variable_name' in q}
-    lower = {k.lower(): v for k, v in exact.items()}
-    trunc32 = {k[:32]: v for k, v in exact.items() if len(k) > 32}
-    lower_trunc32 = {k.lower(): v for k, v in trunc32.items()}
+    """Build per-resolution views over the question list (see QuestionIndex).
+
+    Filters out questions with blank/missing ``variable_name`` so an empty
+    string never becomes a valid key (PR #8 coerces blank XLSForm ``name``
+    cells to ``""``; a stray blank-name row would otherwise collide on the
+    empty-string key).
+
+    Logs ``[WARN]`` at build time for every prefix/lowercase bucket that
+    holds more than one form variable, so silent ambiguity is visible.
+    """
+    exact: Dict[str, Dict] = {}
+    for q in questions:
+        v = q.get('variable_name')
+        if not v:  # filters out None and ""
+            continue
+        exact[v] = q
+
+    lower: Dict[str, List[Dict]] = {}
+    for k, v in exact.items():
+        lower.setdefault(k.lower(), []).append(v)
+
+    trunc32: Dict[str, List[Dict]] = {}
+    for k, v in exact.items():
+        if len(k) > 32:
+            trunc32.setdefault(k[:32], []).append(v)
+
+    lower_trunc32: Dict[str, List[Dict]] = {}
+    for k, bucket in trunc32.items():
+        lower_trunc32.setdefault(k.lower(), []).extend(bucket)
+
+    for prefix, bucket in trunc32.items():
+        if len(bucket) > 1:
+            names = [q['variable_name'] for q in bucket]
+            print(f"  [WARN] 32-char prefix '{prefix}' shared by {len(bucket)} form "
+                  f"variables: {names} - resolver will leave clipped Stata column "
+                  f"'{prefix}' unmatched to avoid silent ambiguity")
+
+    for low, bucket in lower.items():
+        if len(bucket) > 1:
+            names = [q['variable_name'] for q in bucket]
+            print(f"  [WARN] lowercase name '{low}' shared by {len(bucket)} form "
+                  f"variables: {names} - resolver will decline case-insensitive "
+                  f"fallback for this name to avoid silent ambiguity")
+
     return QuestionIndex(exact=exact, lower=lower, trunc32=trunc32,
                          lower_trunc32=lower_trunc32)
+
+
+def _resolve_unambiguous(bucket_map: Dict[str, List[Dict]], key: str) -> Optional[Dict]:
+    """Return the single question in ``bucket_map[key]`` or None if absent/ambiguous."""
+    bucket = bucket_map.get(key)
+    if bucket is None or len(bucket) != 1:
+        return None
+    return bucket[0]
 
 
 def find_question_for_variable(var_name: str, questions: List[Dict],
@@ -445,71 +494,82 @@ def find_question_for_variable(var_name: str, questions: List[Dict],
     """
     Find the source question for a given variable.
 
-    Handles:
-    - Direct match
-    - Repeat group iterations (var_1, var_2, etc.)
-    - Select_multiple choices (var_1, var_2, var_97, etc.)
-    - Double-suffix (var_1_2 = repeat 1, choice 2)
-    - Stata 32-char variable-name truncation (form names > 32 chars get
-      clipped in .dta v14 — match the 32-char prefix back to the original)
-    - Case-insensitivity (Stata stores variable names lowercase; camelCase
-      form names would otherwise miss)
+    Fallback chain (in order):
+      1. Direct match on the form-case name.
+      2. Repeat group iterations and select_multiple choices (``var_1``,
+         ``var_2``, ``var_97``, double-suffix ``var_1_2``).
+      3. Progressive prefix strip on underscores (for nested structures).
+      4. Stata 32-char variable-name truncation: form names > 32 chars get
+         clipped in ``.dta`` v14, so a 32-char ``var_name`` is matched
+         against the 32-char-prefix view. Note: this strategy does NOT
+         chain with the suffix strips in step 2 — a clipped form name
+         that also lives inside a repeat (e.g. Stata ``..._co_1``) is
+         not currently resolved. Rare in practice; deferred per issue #6.
+      5. Case-insensitivity: Stata lowercases variable names, so the
+         lookup retries against the lowercase view (also reapplying the
+         suffix strips and the trunc32 check against the lower view).
 
-    When _index is provided (a QuestionIndex), all lookups are O(1) instead
-    of O(N) linear scans. Build it once with _build_question_index() and
-    pass to all calls.
+    Steps 4 and 5 return ``None`` when the underlying bucket contains
+    more than one form variable — ambiguity is logged at index-build
+    time and the variable surfaces as ``unmatched`` rather than silently
+    mis-mapped.
+
+    When ``_index`` is provided (a QuestionIndex), all lookups are O(1).
+    Build it once with ``_build_question_index()`` and pass to all calls.
     """
     if _index is None:
         _index = _build_question_index(questions)
     exact = _index.exact
 
-    # First try exact match
+    # 1. Exact match
     if var_name in exact:
         return exact[var_name]
 
-    # Try matching base name (remove numeric suffix with underscore: var_1, var_2)
+    # 2a. Suffix _N (var_1, var_2)
     match = re.match(r'(.+?)_(\d+)$', var_name)
     if match:
         base_name = match.group(1)
         if base_name in exact:
             return exact[base_name]
 
-    # Try matching base name (digit appended directly without underscore: var_r1, var_r2)
-    # Handles SurveyCTO repeat variables whose names end in a non-digit character,
-    # e.g. form variable "f_hr_fn_r" -> Stata columns "f_hr_fn_r1", "f_hr_fn_r2"
+    # 2b. Suffix N directly attached (var_r1, var_r2) — repeat columns whose
+    # base name ends in a non-digit, e.g. form "f_hr_fn_r" -> "f_hr_fn_r1"
     match_direct = re.match(r'^(.+?)(\d+)$', var_name)
     if match_direct:
         base_name = match_direct.group(1)
         if base_name in exact:
             return exact[base_name]
 
-    # Try even longer base names (for nested structures)
+    # 3. Progressive prefix strip (for nested structures)
     parts = var_name.split('_')
     for i in range(len(parts) - 1, 0, -1):
         potential_base = '_'.join(parts[:i])
         if potential_base in exact:
             return exact[potential_base]
 
-    # Stata 32-char truncation fallback. If var_name is exactly 32 chars,
-    # the form name was likely longer and clipped on write — check whether
-    # any form name >32 chars shares this 32-char prefix.
-    if len(var_name) == 32 and var_name in _index.trunc32:
-        return _index.trunc32[var_name]
+    # 4. Stata 32-char truncation fallback.
+    if len(var_name) == 32:
+        q = _resolve_unambiguous(_index.trunc32, var_name)
+        if q is not None:
+            return q
 
-    # Case-insensitive fallback. Stata stores variables lowercase, but XLSForm
-    # `name` cells sometimes use camelCase (e.g. form m9_vitAveg -> Stata
-    # m9_vitaveg). Re-run the exact + suffix + truncation strategies against
-    # the lowercase view as a last resort.
-    lower = _index.lower
+    # 5. Case-insensitive fallback. Each lookup declines on ambiguity.
     vn = var_name.lower()
-    if vn in lower:
-        return lower[vn]
-    if match and match.group(1).lower() in lower:
-        return lower[match.group(1).lower()]
-    if match_direct and match_direct.group(1).lower() in lower:
-        return lower[match_direct.group(1).lower()]
-    if len(vn) == 32 and vn in _index.lower_trunc32:
-        return _index.lower_trunc32[vn]
+    q = _resolve_unambiguous(_index.lower, vn)
+    if q is not None:
+        return q
+    if match:
+        q = _resolve_unambiguous(_index.lower, match.group(1).lower())
+        if q is not None:
+            return q
+    if match_direct:
+        q = _resolve_unambiguous(_index.lower, match_direct.group(1).lower())
+        if q is not None:
+            return q
+    if len(vn) == 32:
+        q = _resolve_unambiguous(_index.lower_trunc32, vn)
+        if q is not None:
+            return q
 
     return None
 
