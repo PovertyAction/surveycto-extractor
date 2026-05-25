@@ -124,8 +124,9 @@ similarly for `label`. Sentinel rows are preserved.
   the current row state so picks come from the rows valid for that
   respondent.
 
-Affected question count (representative): ~40 in a typical g2r-style form,
-~3 in a smaller survey, 0 if the form has no `search()` appearances.
+Affected question count (representative): ~40 in a typical IPA multi-module
+evaluation form, ~3 in a smaller survey, 0 if the form has no `search()`
+appearances.
 
 ## `caseid` sampling from pulldata
 
@@ -190,10 +191,10 @@ internal IPA production exports that aren't in this repository; the
 numbers are reproducible if you have access to the underlying real
 `WIDE.csv` (and the same form's `*_questions.json`).
 
-| Survey | Concordance |
+| Survey shape | Concordance |
 |---|---:|
-| ltfu_adult | 99.9% |
-| ltfu_hh | 98.5% |
+| Adult endline (~2.9k columns) | 99.9% |
+| Household endline (~21k columns) | 98.5% |
 
 Remaining mismatches are dominated by:
 

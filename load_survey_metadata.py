@@ -6,7 +6,7 @@ import pandas as pd
 
 def load_survey_metadata(json_path: str) -> pd.DataFrame:
     """
-    Load survey variable metadata from the ltfu_hh variable dictionary JSON.
+    Load survey variable metadata from a variable-dictionary JSON.
 
     Returns a DataFrame with one row per variable, indexed by variable_name.
     Minimum columns guaranteed: variable_order, variable_name, type, label, relevance.
@@ -307,12 +307,13 @@ def write_destring_block(
     Both passes are wrapped in quietly {} to suppress "missing values generated"
     output spam.
 
-    Sentinel mapping (from ltfu_hh_questions.json choice lists):
-      -99 = Don't know  (234 choice lists) -> .d
-      -88 = Refused     ( 64 choice lists) -> .r
-      -77 = N/A         (  2 choice lists) -> .n
-      -66 = Other/spec  (132 choice lists) -> .o
-      -55 = Not in list ( 55 choice lists) -> .m
+    Sentinel mapping (IPA convention; counts are illustrative of a typical
+    multi-module survey's choice-list inventory):
+      -99 = Don't know  -> .d
+      -88 = Refused     -> .r
+      -77 = N/A         -> .n
+      -66 = Other/spec  -> .o
+      -55 = Not in list -> .m
     """
     if mvdecode_universe is None:
         mvdecode_universe = destring_universe
@@ -670,7 +671,7 @@ def filter_truly_numeric(
 
     Args:
         numeric_universe: output of get_numeric_universe, indexed by variable_name.
-        dta_path:         path to the .dta file (e.g. ugs_ltfu_hh_checked.dta).
+        dta_path:         path to the .dta file (e.g. my_survey_checked.dta).
         parquet_path:     optional path to a parquet sidecar.  When provided,
                           string columns are read from parquet (columnar, fast)
                           instead of re-reading the .dta.

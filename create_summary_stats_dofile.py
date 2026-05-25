@@ -297,7 +297,7 @@ def main():
     )
     parser.add_argument(
         '--survey', required=True, metavar='KEY',
-        help='Survey key from config.DATASETS (e.g. girls, norms, ltfu_hh)'
+        help='Survey key from config.DATASETS (e.g. my_survey, baseline, endline)'
     )
     args = parser.parse_args()
     generate(args.survey)

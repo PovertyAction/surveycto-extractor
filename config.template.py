@@ -19,7 +19,7 @@ from pathlib import Path
 #
 # Examples:
 #   root/surveycto_extractor/config.py           → .parent.parent  (1 level up)
-#   root/scripts/misc/surveycto_extractor/config.py → 4× .parent   (see g2r pattern)
+#   root/scripts/misc/surveycto_extractor/config.py → 4× .parent
 PROJECT_ROOT = Path(__file__).parent.parent        # TODO: adjust levels
 
 INSTRUMENTS_DIR  = PROJECT_ROOT / "path" / "to" / "instruments"   # TODO
@@ -102,8 +102,7 @@ CHOICES_COLUMNS = [
 
 # ---------------------------------------------------------------------------
 # Types to exclude from question extraction
-# Remove "calculate" from the list if you want calculated fields in the output
-# (g2r keeps them; brac_try's original config excluded them).
+# Remove "calculate" from the list if you want calculated fields in the output.
 # ---------------------------------------------------------------------------
 EXCLUDED_TYPES = [
     "begin group",
