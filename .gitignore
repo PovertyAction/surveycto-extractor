@@ -5,12 +5,25 @@
 # project-specific file paths. It must NEVER be committed.
 config.py
 
+# .mcp.json registers the survey-expert MCP server locally;
+# paths and server lists are user-specific. Each developer
+# creates their own.
+.mcp.json
+
+# Local Claude Code per-project settings.
+.claude/
+
 # ============================================================
 # Survey data — potentially contains PII
 # ============================================================
 *.dta
 *.dta.gz
 *.parquet
+
+# Project-specific working data (instruments, datasets, choice CSVs).
+# Everything under data/ stays out of the repo — copy real survey
+# materials here for local runs without risking a commit.
+data/
 
 # Allow the bundled sample files (public IPA HFC training data)
 !sample/household_survey.dta
@@ -27,11 +40,12 @@ config.py
 *_variable_dictionary.json
 *_variable_dictionary.xlsx
 *_structure.txt
-*_create_seed.do
 *_summary_stats.do
 *_survey.csv
 *_choices.csv
 *_ord.dta
+*_synthetic.csv
+*_synthetic.strip.log
 sections/
 sample/output/
 

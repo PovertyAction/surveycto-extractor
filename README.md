@@ -1,9 +1,11 @@
 # SurveyCTO Extractor
 
-A Python toolkit that turns a SurveyCTO `.xlsx` instrument into a suite of Stata-ready
-outputs: structured survey documentation, a variable dictionary, a schema seed dataset,
-and summary-stats do-files. Designed to be copied into any IPA-style cleaning project
-and used alongside an AI coding agent (Claude Code or similar).
+A Python toolkit for IPA-style cleaning projects that turns a SurveyCTO `.xlsx`
+instrument — plus, once it arrives, the collected `.dta` — into structured
+documentation, a synthetic export CSV for HFC dry-runs, a variable dictionary,
+a relationship graph, and summary-stats do-files. Built to be used alongside
+an AI coding agent like Claude Code: the outputs double as a knowledge surface
+your agent can query while you clean.
 
 ---
 
@@ -26,205 +28,237 @@ training dataset.
 
 ---
 
-## What you get
+## How this fits the survey lifecycle
 
-| Output | How to generate | What it's for |
-|---|---|---|
-| `*_questions.json` | `main.py` | Machine-readable question metadata with Stata skip logic — primary input to everything else |
-| `*_structure.txt` | `main.py` | Human-readable group hierarchy of the form |
-| `sections/*.json` | `main.py` | Per-section slices of the question JSON |
-| `*_create_seed.do` | `main.py --phases seed` | Stata do-file that builds a 1-row schema dataset — run this before your real data arrives to test your cleaning pipeline |
-| `*_variable_dictionary.json` | `create_variable_dictionaries.py` | Maps every Stata variable to its source question, skip logic, choice list, and sentinel counts — in form order, not dataset column order |
-| `*_variable_dictionary.xlsx` | `create_variable_dictionaries.py --xlsx` | Same dictionary as a spreadsheet for sharing with field teams or PIs |
-| `*_variable_graph.json` | `create_variable_dictionaries.py` | Variable relationship graph — calculation dependencies, gating chains, repeat structure, shared choice domains (requires `networkx`) |
-| `*_data_ord.dta` | `create_variable_dictionaries.py` | Column-reordered dataset following form structure |
-| `*.parquet` | `create_variable_dictionaries.py` | Parquet sidecar written next to the `.dta` — used internally for fast columnar access; also available for downstream analysis |
-| `*_summary_stats.do` | `create_summary_stats_dofile.py` | Stata do-file with `tabstat` calls grouped by skip condition + Excel export |
+A survey has two phases — and this toolkit covers both:
 
----
+**Pre-collection — instrument day.** You have a SurveyCTO `.xlsx` form but no
+submissions yet. Run the toolkit against the form alone to:
+- Extract structured documentation, group hierarchy, per-section JSON slices.
+- Generate a synthetic SurveyCTO-shaped export CSV with N synthetic respondents.
+- **Run your full cleaning + HFC pipeline against the synthetic CSV** to catch
+  type mismatches, missing-column errors, and skip-logic bugs before the first
+  respondent is interviewed.
 
-## Setting up for your project
+**Post-collection — data day.** Real `.dta` has landed. Add it to the config
+and run the toolkit to:
+- Generate a variable dictionary mapping every Stata variable to its source
+  question, skip logic, choices, observed range, sentinel counts, missing rates.
+- Generate a relationship graph (calculation dependencies, gating chains,
+  repeat siblings, shared choice domains).
+- Generate a summary-stats do-file grouped by skip condition.
+- Query the dictionary from your AI agent during cleaning via the
+  `survey-expert` skill or the MCP server.
 
-### 1. Copy the files
-
-Copy this repo's contents into your project:
-
-```
-my_project/
-└── surveycto_extractor/
-    ├── coding_guidelines/       ← reference these from your AGENTS.md (see below)
-    ├── skill/                   ← copy to .claude/skills/survey-expert/ (see below)
-    ├── config.py                ← copy from config.template.py, fill in
-    ├── main.py
-    ├── create_variable_dictionaries.py
-    ├── create_summary_stats_dofile.py
-    ├── load_survey_metadata.py      ← required by create_summary_stats_dofile.py
-    └── ...
-```
-
-### 2. Install dependencies
-
-```bash
-pip install -r surveycto_extractor/requirements.txt
-```
-
-### 3. Configure `config.py`
-
-Copy `config.template.py` to `config.py` and fill in your paths.
-
-The config has two dicts that reflect a meaningful split in the pipeline:
-
-**`SURVEYS`** — instrument side, required for phases 1–3 and seed. Only needs the `.xlsx` form — can be configured on day 1, before any data is collected.
-
-```python
-SURVEYS = {
-    "my_survey": {
-        "input_file":           Path("path/to/My_Survey.xlsx"),
-        "external_choices_csv": None,
-        "output_dir":           Path("path/to/survey_documentation/my_survey"),
-        "sections_dir":         Path("path/to/survey_documentation/my_survey/sections"),
-        "name":                 "My Survey Full Name",
-        "max_section_depth":    3,
-        "repeat_defaults":      {},   # {repeat_group_name: n} to override auto-detection
-    },
-}
-```
-
-**`DATASETS`** — data side, required for variable dictionary and summary stats. Needs a collected `.dta` and the `questions_json` bridge file produced by Phase 2. Each key must match a key in `SURVEYS`.
-
-```python
-DATASETS = {
-    "my_survey": {
-        "data":           Path("path/to/my_survey_data.dta"),
-        "questions_json": Path("path/to/survey_documentation/my_survey/my_survey_questions.json"),  # Phase 2 output
-        "output_json":    Path("path/to/survey_documentation/my_survey/my_survey_variable_dictionary.json"),
-        "output_xlsx":    Path("path/to/survey_documentation/my_survey/my_survey_variable_dictionary.xlsx"),
-        # "output_do":          Path("scripts/cleaning/my_survey_summary_stats.do"),
-        # "sumstats_dir_stata": "${project_root}/path/to/survey_documentation/my_survey",
-    },
-}
-```
-
-The `questions_json` path is the bridge between the two sides: it points to the `*_questions.json` file produced by `main.py --phases json`. Phase 4 will fail with an actionable error if this file doesn't exist yet.
+The two phases share one config file. You can fill in the instrument-side
+settings on day 1 of the project and add the data-side settings once
+collection starts.
 
 ---
 
-## Running the pipeline
+## Pre-collection: instrument day
 
-### Phases 1–3: Extract survey structure
+### 1. Configure your project
 
-```bash
-python main.py --survey my_survey                        # all phases (default)
-python main.py --survey my_survey --phases csv           # CSV only
-python main.py --survey my_survey --phases json          # questions JSON + diagram only
-python main.py --survey my_survey --phases sections      # section split only (reads questions JSON from disk)
-python main.py --survey my_survey --phases json seed     # JSON then seed
-python main.py --survey all                              # all surveys in config
-```
+Copy `config.template.py` to `config.py` and fill in the `SURVEYS` dict — the
+instrument-side settings. Only `input_file`, `output_dir`, `sections_dir`, and
+`name` are required at this stage. Full reference under
+[Configuration](#configuration).
 
-Phases 1–3 only require the SurveyCTO `.xlsx` instrument — they can run before any data is collected. Valid phase names: `csv`, `json`, `sections`, `seed`, `all`.
-
-Produces `*_questions.json`, `*_structure.txt`, and `sections/*.json`.
-
-### Seed dataset
+### 2. Extract documentation and structure
 
 ```bash
-python main.py --survey my_survey --phases seed
+python main.py --survey my_survey
 ```
 
-Generates `*_create_seed.do` — a Stata do-file that builds a 1-row dataset covering
-every variable in the form, including conditionally-triggered ones. Run it in Stata
-**before your real data arrives** to test that your cleaning do-files run end-to-end
-against the complete variable schema. Repeat groups are expanded to N iterations
-(auto-detected from the `.dta` if available, or set via `repeat_defaults` in config).
+The default `--phases all` produces every instrument-side output in one run:
 
-### Variable dictionary
+| Output | What it's for |
+|---|---|
+| `<survey>_questions.json` | Machine-readable question metadata with Stata-translated skip logic. Primary input to everything downstream. |
+| `<survey>_structure.txt` | Human-readable group hierarchy of the form. |
+| `sections/<section>.json` | Per-section slices of the question JSON. |
+| `<survey>_synthetic.csv` | Synthetic export CSV (see below). |
+
+Run individual phases with `--phases csv|json|sections|synthetic` (or any
+combination).
+
+### 3. Generate a synthetic export CSV
+
+```bash
+python main.py --survey my_survey --phases synthetic --rows 20 --seed 42
+```
+
+Produces `<survey>_synthetic.csv` — a wide-export CSV indistinguishable in
+shape from what SurveyCTO will produce once real submissions arrive. Same
+metadata columns (`KEY`, `SubmissionDate`, `starttime`, `duration`, `caseid`,
+audit URLs), same skip-induced blanks, same `pulldata`-resolved joins, same
+`search()`-driven choice expansion, same `calculate` / `calculate_here`
+values.
+
+```bash
+# Force the consent cascade so HFC dry-runs exercise the gated sections
+python main.py --survey my_survey --phases synthetic --rows 20 --seed 42 \
+    --force-value c_consent=1 --force-value hh_consent=1
+```
+
+Determinism: same `--seed K` produces byte-identical output across reruns
+(on the same day; the date sampler clamps to today).
+
+If your form uses `pulldata()`, the referenced CSVs must be on disk in one of
+the configured `pulldata_search_dirs` — without them, gated cascades won't
+populate and `search()` can't resolve. The synth raises `MissingPullDataError`
+with the search-dir list when it can't find them.
+
+See [`docs/synthetic-generator.md`](docs/synthetic-generator.md) for the full
+flag reference, the `search()` mechanics, type-concordance benchmarks against
+real exports, and known limitations.
+
+### 4. Dry-run your cleaning + HFC pipeline
+
+Point your existing Stata cleaning script at `<survey>_synthetic.csv`. The
+output shape matches the real SurveyCTO wide export, so anything that works
+against the synth will work against real data. Use this step to:
+
+- Catch missing-column errors before fieldwork starts.
+- Verify Stata type inference matches your project conventions.
+- Exercise `tostring` / `destring` paths and confirm HFC range checks fire.
+- Iterate on skip-logic translations without waiting for real submissions.
+
+---
+
+## Post-collection: data day
+
+Add the `DATASETS` block to `config.py` once your `.dta` is available. Each
+entry points at the dataset, the bridge `*_questions.json` from instrument
+day, and the variable-dictionary output paths.
+
+### 1. Generate the variable dictionary
 
 ```bash
 python create_variable_dictionaries.py --survey my_survey --xlsx
 ```
 
-Maps every Stata variable to its source question, Stata skip logic, choice list, and
-form position. Per-variable fields include:
+Maps every Stata variable to its source question, skip logic, choice list,
+sentinel counts, and form position — in **form order**, not dataset column
+order. Per-variable fields include:
 
-- **`stata_type`** — Stata native type (`double`, `float`, `int16`, `int8`, `string`, etc.) from pyreadstat metadata, not pandas dtypes
-- **`missing_rate`** — fraction of observations that are null, from parquet row-group metadata (no data scan)
-- **`is_all_missing`** — `true` when the variable has zero non-null observations
-- **`data_min` / `data_max`** — observed range for integer, decimal, calculate, and date/time variables (from parquet metadata)
-- **sentinel counts** — detects raw integer sentinels (`-99`, `-88`, etc.), string sentinels, extended missing values (`.d`, `.r`), type mismatches, and risky calculate fields
+- `stata_type` — native Stata type (`double`, `float`, `int16`, `str244`, ...)
+  from `pyreadstat` metadata, not pandas dtypes.
+- `missing_rate` and `is_all_missing` — from Parquet row-group metadata, no
+  data scan needed.
+- `data_min` / `data_max` — observed range for integer, decimal, calculate,
+  and date / time variables.
+- **Sentinel counts** — raw integer sentinels (`-99`, `-88`), string
+  sentinels, Stata extended missing values (`.d`, `.r`), type mismatches,
+  risky calculates.
+- `constraint`, `stata_constraint`, `choice_filter`, `references` —
+  data-structure fields surfaced for downstream consumers.
 
-The export summary prints a diagnostic of all-missing and sparse (≥95% missing) variables.
+Exports to JSON (machine-readable) and XLSX (for sharing with field teams or
+PIs). Also writes `<survey>_data_ord.dta` — your dataset with columns
+reordered to match form structure — and a Parquet sidecar for fast columnar
+access by downstream scripts.
 
-Exports to both JSON (machine-readable) and XLSX (for sharing).
-Also saves `*_data_ord.dta` — a copy of your dataset with columns reordered to match
-form structure rather than submission order. A parquet sidecar is written next to the
-`.dta` for fast columnar access by downstream scripts.
+The export summary lists all-missing and sparse (≥95% missing) variables so
+you can spot data-quality issues immediately.
 
-If `networkx` is installed, Phase 4 also generates `*_variable_graph.json` — a
-directed graph of variable relationships (calculation dependencies, relevance gating,
-constraints, repeat siblings, shared choice domains). This powers the
-`--neighborhood` flag in the skill and `get_variable_neighborhood` in the MCP server.
+### 2. Use the variable graph
 
-### Summary stats do-file
+If `networkx` is installed (it's in `requirements.txt`), the variable-
+dictionary step also writes `<survey>_variable_graph.json` — a directed graph
+capturing how variables relate:
+
+- `calculates_from` — A's calculation references B.
+- `gated_by` — A's relevance references B.
+- `group_gated_by` — A's parent group's relevance references B.
+- `constrained_by` — A's constraint references B.
+- `repeat_sibling` — A and B are inside the same repeat group.
+- `shares_choices` — A and B draw from the same choice list.
+
+Use it interactively via the skill's `--neighborhood VAR` flag or the MCP
+server's `get_variable_neighborhood` tool. Typical questions answered in one
+hop:
+
+- "What depends on `crpsale_qty`?"
+- "Why might `income_1` be missing for some observations?"
+- "What variables share the `yesnodk` choice list?"
+
+### 3. Generate the summary-stats do-file
 
 ```bash
 python create_summary_stats_dofile.py --survey my_survey
 ```
 
-Generates a Stata do-file with `tabstat` calls for all numeric variables, grouped by
-skip condition. Groups with zero observations in the dataset are automatically detected
-and commented out to prevent Stata `r(2000)` errors at runtime. Merges with survey
-metadata and exports to Excel. Check the preamble — it uses `${input_data}` and a
-`sumstats_dir` global; customize via `output_do` and `sumstats_dir_stata` in your
-DATASETS config entry.
+Produces a Stata do-file with `tabstat` calls for every numeric variable,
+grouped by skip condition. Groups with zero observations in the dataset are
+automatically detected and commented out so Stata doesn't throw `r(2000)` at
+runtime. The do-file exports tabstat output to Excel for sharing with field
+teams or PIs.
+
+Customise the preamble's `${input_data}` path and the `sumstats_dir` global
+via the `output_do` and `sumstats_dir_stata` keys in your `DATASETS` entry.
+
+### 4. Query the dictionary from your AI agent
+
+This is where the project's AI-native design pays off — see the next section.
 
 ---
 
-## Survey expert skill (Claude Code)
+## AI-native design
 
-The `skill/` directory contains a Claude Code skill that gives your AI agent direct
-lookup access to the variable dictionary. **This is the primary way to query survey
-metadata during cleaning** — faster and more reliable than asking Claude to reason
-from a spreadsheet or description.
+The variable dictionary, expression evaluator, and relationship graph are
+designed so a Claude Code (or similar) session can find the right metadata in
+one tool call rather than asking you to dig through a spreadsheet. Two
+surfaces sit on top of the same JSON outputs.
+
+### Survey-expert skill
+
+The `skill/` directory contains a Claude Code skill that gives your agent
+direct lookup access. It is the primary way to query survey metadata during
+cleaning — faster and more reliable than asking the agent to reason from a
+spreadsheet or a fragment of the form.
 
 The skill answers questions like:
-- "What is the skip condition for `hh_size`?" (`--var`)
-- "What are the valid choices for `asset_type`?" (`--choice-list`)
-- "Which variables capture crop sales?" (`--search` — TF-IDF ranked, natural language works)
-- "Why is `income_1` missing for some observations?" (`--gate-chain`)
-- "What's the observed range of `hh_age`?" (shown automatically via `data_range`)
-- "What depends on `crpsale_qty`?" (`--neighborhood` — shows calculation deps, gates, repeat siblings)
 
-### Setup
+- "What is the skip condition for `hh_size`?" → `--var`
+- "What are the valid choices for `asset_type`?" → `--choice-list`
+- "Which variables capture crop sales?" → `--search` (TF-IDF ranked,
+  natural-language queries work)
+- "Why is `income_1` missing for some observations?" → `--gate-chain`
+- "What's the observed range of `hh_age`?" → shown automatically under
+  `data_range`
+- "What depends on `crpsale_qty`?" → `--neighborhood`
 
-1. Copy `skill/SKILL.md` → `.claude/skills/survey-expert/SKILL.md`
-2. Copy `skill/search_survey.py` → `.claude/skills/survey-expert/search_survey.py`
-3. In `search_survey.py`, update `DOCS` to point to your `survey_documentation/` directory
-4. In `SKILL.md`, fill in the `[TODO: ...]` placeholders (project name, survey names, variable counts, file paths)
+Setup:
 
-The skill auto-discovers all surveys under `DOCS` by scanning for `*_variable_dictionary.json` files.
+1. Copy `skill/SKILL.md` → `.claude/skills/survey-expert/SKILL.md`.
+2. Copy `skill/search_survey.py` → `.claude/skills/survey-expert/search_survey.py`.
+3. In `search_survey.py`, update `DOCS` to point at your
+   `survey_documentation/` directory.
+4. In `SKILL.md`, fill in the `[TODO: ...]` placeholders (project name,
+   survey names, variable counts, file paths).
 
----
+The skill auto-discovers all surveys under `DOCS` by scanning for
+`*_variable_dictionary.json` files.
 
-## MCP server add-on (optional)
+### MCP server (optional, higher-performance)
 
-The `mcp/` directory contains an optional MCP server that keeps variable dictionaries
-in memory for instant lookups. This is the high-performance alternative to the skill
-for sessions with heavy query volume (10–50+ variable lookups per cleaning module).
+The `mcp/` directory contains an optional MCP server that keeps variable
+dictionaries in memory for instant lookups — the high-performance alternative
+for sessions with heavy query volume (10–50+ lookups per cleaning module).
 
 | | `skill/search_survey.py` | `mcp/survey_server.py` |
 |---|---|---|
 | Loads JSON | Every call | Once at startup |
 | Dependencies | None (stdlib) | `mcp[cli]` |
 | Setup | Copy to `.claude/skills/` | Add to `.mcp.json` |
-| Best for | Occasional lookups | Cleaning sessions (10-50+ lookups) |
+| Best for | Occasional lookups | Cleaning sessions (10–50+ lookups) |
 | Batch queries | Not supported | `lookup_variables` tool |
 | Gate chain | `--gate-chain` flag | `get_gate_chain` tool |
 | Neighborhood | `--neighborhood` flag | `get_variable_neighborhood` tool |
 | Data range | Shown in output | Shown in lookup tools |
 | Multi-survey filter | `--survey KEY` flag | `survey` parameter on every tool |
-
-### Setup
 
 ```bash
 pip install "mcp[cli]" networkx
@@ -243,19 +277,17 @@ Add to your project's `.mcp.json`:
 }
 ```
 
-The server finds `config.py` in its parent directory automatically (override with
-`SURVEY_CONFIG` env var). It degrades gracefully — if config or JSON files are missing,
-tools return setup instructions instead of crashing.
+The server finds `config.py` in its parent directory automatically (override
+with the `SURVEY_CONFIG` env var). It degrades gracefully — if config or JSON
+files are missing, tools return setup instructions rather than crashing. See
+`mcp/README.md` for full details.
 
-See `mcp/README.md` for full details.
+### Coding guidelines for agents
 
----
-
-## Coding guidelines for agents
-
-The `coding_guidelines/` directory contains project-agnostic standards for Stata cleaning
-pipelines, written to be read by AI coding agents. **Reference them from your `AGENTS.md`**
-so every agent session has them in context automatically:
+The `coding_guidelines/` directory contains project-agnostic standards for
+Stata cleaning pipelines, written to be read by AI coding agents. **Reference
+them from your `AGENTS.md`** so every agent session has them in context
+automatically:
 
 ```markdown
 ## Coding Standards
@@ -264,34 +296,106 @@ Stata cleaning modules must follow the guidelines in:
 - `surveycto_extractor/coding_guidelines/CLEANING.md` — language-independent cleaning principles
 - `surveycto_extractor/coding_guidelines/STATA.md` — Stata-specific patterns and guardrails
 - `surveycto_extractor/coding_guidelines/SURVEYCTO_RELEVANCE_TRANSLATION.md` — SurveyCTO → Stata skip logic translation rules
+- `surveycto_extractor/coding_guidelines/surveycto_refs/xlsform.md` and `expressions.md` — in-house primers distilled from the SurveyCTO documentation, used by the converter as a technical reference
 ```
 
-These files need no modification — they are fully project-agnostic.
+These files need no modification — they are fully project-agnostic. The
+`surveycto_refs/` subdirectory holds derivative summaries we maintain by hand
+against https://docs.surveycto.com. See
+`coding_guidelines/surveycto_refs/README.md` for the source pages and refresh
+procedure.
+
+---
+
+## Configuration
+
+`config.py` has two top-level dicts that map onto the two lifecycle phases.
+
+**`SURVEYS`** — instrument side, required for the pre-collection phases
+(`csv`, `json`, `sections`, `synthetic`). Only needs the `.xlsx` form, so you
+can configure it on day 1.
+
+```python
+SURVEYS = {
+    "my_survey": {
+        "input_file":           Path("path/to/My_Survey.xlsx"),
+        "external_choices_csv": None,
+        "output_dir":           Path("path/to/survey_documentation/my_survey"),
+        "sections_dir":         Path("path/to/survey_documentation/my_survey/sections"),
+        "name":                 "My Survey Full Name",
+        "max_section_depth":    3,
+        # Optional, used by --phases synthetic:
+        # "pulldata_search_dirs": [Path("path/to/forms-media")],
+        # "geo_bbox":             (lat_min, lat_max, lon_min, lon_max),
+    },
+}
+```
+
+**`DATASETS`** — data side, required for the post-collection scripts. Needs
+the collected `.dta` plus the `questions_json` bridge file from Phase 2 of
+instrument day.
+
+```python
+DATASETS = {
+    "my_survey": {
+        "data":           Path("path/to/my_survey_data.dta"),
+        "questions_json": Path("path/to/survey_documentation/my_survey/my_survey_questions.json"),
+        "output_json":    Path("path/to/survey_documentation/my_survey/my_survey_variable_dictionary.json"),
+        "output_xlsx":    Path("path/to/survey_documentation/my_survey/my_survey_variable_dictionary.xlsx"),
+        # "output_do":          Path("scripts/cleaning/my_survey_summary_stats.do"),
+        # "sumstats_dir_stata": "${project_root}/path/to/survey_documentation/my_survey",
+    },
+}
+```
+
+The `questions_json` path is the bridge between the two sides — Phase 4 will
+fail with an actionable error if it doesn't exist yet.
+
+---
+
+## Repo layout (for projects that vendor this toolkit)
+
+Recommended layout when copying this repo into a cleaning project:
+
+```
+my_project/
+└── surveycto_extractor/
+    ├── coding_guidelines/                  ← reference from your AGENTS.md
+    ├── skill/                              ← copy to .claude/skills/survey-expert/
+    ├── config.py                           ← copy from config.template.py, fill in
+    ├── main.py                             ← instrument-side entry point
+    ├── create_variable_dictionaries.py     ← post-collection vardict + graph
+    ├── create_summary_stats_dofile.py      ← post-collection summary stats
+    └── ...
+```
 
 ---
 
 ## Common issues
 
+**`MissingPullDataError` from the synth phase**
+Your form references `pulldata('foo', ...)` but `foo.csv` isn't in any of the
+configured `pulldata_search_dirs`. See the
+[`docs/synthetic-generator.md`](docs/synthetic-generator.md) pulldata section
+— the synth requires the referenced CSVs to be on disk.
+
 **`search_survey.py` finds no surveys**
-Check that `DOCS` points to the directory containing `*_variable_dictionary.json` files.
-Run phase 4 first if the dictionary doesn't exist yet.
-
-**Seed emits only 1 iteration for a variable-driven repeat group**
-The generator scans the `.dta` for max iterations but needs the file to exist.
-Override in config: `"repeat_defaults": {"my_repeat_group": 5}`.
-
-**Phase 5 do-file has wrong `${input_data}` path**
-Add `"output_do"` and `"sumstats_dir_stata"` keys to your DATASETS entry.
-
-**`selected()` expressions not translated in skip logic**
-Re-run phase 1–3 first — the logic converter needs question type information from
-the JSON extractor to distinguish `select_one` from `select_multiple`.
-
-**`calculate` fields missing from `questions.json`**
-Remove `"calculate"` from `EXCLUDED_TYPES` in `config.py`. Calculate fields are
-needed for skip logic resolution and seed generation.
+Check that `DOCS` in `search_survey.py` points to the directory containing
+your `*_variable_dictionary.json` files. Run
+`create_variable_dictionaries.py` first if the dictionary doesn't exist yet.
 
 **`FileNotFoundError: Bridge file not found`**
-Phase 4 (`create_variable_dictionaries.py`) requires the `*_questions.json` file
-produced by Phase 2. Run `python main.py --survey my_survey --phases json` first,
-then re-run the variable dictionary script.
+`create_variable_dictionaries.py` needs the `*_questions.json` file produced
+by `main.py --phases json`. Run instrument-day first.
+
+**Summary-stats do-file has wrong `${input_data}` path**
+Add `"output_do"` and `"sumstats_dir_stata"` keys to your `DATASETS` entry.
+
+**`selected()` expressions not translated in skip logic**
+Re-run instrument-day first — the logic converter needs question-type
+information from the JSON extractor to distinguish `select_one` from
+`select_multiple`.
+
+**`calculate` fields missing from `questions.json`**
+Remove `"calculate"` from `EXCLUDED_TYPES` in `config.py`. Calculate fields
+are needed for skip-logic resolution and synthetic generation.

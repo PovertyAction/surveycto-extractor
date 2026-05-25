@@ -1,4 +1,4 @@
-# SurveyCTO Relevance → Stata Translation Reference (v2.0)
+# SurveyCTO Relevance → Stata Translation Reference
 
 This document defines the canonical rules for converting SurveyCTO relevance expressions
 into Stata `if` conditions. It covers every function/pattern encountered in your project's
@@ -10,6 +10,7 @@ in `tabstat` or `replace if` contexts.
 **Sources**:
 - SurveyCTO Expressions Reference — https://docs.surveycto.com/02-designing-forms/01-core-concepts/09.expressions.html
 - SurveyCTO Data Export Format — https://docs.surveycto.com/05-exporting-and-publishing-data/01-overview/09.data-format.html
+- **In-house function catalog**: [`surveycto_refs/expressions.md`](surveycto_refs/expressions.md) — derivative primer we maintain by hand against the SurveyCTO docs; when extending the converter, treat it as the working reference for what each function does, what its arguments look like, and which SurveyCTO operators diverge from ODK/XPath. [`surveycto_refs/xlsform.md`](surveycto_refs/xlsform.md) plays the same role for XLSForm column semantics. Verify against the canonical pages on https://docs.surveycto.com if anything looks stale.
 
 **Downstream consumer**: `transformers/logic_converter.py`
 
@@ -321,8 +322,8 @@ step, because `${var} = ''` must become `missing(var)`, not `missing(var ==)`.
 | `substr(${var}, s, e)` | `substr(var, s+1, e-s)` | **Index mismatch**: SurveyCTO is 0-based with exclusive end; Stata is 1-based with length. See §7.2 |
 | `concat(a, b, c, …)` | `a + b + c + …` | Stata string `+`. If any arg is numeric, wrap it in `string()`. See §7.3 |
 | `linebreak()` | `char(10)` | Newline character |
-| `lower(${var})` | `lower(var)` | Same name |
-| `upper(${var})` | `upper(var)` | Same name |
+| `lower(${var})` | `strlower(var)` | Stata's `strlower()` is Unicode-aware; `lower()` is ASCII-only |
+| `upper(${var})` | `strupper(var)` | Stata's `strupper()` is Unicode-aware; `upper()` is ASCII-only |
 | `regex(${var}, 'pat')` | `regexm(var, "pat")` | Change quote style; Stata uses ERE (SurveyCTO uses Java regex engine, but syntax overlaps for most patterns) |
 | `contains(${var}, 'str')` | `strpos(var, "str") > 0` | `strpos` returns 0 if not found |
 | `starts-with(${var}, 'str')` | `substr(var, 1, length("str")) == "str"` | |
@@ -376,8 +377,8 @@ in `string()` if the variable is numeric type. If type is unknown, wrap defensiv
 
 | SurveyCTO | Stata | Notes |
 |-----------|-------|-------|
-| `number(${var})` | `real(var)` | Convert string to number |
-| `int(${var})` | `int(var)` | Truncate toward zero |
+| `number(${var})` | `var` (wrapper dropped) | Stata-side numeric variables are already numeric — no cast needed. If the source is a string variable that should be numeric, the export side handles it; the converter assumes pyreadstat metadata is the truth. |
+| `int(${var})` | `int(var)` (kept verbatim) | Stata has its own `int(x)` function with matching truncate-toward-zero semantics, so the SurveyCTO form is already valid Stata as-is. No rewrite needed. |
 | `round(${var}, digits)` | `round(var, 10^(-digits))` | SurveyCTO takes decimal places; Stata takes a unit |
 | `abs(${var})` | `abs(var)` | Same |
 | `pow(base, exp)` | `base^exp` | Stata uses `^` operator |
@@ -387,15 +388,14 @@ in `string()` if the variable is numeric type. If type is unknown, wrap defensiv
 | `sin/cos/tan/asin/acos/atan` | Same names | |
 | `atan2(x, y)` | `atan2(y, x)` | **Arg order reversed** in Stata |
 | `pi()` | `_pi` | Stata built-in constant, not a function |
-| `${var} mod N` | `mod(var, N)` | Stata uses function, not operator |
-| `${var} div N` | `floor(var / N)` | SurveyCTO integer division operator; Stata has no `div`, use `floor()` |
+| `${var} mod N` | `mod(var, N)` | Stata uses function, not operator. Converter handles the simple `IDENT mod NUM` / `IDENT mod IDENT` forms; complex expressions on either side fall through unchanged. |
+| `${var} div N` | `var / N` | SurveyCTO integer-division operator. The converter rewrites `div` → `/` (the doc-historical `floor(var/N)` was discarded — `pyreadstat`-typed integer variables in Stata divide as integers anyway, and float division is the safer semantic when the input is numeric-decimal). The regex protects against `divisor`-like substrings AND function-style `div(...)` calls. |
 | `if(cond, t, f)` | `cond(cond, t, f)` | Rename function only |
-| `coalesce(${a}, ${b})` | `cond(missing(a), b, a)` | 2-arg: first non-missing |
-| `coalesce(${a}, ${b}, ${c})` | `cond(missing(a), cond(missing(b), c, b), a)` | 3-arg: nest `cond()` |
-| `coalesce(a, b, c, d, …)` | *(strip — `COALESCE_TOO_MANY`)* | > 3 args: too complex |
+| `coalesce(a, b, …)` | nested `cond(missing(a), <coalesce(b, …)>, a)` | N-ary: expanded inductively from the right for any arity ≥ 2. `coalesce(a, b)` → `cond(missing(a), b, a)`; `coalesce(a, b, c)` → `cond(missing(a), cond(missing(b), c, b), a)`; and so on. 0- or 1-arg calls are stripped as `COALESCE_BAD_ARITY`. |
 | `min(field1, field2, …)` | `min(var1, var2, …)` | Multi-field version |
 | `max(field1, field2, …)` | `max(var1, var2, …)` | Multi-field version |
 | `format-number(field)` | *(strip)* | Display formatting, not a filter |
+| `relevant(${var})` | `!missing(var)` | SurveyCTO's `relevant()` returns whether a field was shown to the respondent in this session. In a Stata export, "shown" is equivalent to "has a non-missing value" (skip-induced blanks are `.`), so `!missing()` is the faithful translation. |
 
 ---
 
@@ -451,7 +451,7 @@ if numeric, compare directly.
 | `join-if(sep, field, expr)` | *(strip)* | |
 | `index()` | *(strip)* | Current repeat-group row index; meaningless in wide format |
 | `position()` | *(strip)* | Same as `index()`; older syntax |
-| `indexed-repeat(field, group, N)` | *(strip)* | Access Nth repeat instance; becomes `field_N` in wide format but N must be a static literal |
+| `indexed-repeat(field, group, N)` | `field_N` | Access Nth repeat instance. Converter uses balanced-paren argument splitting so nested calls (`indexed-repeat(${x}, ${g}, index())`) walk inner calls first. `N` must be a static integer literal — dynamic `N` strips as `INDEXED_REPEAT_DYNAMIC`. Wrong arity strips as `INDEXED_REPEAT_BAD_ARITY`. |
 | `rank-index(idx, field)` | *(strip)* | Ranking within repeat group |
 | `rank-index-if(idx, field, expr)` | *(strip)* | |
 
@@ -468,7 +468,6 @@ in a Stata dataset. → **Strip all**.
 | `enumerator-id()` | Device/login metadata |
 | `phone-call-log()` / `phone-call-duration()` | Device telephony |
 | `collect-is-phone-app()` | Device type check |
-| `relevant(field)` | Returns whether a field was shown in this session |
 | `once(expr)` | Evaluate-once cache; no Stata equivalent |
 | `pulldata(source, col, key, val)` | Pre-loaded CSV lookup; data merged at export time |
 | `hash(field, …)` | Cryptographic hash |
@@ -504,12 +503,16 @@ only — not the entire condition.
 | `position()` / `index()` | `POSITION` |
 | `once(expr)` | `ONCE` |
 | `jr:choice-name()` | `CHOICE_NAME` |
-| Any repeat-group aggregate (§10) | `REPEAT_AGGREGATE` |
-| Any device/metadata function (§11) | `DEVICE_META` |
+| Any repeat-group aggregate (§10) | `REPEAT_AGGREGATE` (or more specific: `JOIN`, `COUNT_IF`, `SUM_IF`, `MIN_IF`, `MAX_IF`, `RANK_INDEX`, `COUNT_REPEAT`) |
+| Any device/metadata function (§11) | `DEVICE_META` (or more specific: `METADATA_FUNCTION`, `PHONE_FUNCTION`, `HASH`, `UUID`, `RANDOM`, `PULLDATA`, `SEARCH`, `PLUGIN`, `GEO_FUNCTION`, `DATE_FUNCTION`) |
 | `(0)` literal — always false | Drop entire variable: `ALWAYS_FALSE` |
 | Comparison variable absent from dataset | `VAR_ABSENT` — r(111) prevention |
 | String-typed variable with numeric comparison | `STRING_TYPE` — r(109) prevention |
-| `coalesce()` with > 3 arguments | `COALESCE_TOO_MANY` |
+| `coalesce()` with 0 or 1 arguments | `COALESCE_BAD_ARITY` |
+| `indexed-repeat()` with wrong arity | `INDEXED_REPEAT_BAD_ARITY` |
+| `indexed-repeat()` with dynamic (non-literal) index | `INDEXED_REPEAT_DYNAMIC` |
+| `concat()` that resists numeric-string casting | `CONCAT` |
+| Space-separated list functions (§7.4) | `LIST_FUNCTION` |
 
 ### 12.3 Logging requirement
 
@@ -563,22 +566,28 @@ A full parse tree would be required to handle all boolean nesting correctly.
 2. Replace `${var}` → `var`
 3. Strip `string('X')` wrapper → `'X'` (before `selected()`)
 4. Replace empty-string comparisons: `var = ''` → `missing(var)`, `var != ''` → `!missing(var)`
-5. Replace `string-length(var) > 0` → `!missing(var)`, `= 0` → `missing(var)`
+5. Replace `string-length(var) > N` / `= N` / `>= N` / etc. — `> 0` and `= 0` shortcut to `!missing(var)` / `missing(var)`; any other `N` translates to `strlen(var) > N` etc.
 6. Replace `empty(var)` → `missing(var)`
-7. Translate `if(cond, t, f)` → `cond(cond, t, f)`
-8. Translate `coalesce(a, b)` → `cond(missing(a), b, a)`; 3-arg nested; strip if > 3
-9. Translate `regex()`, `contains()`, `starts-with()`, `ends-with()`
-10. Translate `substr(str, s, e)` → `substr(str, s+1, e-s)` (index adjustment)
-11. Translate `concat(…)` with numeric→string casting
-12. Translate `count-selected(var)` → `rowtotal(var_1 var_2 … var_K)` (requires choice list)
-13. Translate Pattern B `selected('list', var)` → `inlist(var, N1, N2, …)`
-14. Translate Pattern A `selected(var, 'N')` → `var == N` (select_one) or `var_N == 1` / `var__N == 1` (select_multiple)
-15. Translate `not(` → `!(`
-16. Replace single `=` → `==` using `(?<![!><=])=(?!=)`
-17. Replace `and` → `&`, `or` → `|` (word-boundary)
-18. Add `& !missing(var)` guard to `>`, `>=`, `<`, `<=` comparisons
-19. Strip untranslatable clauses — check for `not()` context (§12.4)
-20. Clean up extra whitespace
+7. Replace `relevant(var)` → `!missing(var)`
+8. Replace `number(x)` → `x` (drop the wrapper — Stata variables are already numeric-typed via pyreadstat). Leave `int(x)` verbatim (Stata's `int()` has matching truncate-toward-zero semantics).
+9. Replace `lower(x)` → `strlower(x)`, `upper(x)` → `strupper(x)` (Unicode-safe Stata variants)
+10. Translate `if(cond, t, f)` → `cond(cond, t, f)`
+11. Translate `coalesce(a, b, …)` → N-ary inductive nested `cond()` for any arity ≥ 2; strip with `COALESCE_BAD_ARITY` if < 2 args
+12. Translate `regex()`, `contains()`, `starts-with()`, `ends-with()`
+13. Translate `substr(str, s, e)` → `substr(str, s+1, e-s)` (index adjustment)
+14. Translate `concat(…)` with numeric→string casting
+15. Translate `count-selected(var)` → `rowtotal(var_1 var_2 … var_K)` (requires choice list)
+16. Translate `indexed-repeat(target, group, N)` → `target_N` via balanced-paren matching (handles nested calls); strip if N is not a static integer literal or arity is wrong
+17. Translate Pattern B `selected('list', var)` → `inlist(var, N1, N2, …)`
+18. Translate Pattern A `selected(var, 'N')` → `var == N` (select_one) or `var_N == 1` / `var__N == 1` (select_multiple)
+19. Translate `not(` → `!(`
+20. Replace single `=` → `==` using `(?<![!><=])=(?!=)`
+21. Replace `div` → `/` (word-boundary; reject function-style `div(...)`)
+22. Replace `A mod B` → `mod(A, B)` for simple identifier/numeric operands
+23. Replace `and` → `&`, `or` → `|` (word-boundary)
+24. Add `& !missing(var)` guard to `>`, `>=`, `<`, `<=` comparisons (LHS must start with letter or underscore — guards against numeric literals on LHS)
+25. Strip untranslatable clauses — check for `not()` context (§12.4); also runs an orphan-comparison cleanup so `_SENTINEL > 5` doesn't leave `> 5` dangling
+26. Clean up extra whitespace
 
 ### Test cases
 
@@ -629,8 +638,8 @@ assert convert("coalesce(${a}, ${b}, ${c})") == "cond(missing(a), cond(missing(b
 ## See Also
 
 - [STATA.md — SurveyCTO Skip Logic in Stata](STATA.md#surveycto-skip-logic-in-stata) — runtime pitfalls (`r(109)`, `r(111)`, `r(2000)`)
-- `transformers/logic_converter.py` — implementation file
+- `transformers/logic_converter.py` — implementation file. The `LogicConverter.validate_translations(conditions)` method scans a list of already-converted Stata skip-logic strings and reports how many still contain untranslated SurveyCTO calls — useful for spotting converter gaps after extending the form coverage.
 - `extractors/json_extractor.py` — caller that builds the `question_types` dict
-- `scan_skip_logic_funcs.py` — scan tool to count untranslated functions
+- [`surveycto_refs/expressions.md`](surveycto_refs/expressions.md) — in-house function-catalog primer (the converter's working reference for what each SurveyCTO function does)
 - SurveyCTO Expressions Reference: https://docs.surveycto.com/02-designing-forms/01-core-concepts/09.expressions.html
 - SurveyCTO Data Export Format: https://docs.surveycto.com/05-exporting-and-publishing-data/01-overview/09.data-format.html
