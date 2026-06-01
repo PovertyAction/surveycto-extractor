@@ -78,8 +78,9 @@ class LogicConverter:
     ) -> str:
         """
         Find every occurrence of `func_pattern(` in `expr` and replace the
-        entire balanced call (including nested parens) using `replacer(args)`
-        where `args` is the inner argument string.
+        entire balanced call (including nested parens) using
+        `replacer(args, full_call)` where `args` is the inner argument string
+        and `full_call` is the complete matched call text (for logging).
 
         `func_pattern` is a regex matching the function NAME alone (without
         the opening paren).
@@ -100,9 +101,21 @@ class LogicConverter:
                 out.append(expr[m.start():])
                 break
             args = expr[open_paren + 1:close_paren]
-            out.append(replacer(args))
+            full_call = expr[m.start():close_paren + 1]
+            out.append(replacer(args, full_call))
             i = close_paren + 1
         return ''.join(out)
+
+    @staticmethod
+    def _strip_balanced(expr: str, func_pattern: str, varname: str, reason: str) -> str:
+        """Strip every balanced `func_pattern(...)` call to `_SENTINEL`, logging
+        each with `reason`. Balanced matching means a nested call inside the
+        args (e.g. `join(',', if(${a}, ${b}, ${c}))`) is removed as one unit
+        rather than truncated at the first `)`, which would orphan a paren."""
+        def _replacer(_args: str, full_call: str) -> str:
+            _log_strip(varname, full_call, reason)
+            return _SENTINEL
+        return LogicConverter._sub_function_balanced(expr, func_pattern, _replacer)
 
     @staticmethod
     def _split_top_level_args(args_str: str) -> List[str]:
@@ -131,7 +144,8 @@ class LogicConverter:
 
     @staticmethod
     def _translate_selected(
-        match: re.Match,
+        args_str: str,
+        full_call: str,
         question_types: Dict[str, str],
         varname: str,
     ) -> str:
@@ -148,11 +162,16 @@ class LogicConverter:
 
         Pattern C  selected(var, other_var)  — dynamic second arg
           → _SENTINEL   (logged as DYNAMIC_SELECTED)
+
+        `args_str` is the inner argument string from balanced-paren matching and
+        `full_call` the complete call text. Args are split at top-level commas
+        (paren-depth aware) so a nested call in the second arg — e.g.
+        `selected(${x}, format-date(${y}, '%Y'))` — is kept intact (and stripped
+        as Pattern C) instead of being truncated at the inner comma/paren.
         """
-        args_str = match.group(1)
-        parts = [p.strip() for p in args_str.split(',', 1)]
+        parts = LogicConverter._split_top_level_args(args_str)
         if len(parts) != 2:
-            return match.group(0)
+            return full_call
 
         first, second = parts
 
@@ -165,7 +184,7 @@ class LogicConverter:
             try:
                 int_codes = [int(c) for c in codes]
             except ValueError:
-                _log_strip(varname, match.group(0), "PATTERN_B_NON_INT")
+                _log_strip(varname, full_call, "PATTERN_B_NON_INT")
                 return _SENTINEL
             return f"inlist({second}, {', '.join(str(c) for c in int_codes)})"
 
@@ -177,7 +196,7 @@ class LogicConverter:
         numeric  = quoted or unquoted
         if not numeric:
             # Pattern C — dynamic second arg
-            _log_strip(varname, match.group(0), "DYNAMIC_SELECTED")
+            _log_strip(varname, full_call, "DYNAMIC_SELECTED")
             return _SENTINEL
 
         code_str = numeric.group(1)
@@ -518,38 +537,43 @@ class LogicConverter:
         # --- Step 10b: indexed-repeat(target, group, idx) → target_<idx> ---
         # Uses balanced-paren matching so nested calls like
         # `indexed-repeat(${a}, ${g}, index())` are handled correctly.
-        def _ir_replacer(args: str) -> str:
+        def _ir_replacer(args: str, full_call: str) -> str:
             parts = LogicConverter._split_top_level_args(args)
             if len(parts) < 3:
-                _log_strip(varname, f"indexed-repeat({args})", "INDEXED_REPEAT_BAD_ARITY")
+                _log_strip(varname, full_call, "INDEXED_REPEAT_BAD_ARITY")
                 return _SENTINEL
             if len(parts) > 3:
                 # >3 args at the top level is an arity error, not a nested
                 # call. Nesting (indexed-repeat inside another function) is
                 # handled by _sub_function_balanced walking inner calls
                 # separately, before this replacer runs.
-                _log_strip(varname, f"indexed-repeat({args})", "INDEXED_REPEAT_BAD_ARITY")
+                _log_strip(varname, full_call, "INDEXED_REPEAT_BAD_ARITY")
                 return _SENTINEL
             target, _grp, idx = parts
             idx = idx.strip()
             if re.match(r'^-?\d+$', idx):
                 return f"{target}_{idx}"
-            _log_strip(varname, f"indexed-repeat({args})", "INDEXED_REPEAT_DYNAMIC")
+            _log_strip(varname, full_call, "INDEXED_REPEAT_DYNAMIC")
             return _SENTINEL
         expr = LogicConverter._sub_function_balanced(expr, r'indexed-repeat', _ir_replacer)
 
-        # --- Step 11: selected() — Patterns A and B -------------------------
-        def _sel_sub(m: re.Match) -> str:
-            return LogicConverter._translate_selected(m, question_types, varname)
-        expr = re.sub(r'\bselected\s*\(([^)]+)\)', _sel_sub, expr, flags=re.IGNORECASE)
+        # --- Step 10c: count-selected() with no codes → strip ---------------
+        # Done before the selected() step so the trailing `selected(` substring
+        # inside `count-selected(` is never seen by a bare selected matcher.
+        expr = LogicConverter._strip_balanced(expr, r'count-selected', varname, "COUNT_SEL_NO_CODES")
+
+        # --- Step 11: selected() — Patterns A and B (balanced-paren) --------
+        # Balanced matching captures the whole call, so a nested call in the
+        # second arg (selected(${x}, format-date(${y}, '%Y'))) is handled as a
+        # unit and stripped as Pattern C rather than truncated at the first ')'.
+        def _sel_replacer(args: str, full_call: str) -> str:
+            return LogicConverter._translate_selected(args, full_call, question_types, varname)
+        expr = LogicConverter._sub_function_balanced(expr, r'selected', _sel_replacer)
 
         # --- Step 12: Strip known-untranslatable function calls -------------
-        # Any remaining selected() calls are Pattern C (dynamic).
-        # (Patterns A and B were resolved above; residual = dynamic.)
-        def _strip_sel(m: re.Match) -> str:
-            _log_strip(varname, m.group(0), "DYNAMIC_SELECTED")
-            return _SENTINEL
-        expr = re.sub(r'\bselected\s*\([^)]+\)', _strip_sel, expr, flags=re.IGNORECASE)
+        # Safety net: any selected() still present is Pattern C (dynamic).
+        # _translate_selected already strips those, so this rarely fires.
+        expr = LogicConverter._strip_balanced(expr, r'selected', varname, "DYNAMIC_SELECTED")
 
         # position() / index()
         def _strip_pos(m: re.Match) -> str:
@@ -569,64 +593,73 @@ class LogicConverter:
         # Bare calls (no comparison):
         expr = re.sub(r'\b(?:position|index)\s*\([^)]*\)', _strip_pos, expr, flags=re.IGNORECASE)
 
-        # once()
-        def _strip_once(m: re.Match) -> str:
-            _log_strip(varname, m.group(0), "ONCE")
-            return _SENTINEL
-        expr = re.sub(r'\bonce\s*\([^)]+\)', _strip_once, expr, flags=re.IGNORECASE)
+        # once() / jr:choice-name() / choice-label() / selected-at() — each can
+        # carry a nested call in its args, so strip the whole balanced call.
+        expr = LogicConverter._strip_balanced(expr, r'once', varname, "ONCE")
+        expr = LogicConverter._strip_balanced(expr, r'jr:choice-name', varname, "CHOICE_NAME")
+        expr = LogicConverter._strip_balanced(expr, r'choice-label', varname, "CHOICE_NAME")
+        expr = LogicConverter._strip_balanced(expr, r'selected-at', varname, "SELECTED_AT")
 
-        # jr:choice-name() / choice-label()
-        def _strip_cn(m: re.Match) -> str:
-            _log_strip(varname, m.group(0), "CHOICE_NAME")
-            return _SENTINEL
-        expr = re.sub(r'jr:choice-name\s*\([^)]+\)', _strip_cn, expr, flags=re.IGNORECASE)
-        expr = re.sub(r'\bchoice-label\s*\([^)]+\)', _strip_cn, expr, flags=re.IGNORECASE)
+        # --- Step 12c: strip untranslatable function FAMILIES (balanced) -----
+        # Multi-argument families whose args may contain nested calls. Balanced
+        # matching strips the entire call so a nested function (e.g.
+        # join(',', if(${a},${b},${c}))) cannot leave an orphan ')'. The `\s*\(`
+        # anchor keeps name-prefix pairs distinct (`join` won't eat `join-if`,
+        # `date` won't eat `date-time`/`decimal-date-time`), so order is only for
+        # readability. Run before the narrow regex strips so an enclosing family
+        # call is removed before its bare-ident inner (sum/min/max) is reached.
+        _BALANCED_STRIP_FUNCS = [
+            (r'join-if',           "JOIN_IF"),
+            (r'join',              "JOIN"),
+            (r'count-if',          "COUNT_IF"),
+            (r'sum-if',            "SUM_IF"),
+            (r'min-if',            "MIN_IF"),
+            (r'max-if',            "MAX_IF"),
+            (r'rank-index(?:-if)?', "RANK_INDEX"),
+            (r'count-items',       "LIST_FUNCTION"),
+            (r'item-at',           "LIST_FUNCTION"),
+            (r'item-index',        "LIST_FUNCTION"),
+            (r'item-present',      "LIST_FUNCTION"),
+            (r'de-duplicate',      "LIST_FUNCTION"),
+            (r'rank-value',        "LIST_FUNCTION"),
+            (r'distance-between',  "GEO_FUNCTION"),
+            (r'area',              "GEO_FUNCTION"),
+            (r'geo-scatter',       "GEO_FUNCTION"),
+            (r'short-geopoint',    "GEO_FUNCTION"),
+            (r'decimal-date-time', "DATE_FUNCTION"),
+            (r'decimal-time',      "DATE_FUNCTION"),
+            (r'format-date-time',  "DATE_FUNCTION"),
+            (r'date-time',         "DATE_FUNCTION"),
+            (r'date',              "DATE_FUNCTION"),
+            (r'hash',              "HASH"),
+            (r'pulldata',          "PULLDATA"),
+            (r'search',            "SEARCH"),
+            (r'plug-in-metadata',  "PLUGIN"),
+            (r'concat',            "CONCAT"),
+            (r'format-number',     "CONCAT"),
+        ]
+        for name_pat, reason in _BALANCED_STRIP_FUNCS:
+            expr = LogicConverter._strip_balanced(expr, name_pat, varname, reason)
 
-        # count-selected() that couldn't be expanded (no codes available)
-        def _strip_cs(m: re.Match) -> str:
-            _log_strip(varname, m.group(0), "COUNT_SEL_NO_CODES")
-            return _SENTINEL
-        expr = re.sub(r'\bcount-selected\s*\([^)]+\)', _strip_cs, expr, flags=re.IGNORECASE)
+        # --- Step 12d: strip narrow / no-arg untranslatable calls (regex) ----
+        # These are deliberately shape-specific: the aggregate forms match a
+        # SINGLE bare identifier only (so multi-field `min(a, b)` valid Stata is
+        # left alone), and the metadata/phone/date forms take no args. No nested
+        # calls are possible, so a bounded regex is correct and simplest.
+        def _make_stripper(rsn: str):
+            def _strip(m: re.Match) -> str:
+                _log_strip(varname, m.group(0), rsn)
+                return _SENTINEL
+            return _strip
 
-        # selected-at()
-        def _strip_sa(m: re.Match) -> str:
-            _log_strip(varname, m.group(0), "SELECTED_AT")
-            return _SENTINEL
-        expr = re.sub(r'\bselected-at\s*\([^)]+\)', _strip_sa, expr, flags=re.IGNORECASE)
-
-        # --- Step 12c: strip untranslatable function families with named reasons ---
-        # Each entry: (regex, reason). Patterns use non-greedy [^)]+? so they
-        # do not span balanced parens beyond a single function call.
-        _UNTRANSLATABLE_FUNCS = [
-            # repeat aggregates with conditional / multi-arg semantics that
-            # we cannot resolve without per-iteration expansion
-            (r'\bjoin\s*\([^)]+\)',          "JOIN"),
-            (r'\bjoin-if\s*\([^)]+\)',       "JOIN_IF"),
-            (r'\bcount-if\s*\([^)]+\)',      "COUNT_IF"),
-            (r'\bsum-if\s*\([^)]+\)',        "SUM_IF"),
-            (r'\bmin-if\s*\([^)]+\)',        "MIN_IF"),
-            (r'\bmax-if\s*\([^)]+\)',        "MAX_IF"),
-            (r'\brank-index(?:-if)?\s*\([^)]+\)', "RANK_INDEX"),
-            # `count(${group})` — bare count of repeat instances, no Stata equivalent
+        _REGEX_STRIP_FUNCS = [
+            # `count(${group})` — bare count of repeat instances
             (r'\bcount\s*\(\s*\w+\s*\)',     "COUNT_REPEAT"),
-            # list-of-items helpers
-            (r'\bcount-items\s*\([^)]+\)',   "LIST_FUNCTION"),
-            (r'\bitem-at\s*\([^)]+\)',       "LIST_FUNCTION"),
-            (r'\bitem-index\s*\([^)]+\)',    "LIST_FUNCTION"),
-            (r'\bitem-present\s*\([^)]+\)',  "LIST_FUNCTION"),
-            (r'\bde-duplicate\s*\([^)]+\)',  "LIST_FUNCTION"),
-            (r'\brank-value\s*\([^)]+\)',    "LIST_FUNCTION"),
-            # geography
-            (r'\bdistance-between\s*\([^)]+\)', "GEO_FUNCTION"),
-            (r'\barea\s*\([^)]+\)',          "GEO_FUNCTION"),
-            (r'\bgeo-scatter\s*\([^)]+\)',   "GEO_FUNCTION"),
-            (r'\bshort-geopoint\s*\([^)]+\)',"GEO_FUNCTION"),
-            # date / time conversion functions — Stata's date model differs
-            (r'\bdecimal-date-time\s*\([^)]+\)', "DATE_FUNCTION"),
-            (r'\bdecimal-time\s*\([^)]+\)',  "DATE_FUNCTION"),
-            (r'\bdate-time\s*\([^)]+\)',     "DATE_FUNCTION"),
-            (r'\bformat-date-time\s*\([^)]+\)', "DATE_FUNCTION"),
-            (r'\bdate\s*\([^)]+\)',          "DATE_FUNCTION"),
+            # 1-arg aggregates over repeats: bare ident inside () only
+            (r'\bsum\s*\(\s*\w+\s*\)',       "AGGREGATE_REPEAT"),
+            (r'\bmin\s*\(\s*\w+\s*\)',       "AGGREGATE_REPEAT"),
+            (r'\bmax\s*\(\s*\w+\s*\)',       "AGGREGATE_REPEAT"),
+            # date / time no-arg functions
             (r'\bnow\s*\(\s*\)',             "DATE_FUNCTION"),
             (r'\btoday\s*\(\s*\)',           "DATE_FUNCTION"),
             (r'\bduration\s*\(\s*\)',        "DATE_FUNCTION"),
@@ -640,32 +673,13 @@ class LogicConverter:
             (r'\bphone-call-log\s*\(\s*\)', "PHONE_FUNCTION"),
             (r'\bphone-call-duration\s*\(\s*\)', "PHONE_FUNCTION"),
             (r'\bcollect-is-phone-app\s*\(\s*\)', "PHONE_FUNCTION"),
-            # randomization / identity / external data / plug-ins
-            (r'\bhash\s*\([^)]+\)',          "HASH"),
+            # randomization / identity
             (r'\buuid\s*\(\s*\)',            "UUID"),
             (r'\brandom\s*\(\s*\)',          "RANDOM"),
-            (r'\bpulldata\s*\([^)]+\)',      "PULLDATA"),
-            (r'\bsearch\s*\([^)]+\)',        "SEARCH"),
-            (r'\bplug-in-metadata\s*\([^)]+\)', "PLUGIN"),
-            # 1-arg aggregates over repeats: bare ident inside ()
-            # Stata can express these as rowtotal/rowmin/rowmax over enumerated
-            # suffix columns, but only when we know the iteration count.
-            # Without that, strip with a specific reason for visibility.
-            (r'\bsum\s*\(\s*\w+\s*\)',       "AGGREGATE_REPEAT"),
-            (r'\bmin\s*\(\s*\w+\s*\)',       "AGGREGATE_REPEAT"),
-            (r'\bmax\s*\(\s*\w+\s*\)',       "AGGREGATE_REPEAT"),
-            # string concat / formatting — no clean Stata translation in a
-            # boolean expression context
-            (r'\bconcat\s*\([^)]+\)',        "CONCAT"),
+            # newline literal
             (r'\blinebreak\s*\(\s*\)',       "CONCAT"),
-            (r'\bformat-number\s*\([^)]+\)', "CONCAT"),
         ]
-        for pattern, reason in _UNTRANSLATABLE_FUNCS:
-            def _make_stripper(rsn: str):
-                def _strip(m: re.Match) -> str:
-                    _log_strip(varname, m.group(0), rsn)
-                    return _SENTINEL
-                return _strip
+        for pattern, reason in _REGEX_STRIP_FUNCS:
             expr = re.sub(pattern, _make_stripper(reason), expr, flags=re.IGNORECASE)
 
         # --- Step 12b: strip entire not(…) when its body contains a sentinel --
