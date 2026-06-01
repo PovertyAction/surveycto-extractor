@@ -600,8 +600,11 @@ def _fn_regex(args, ctx):
     pattern = _to_string(args[1])
     try:
         return re.search(pattern, s) is not None
-    except re.error:
-        return False
+    except re.error as exc:
+        # Don't silently mark every row "no match": a malformed pattern is a
+        # real error. Raise so safe_evaluate() applies the caller's fallback
+        # and logs it, per the evaluator's "log or raise -- never hide" rule.
+        raise EvaluationError(f"regex() pattern failed to compile: {pattern!r} ({exc})")
 
 
 @_register("index")
