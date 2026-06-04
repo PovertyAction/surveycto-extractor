@@ -40,7 +40,13 @@ Per respondent the walker:
    indicator columns — the exact wide-export shape SurveyCTO produces.
 7. Inside a repeat group, variables are wide-suffixed (`var_1, var_2, …`) and
    per-iteration `index()` is exposed so constraint expressions that branch on
-   iteration work correctly.
+   iteration work correctly. **Nested repeats** are modelled fully: a field in
+   `[outer, inner]` is expanded over both levels (`var_1_1, var_1_2, …,
+   var_2_1, …`), each inner repeat resolves its own count per outer iteration
+   (`inner_count_1, inner_count_2, …`), and the column header is the rectangular
+   `max(outer) × max(inner)` grid SurveyCTO pads to. This mirrors the suffix
+   logic the variable dictionary uses to reconstruct nested rosters from real
+   data (`create_variable_dictionaries._build_repeat_tree`).
 
 ## CLI flags
 
@@ -206,6 +212,48 @@ Remaining mismatches are dominated by:
    CSV). The `numbers_decimal` / `numbers` / `numbers_phone` appearance
    hints are honoured — those text fields emit digit-only content to
    match form-designer intent (preserves leading zeros in phone numbers).
+
+## Missing-value semantics: evaluator NaN vs Stata `.`
+
+The expression evaluator and the Stata cleaning pipeline represent "missing"
+differently, and they do **not** behave the same way in comparisons. This
+matters when you reason about how one relevance expression evaluates in the
+synth versus how the same logic evaluates after the SurveyCTO data is imported
+into Stata.
+
+- **In the evaluator** (`transformers/expression_evaluator.py`), a blank /
+  unanswered field **coerces to `0` in numeric context** (arithmetic and
+  comparison) — see `_to_number`, which maps `""` to `0.0`. So with a blank
+  `age`, `${age} < 18` is **True** (`0 < 18`) and `${age} > 18` is **False**.
+  Only an *explicit* `float('nan')` operand — e.g. `decimal-date-time()` of an
+  unparseable value — forces a comparison to **False** on both sides. (Note this
+  already diverges from real SurveyCTO, where an empty numeric field makes the
+  comparison false; the synth's 0-coercion is a generator convenience, not a
+  faithful model of form-engine missing semantics.)
+- **In Stata**, an unanswered numeric field is system missing `.`, which Stata
+  treats as **positive infinity**: `. > 18` is **True**, `. < 18` is False. This
+  is the exact trap documented in
+  [`coding_guidelines/SURVEYCTO_RELEVANCE_TRANSLATION.md` §4](../coding_guidelines/SURVEYCTO_RELEVANCE_TRANSLATION.md#4-the-stata-missing-value-trap-for-numeric-comparisons),
+  which is why `logic_converter.py` appends `& !missing(var)` to every `>`,
+  `>=`, `<`, `<=` it translates.
+
+Two consequences worth keeping in mind:
+
+1. **The synth is structurally correct, not semantically Stata-equivalent.** A
+   relevance gate may keep a row blank in the synthetic CSV (SurveyCTO/evaluator
+   semantics) while the *translated Stata condition* would have included that row
+   (or vice-versa) if the missing guard were absent. The synth mirrors how the
+   form behaved at collection time; it is not a model of the downstream Stata
+   `if` logic. Use it to verify dataset *shape* and that cleaning code *parses*
+   and *types* correctly — not to predict Stata truth values for missing data.
+2. **The converter does not translate missing-value handling for you.** Clauses
+   it cannot translate are stripped and recorded in the strip log (see below),
+   never silently reinterpreted. Likewise, when an expression hands the evaluator
+   something malformed (for example a `regex()` pattern that fails to compile),
+   the evaluator now **raises** rather than silently returning a value;
+   `safe_evaluate()` then applies the caller's documented fallback (relevance
+   defaults True, calculation defaults empty) and logs it, so a bad pattern shows
+   up as a strip-log entry instead of silently marking every row "no match".
 
 ## Auto-metadata fields
 
