@@ -26,6 +26,9 @@ Per respondent the walker:
 7. Inside a repeat group, variables are wide-suffixed (``var_1, var_2,
    ...``). Per-iteration ``index()`` is exposed to the evaluator so
    constraint expressions that branch on iteration work correctly.
+   Nested repeats expand over the full enclosing chain (``var_1_1,
+   var_1_2, ...``) with one inner count per outer iteration
+   (``inner_count_1, ...``); see the suffix model below.
 
 Output: ``<output_dir>/<survey>_synthetic.csv`` + a strip-log
 (``<survey>_synthetic.strip.log``) listing expressions the evaluator
@@ -43,8 +46,9 @@ import random
 import re
 import uuid
 from dataclasses import dataclass, field
+from itertools import product
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Optional, Set, Tuple
 
 from extractors.pulldata_loader import (
     MissingPullDataError,
@@ -525,11 +529,75 @@ def _resolve_match_value(expr: str, row: Dict[str, Any]) -> Optional[str]:
     return s
 
 
-def _find_innermost_repeat(group_path: List[str], repeats: Set[str]) -> Optional[str]:
-    for g in reversed(group_path or []):
-        if g in repeats:
-            return g
-    return None
+# ── Nested-repeat suffix model ─────────────────────────────────────────────────
+# A field's wide-export column suffix is the chain of iteration indices of ALL
+# its enclosing repeat groups, outermost-first: a field in repeats [outer, inner]
+# at iterations (o, i) is column ``var_o_i``. A repeat group's ``repeat_count``
+# variable lives at its PARENT level (its own ``group_path`` excludes the repeat
+# it counts), so it carries only the ancestor suffix: the inner count is
+# ``inner_count_o`` (one per outer iteration); a top-level count is unsuffixed.
+#
+# This mirrors the resolver in ``create_variable_dictionaries._build_repeat_tree``
+# (depth → ``_{p1}_..._{iter}`` suffix pattern), so the simulated wide-export
+# contract matches what the variable dictionary reconstructs from real data.
+
+
+def _repeat_chain(group_path: List[str], repeats: Set[str]) -> List[str]:
+    """Ordered list of enclosing repeat groups for a field, outermost-first.
+
+    Filters ``group_path`` (which lists every enclosing group, repeats and
+    plain groups alike) down to just the repeat groups. The length is the
+    field's repeat nesting depth; the list drives both suffix construction
+    and per-iteration expansion.
+    """
+    return [g for g in (group_path or []) if g in repeats]
+
+
+def _suffix(combo: Tuple[int, ...]) -> str:
+    """``(2, 3) -> '_2_3'``; ``() -> ''`` (top-level, no suffix)."""
+    return "".join(f"_{i}" for i in combo)
+
+
+def _enumerate_combos(
+    chain: List[str], counts: Dict[str, Dict[Tuple[int, ...], int]]
+) -> Iterator[Tuple[int, ...]]:
+    """Yield every iteration-index tuple for a field's repeat ``chain`` using
+    the per-respondent resolved ``counts``.
+
+    ``counts[R][prefix]`` is the resolved iteration count for repeat ``R``
+    under the ancestor-index ``prefix`` (the tuple of indices of R's
+    enclosing repeats). Counts are therefore ragged: each outer iteration
+    can have its own inner count. An empty chain yields a single empty
+    tuple (top-level field, no expansion).
+    """
+
+    def _rec(prefix: Tuple[int, ...], depth: int) -> Iterator[Tuple[int, ...]]:
+        if depth == len(chain):
+            yield prefix
+            return
+        n = counts.get(chain[depth], {}).get(prefix, 0)
+        for i in range(1, n + 1):
+            yield from _rec(prefix + (i,), depth + 1)
+
+    yield from _rec((), 0)
+
+
+def _grid_combos(
+    chain: List[str], max_iter: Dict[str, int]
+) -> Iterator[Tuple[int, ...]]:
+    """Yield the rectangular column grid for a field's repeat ``chain``.
+
+    Unlike the per-respondent (ragged) :func:`_enumerate_combos`, the column
+    header is rectangular: every enclosing repeat ``R`` contributes
+    ``1..max_iter[R]`` independently (``product`` over levels), matching how
+    SurveyCTO pads its wide export. Outer indices vary slowest, so the
+    columns come out ``var_1_1, var_1_2, ..., var_2_1, ...``.
+    """
+    if not chain:
+        yield ()
+        return
+    ranges = [range(1, max_iter.get(c, 1) + 1) for c in chain]
+    yield from product(*ranges)
 
 
 def _is_relevant(
@@ -720,7 +788,12 @@ def _walk_one(
     """
 
     row: Dict[str, Any] = {}
-    repeat_counts: Dict[str, int] = {}
+    # Per-respondent resolved repeat counts, keyed by repeat name then by the
+    # ancestor-index tuple (the indices of the repeat's enclosing repeats).
+    # Top-level repeats key on the empty tuple ``()``; an inner repeat nested
+    # under one outer level keys on ``(o,)`` so each outer iteration can carry
+    # its own inner count (ragged rosters).
+    counts: Dict[str, Dict[Tuple[int, ...], int]] = {}
     force_values = force_values or {}
     # Pre-seed force_values into the row so questions earlier in the
     # form that reference a force-targeted variable in their ``relevance``
@@ -764,32 +837,41 @@ def _walk_one(
             if dynamic:
                 choices = dynamic
 
-        # ── repeat_count: resolve N for this respondent. If the repeat
-        # group is gated by a relevance that evaluated false, the count
-        # column is blank and the repeat block contributes nothing.
+        # ── repeat_count: resolve N once per ancestor iteration. A top-level
+        # repeat resolves a single count (key ``()``); an inner repeat nested
+        # under outer repeats resolves one count per outer-iteration tuple, so
+        # the count column is wide-suffixed by the ancestors (``inner_count_o``).
+        # If a repeat is gated by a relevance that evaluated false for some
+        # combination, that count is 0 and the block contributes nothing there.
         if q_type == "repeat_count":
             repeat_name = q.get("repeat_group_name") or ""
-            ctx = _make_ctx(var_name, [])
-            if not _is_relevant(q, ctx, strip_log, var_name):
-                repeat_counts[repeat_name] = 0
-                row[var_name] = ""
-                continue
-            n = _resolve_repeat_count(
-                q.get("calculation"), ctx, strip_log, var_name, rng, constraint,
-            )
-            repeat_counts[repeat_name] = n
-            row[var_name] = n
+            ancestors = _repeat_chain(group_path, repeats)
+            slot = counts.setdefault(repeat_name, {})
+            for combo in _enumerate_combos(ancestors, counts):
+                col = f"{var_name}{_suffix(combo)}"
+                ctx = _make_ctx(col, list(zip(ancestors, combo)))
+                if not _is_relevant(q, ctx, strip_log, col):
+                    slot[combo] = 0
+                    row[col] = ""
+                    continue
+                n = _resolve_repeat_count(
+                    q.get("calculation"), ctx, strip_log, col, rng, constraint,
+                )
+                slot[combo] = n
+                row[col] = n
             continue
 
-        # ── Variables inside a repeat: iterate N times with wide-suffix keys
-        repeat_parent = _find_innermost_repeat(group_path, repeats)
-        if repeat_parent:
-            n = repeat_counts.get(repeat_parent, 1)
+        # ── Variables inside one or more repeats: expand over the full chain
+        # of enclosing repeats. A field in [outer, inner] gets a column per
+        # (outer, inner) iteration pair, keyed ``var_o_i``; a singly-nested
+        # field keeps the original ``var_i`` shape.
+        chain = _repeat_chain(group_path, repeats)
+        if chain:
             forced = force_values.get(var_name)
-            for i in range(1, n + 1):
-                key = f"{var_name}_{i}"
-                stack = [(repeat_parent, i)]
-                ctx = _make_ctx(key, stack)
+            for combo in _enumerate_combos(chain, counts):
+                suffix = _suffix(combo)
+                key = f"{var_name}{suffix}"
+                ctx = _make_ctx(key, list(zip(chain, combo)))
                 # --force-value bypasses relevance: the user is explicitly
                 # asking for the variable to be populated, so we treat it
                 # as relevant and write the forced value. This is the only
@@ -802,7 +884,7 @@ def _walk_one(
                             cv = str(c.get("value", "")).strip()
                             if not cv:
                                 continue
-                            row[f"{var_name}_{_choice_suffix(cv)}_{i}"] = ""
+                            row[f"{var_name}_{_choice_suffix(cv)}{suffix}"] = ""
                     continue
                 if var_name in force_values:
                     value = force_values[var_name]
@@ -814,9 +896,9 @@ def _walk_one(
                 if q_type == "select_multiple":
                     # Store the formatted space-separated string in the row
                     # so downstream `selected(${var}, X)` inside the same
-                    # repeat (which resolves `${var}` -> `var_<i>` via the
-                    # repeat stack) can tokenise it correctly. The column
-                    # builder omits this `var_<i>` cell from CSV; it's
+                    # repeat (which resolves `${var}` -> the suffixed key via
+                    # the repeat stack) can tokenise it correctly. The column
+                    # builder omits this parent cell from CSV; it's
                     # internal-only.
                     csv_str = _format_for_csv(value)
                     row[key] = csv_str
@@ -825,7 +907,7 @@ def _walk_one(
                         cv = str(c.get("value", "")).strip()
                         if not cv:
                             continue
-                        bin_key = f"{var_name}_{_choice_suffix(cv)}_{i}"
+                        bin_key = f"{var_name}_{_choice_suffix(cv)}{suffix}"
                         row[bin_key] = 1 if cv in selected_tokens else 0
                 else:
                     row[key] = value
@@ -867,6 +949,12 @@ def _walk_one(
         else:
             row[var_name] = value
 
+    # Collapse the ragged per-ancestor counts to the max iterations seen for
+    # each repeat in this respondent. Pass 1 aggregates these into the global
+    # ``max_iter`` that sizes the rectangular column grid.
+    repeat_counts = {
+        r: (max(slot.values()) if slot else 0) for r, slot in counts.items()
+    }
     return WalkResult(row=row, repeat_counts=repeat_counts)
 
 
@@ -1021,15 +1109,22 @@ def _build_column_order(
                 choices = dynamic
 
         if q_type == "repeat_count":
-            _push(var_name)
+            # A repeat's count variable lives at its PARENT level, so it is
+            # suffixed by the count's own enclosing repeats (its ancestors),
+            # NOT by the repeat it counts. A top-level count is unsuffixed; an
+            # inner count nested under one outer repeat emits ``count_1`` ..
+            # ``count_<max outer>``.
+            ancestors = _repeat_chain(group_path, repeats)
+            for combo in _grid_combos(ancestors, max_iter):
+                _push(f"{var_name}{_suffix(combo)}")
             continue
 
-        repeat_parent = _find_innermost_repeat(group_path, repeats)
-        if repeat_parent:
-            n = max_iter.get(repeat_parent, 1)
-            for i in range(1, n + 1):
+        chain = _repeat_chain(group_path, repeats)
+        if chain:
+            for combo in _grid_combos(chain, max_iter):
+                suffix = _suffix(combo)
                 # select_multiple inside a repeat: SurveyCTO export emits ONLY
-                # the per-choice indicator columns (no ``var_<iter>`` parent).
+                # the per-choice indicator columns (no parent cell).
                 # This is NOT a bug — it's how real SurveyCTO wide exports are
                 # shaped. Empirically verified against a production wide
                 # export on a `select_multiple` inside a repeat group:
@@ -1042,9 +1137,9 @@ def _build_column_order(
                         cv = str(c.get("value", "")).strip()
                         if not cv:
                             continue
-                        _push(f"{var_name}_{_choice_suffix(cv)}_{i}")
+                        _push(f"{var_name}_{_choice_suffix(cv)}{suffix}")
                 else:
-                    _push(f"{var_name}_{i}")
+                    _push(f"{var_name}{suffix}")
         else:
             # Top-level select_multiple: emit the parent space-separated
             # cell AND per-choice indicator columns. SurveyCTO's "Publish ..."

@@ -40,7 +40,13 @@ Per respondent the walker:
    indicator columns — the exact wide-export shape SurveyCTO produces.
 7. Inside a repeat group, variables are wide-suffixed (`var_1, var_2, …`) and
    per-iteration `index()` is exposed so constraint expressions that branch on
-   iteration work correctly.
+   iteration work correctly. **Nested repeats** are modelled fully: a field in
+   `[outer, inner]` is expanded over both levels (`var_1_1, var_1_2, …,
+   var_2_1, …`), each inner repeat resolves its own count per outer iteration
+   (`inner_count_1, inner_count_2, …`), and the column header is the rectangular
+   `max(outer) × max(inner)` grid SurveyCTO pads to. This mirrors the suffix
+   logic the variable dictionary uses to reconstruct nested rosters from real
+   data (`create_variable_dictionaries._build_repeat_tree`).
 
 ## CLI flags
 

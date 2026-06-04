@@ -422,9 +422,21 @@ class EvalContext:
         """Resolve a ${var} reference against the row state, accounting for
         wide-format repeat-suffix expansion if we're inside a repeat."""
         if self.repeat_stack:
-            # Innermost first — try the deepest suffix match.
+            # Innermost first — try the deepest single-suffix match. Covers
+            # single-level repeats (``var_i``) and the evaluator's own repeat
+            # aggregation (count/sum/join push one level at a time).
             for _rep, idx in reversed(self.repeat_stack):
                 key = f"{name}_{idx}"
+                if key in self.row:
+                    return self.row[key]
+            # Nested repeats store combined suffixes (``var_o_i``). Try the
+            # full ancestor→self chain, then progressively shorter prefixes so
+            # an inner-context reference to an OUTER-level field (stored
+            # ``var_o``) still resolves. Outermost-first matches how
+            # ``_repeat_chain`` builds the suffix.
+            idxs = [idx for _rep, idx in self.repeat_stack]
+            for k in range(len(idxs), 1, -1):
+                key = name + "".join(f"_{j}" for j in idxs[:k])
                 if key in self.row:
                     return self.row[key]
         if name in self.row:
