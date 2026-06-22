@@ -52,6 +52,19 @@ class TestFindBalancedQuoteAware:
         parts = LogicConverter._split_top_level_args("${x}, ',', ${y}")
         assert parts == ["${x}", "','", "${y}"]
 
+    def test_backslash_before_quote_still_closes(self):
+        # XPath has no backslash escape; a literal ending in '\' (e.g. a path or
+        # regex) must still close. Treating '\' as an escape leaves the string
+        # "open", _find_balanced returns -1, and the whole call leaks verbatim.
+        result = convert(r"concat(${a}, 'x\') and ${y} > 1", {})
+        assert result == "y > 1 & !missing(y)"
+        assert "concat" not in result
+
+    def test_find_balanced_backslash_literal(self):
+        s = r"join('C:\', a, b)"  # literal: join('C:\', a, b)
+        close = LogicConverter._find_balanced(s, 4)
+        assert close == len(s) - 1  # the final ')'
+
 
 class TestHyphenatedFunctions:
     """#18 -- hyphenated functions must strip whole, never orphan a prefix."""
@@ -90,8 +103,8 @@ class TestAggregateIfFamilies:
 
     def test_sum_if_stripped(self):
         result = convert("sum-if(${g}, ${x} > 0) > 2", {})
-        # Whole comparison is meaningless once the aggregate is stripped.
-        assert result is None or ("cond" not in result and "sum" not in result)
+        # Whole comparison is meaningless once the aggregate is stripped -> None.
+        assert result is None
 
     def test_join_if_no_cond_leak(self):
         result = convert("${x} > 5 and join-if(${a}, ',', ${b} > 0)", {})

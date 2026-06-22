@@ -33,6 +33,12 @@ import re
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+# NOTE: these two regexes are string-literal-blind (they stop at the first `)`
+# and split on commas without tracking quotes), so they reliably parse only
+# literal / simple arguments. A quoted value containing `)` or a nested function
+# call (e.g. pulldata('ds', concat('a', f(x)), 'k', n)) can mis-split or be
+# dropped. This is the same class the logic_converter walker handles; here it is
+# an accepted limitation because pulldata/search args are literals in practice.
 # A node value at the group level (e.g. ".specify"-style composite groups) is
 # still a stored column, so we key the model by the leaf token name and keep the
 # full path for disambiguation.
@@ -148,9 +154,13 @@ class FormContract:
         self.formdef_version = formdef_version
         self.nodes: dict[str, Node] = nodes
         # leaf token -> [paths], used to resolve a de-indexed wide base name.
+        # Built from sorted paths so resolution is DETERMINISTIC: nodes is keyed
+        # off a set union (hash-seed-dependent iteration), so without sorting the
+        # candidate order — and thus which node a homonym column maps to — would
+        # vary between processes. Sorted path order gives a stable tie-break.
         self._by_name: dict[str, list[str]] = {}
-        for path, node in nodes.items():
-            self._by_name.setdefault(node.name, []).append(path)
+        for path in sorted(nodes):
+            self._by_name.setdefault(nodes[path].name, []).append(path)
 
     @property
     def repeat_groups(self) -> list[str]:
@@ -255,15 +265,27 @@ def parse_contract(xml_path) -> FormContract:
 
     root = ET.parse(str(xml_path)).getroot()
 
-    # 1) Primary instance = the element whose `id` == its own tag (the form_id).
+    # 1) Primary instance. SurveyCTO compiles select_from_file / pulldata / search
+    #    datasets into SECONDARY <instance id="..."> blocks; the PRIMARY model
+    #    instance is the <instance> with no `id` attribute, and its first child
+    #    element is the form root (whose id/tag is the form_id). Prefer that so a
+    #    secondary instance can't hijack detection; fall back to the old "first
+    #    element whose id == its own tag" scan for unconventional shapes.
     primary = None
-    for el in root.iter():
-        if el.get("id") and _ln(el.tag) == el.get("id"):
-            primary = el
-            break
+    model = next((e for e in root.iter() if _ln(e.tag) == "model"), None)
+    if model is not None:
+        instances = [e for e in model if _ln(e.tag) == "instance"]
+        prim_inst = next((i for i in instances if not i.get("id")), None)
+        if prim_inst is not None:
+            primary = next((c for c in prim_inst if isinstance(c.tag, str)), None)
+    if primary is None:
+        for el in root.iter():
+            if el.get("id") and _ln(el.tag) == el.get("id"):
+                primary = el
+                break
     if primary is None:
         raise RuntimeError(f"Could not find primary instance in {xml_path}")
-    formid = primary.get("id")
+    formid = primary.get("id") or _ln(primary.tag)
     formdef_version = primary.get("version")
 
     # 2) Walk the instance: record every node with its group/repeat ancestry.

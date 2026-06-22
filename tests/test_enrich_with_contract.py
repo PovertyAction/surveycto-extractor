@@ -138,3 +138,81 @@ class TestOverlay:
         assert s["legacy_columns"] == 1
         assert s["choice_lists_resolved_from_xml"] == 1
         assert enriched["audit"]["legacy_columns"] == ["old_var_9"]
+
+    def test_resolved_miss_keeps_existing_metadata(self, enriched):
+        # A resolved miss merges (doesn't wholesale-replace), so any field the
+        # column already carried survives. exact match, not heuristic.
+        assert enriched["variables"]["pre_score"]["contract"]["match"] == "exact"
+
+
+# --- correction, idempotence, heuristic resolution -------------------------
+
+_CORR_XML = """<?xml version="1.0"?>
+<h:html xmlns="http://www.w3.org/2002/xforms" xmlns:h="http://www.w3.org/1999/xhtml">
+  <h:head><model>
+    <instance><cf id="cf" version="1"><age/><Pre/></cf></instance>
+    <bind nodeset="/cf/age" type="int"/>
+    <bind nodeset="/cf/Pre" type="string"/>
+  </model></h:head>
+  <h:body/></h:html>"""
+
+_CORR_QUESTIONS = [
+    {"variable_name": "age", "question_text": "Age in years", "type": "integer",
+     "constraint": ". >= 0", "stata_constraint": "age >= 0"},
+]
+
+_CORR_VARDICT = {
+    "summary": {"total_variables": 2},
+    "variables": {
+        # fuzzy WRONGLY matched 'age' to question 'agee' -> XML corrects it
+        "age": {"survey": {"original_variable_name": "agee", "question_text": "wrong",
+                           "constraint": ". > 200"}},
+        # 'Pre_xyz' has no node; the string-key fallback resolves it to node 'Pre'
+        # -> must be flagged heuristic, not authoritative.
+        "Pre_xyz": {"survey": {"original_variable_name": None}},
+    },
+}
+
+
+def _write_corr(tmp_path):
+    (tmp_path / "cf.xml").write_text(_CORR_XML, encoding="utf-8")
+    q = tmp_path / "q.json"; q.write_text(json.dumps(_CORR_QUESTIONS), encoding="utf-8")
+    vd = tmp_path / "vd.json"; vd.write_text(json.dumps(_CORR_VARDICT), encoding="utf-8")
+    return vd, q, tmp_path / "cf.xml"
+
+
+class TestCorrectionHeuristicIdempotence:
+    def test_correction_overrides_and_refills(self, tmp_path):
+        vd, q, xml = _write_corr(tmp_path)
+        d = enrich_contract(output_json=vd, questions_json=q, xml_path=xml)
+        age = d["variables"]["age"]
+        assert age["contract"]["corrected_from"] == "agee"
+        assert "resolved_by" not in age["contract"]
+        assert age["survey"]["original_variable_name"] == "age"   # XML wins
+        # refilled from the CORRECT node, incl. the wider whitelist (constraint),
+        # and the wrong fuzzy constraint is gone.
+        assert age["survey"]["constraint"] == ". >= 0"
+        assert age["survey"]["stata_constraint"] == "age >= 0"
+        assert d["summary"]["corrected_by_xml"] == 1
+
+    def test_string_key_match_flagged_heuristic(self, tmp_path):
+        vd, q, xml = _write_corr(tmp_path)
+        d = enrich_contract(output_json=vd, questions_json=q, xml_path=xml)
+        c = d["variables"]["Pre_xyz"]["contract"]
+        assert c["match"] == "string_key"
+        assert c["string_key"] == "xyz"
+        assert c["resolved_by"] == "xml-heuristic"   # NOT plain "xml"
+
+    def test_idempotent_rerun(self, tmp_path):
+        # The Phase-4 hook re-runs enrichment on every build; a second pass must
+        # not drop provenance markers or zero the counters.
+        vd, q, xml = _write_corr(tmp_path)
+        first = enrich_contract(output_json=vd, questions_json=q, xml_path=xml)
+        first_json = json.loads(vd.read_text(encoding="utf-8"))
+        second = enrich_contract(output_json=vd, questions_json=q, xml_path=xml)
+        second_json = json.loads(vd.read_text(encoding="utf-8"))
+        assert second_json == first_json
+        assert second["summary"]["corrected_by_xml"] == first["summary"]["corrected_by_xml"] == 1
+        assert second["summary"]["resolved_by_xml"] == first["summary"]["resolved_by_xml"]
+        assert second["variables"]["age"]["contract"]["corrected_from"] == "agee"
+        assert second["variables"]["Pre_xyz"]["contract"]["resolved_by"] == "xml-heuristic"

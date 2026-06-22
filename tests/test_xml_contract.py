@@ -163,6 +163,107 @@ class TestBuildContractIO:
         assert "members" in data["repeat_groups"]
 
 
+_NESTED_XML = """<?xml version="1.0"?>
+<h:html xmlns="http://www.w3.org/2002/xforms"
+        xmlns:h="http://www.w3.org/1999/xhtml"
+        xmlns:jr="http://openrosa.org/javarosa">
+  <h:head>
+    <model>
+      <instance>
+        <nf id="nf" version="1">
+          <hh jr:template="">
+            <member jr:template="">
+              <mname/>
+              <mlangs/>
+            </member>
+          </hh>
+        </nf>
+      </instance>
+      <bind nodeset="/nf/hh/member/mname" type="string"/>
+      <bind nodeset="/nf/hh/member/mlangs" type="select"/>
+    </model>
+  </h:head>
+  <h:body>
+    <group ref="/nf/hh"><repeat nodeset="/nf/hh">
+      <group ref="/nf/hh/member"><repeat nodeset="/nf/hh/member">
+        <input ref="/nf/hh/member/mname"/>
+        <select ref="/nf/hh/member/mlangs"/>
+      </repeat></group>
+    </repeat></group>
+  </h:body>
+</h:html>
+"""
+
+
+class TestNestedRepeats:
+    @pytest.fixture
+    def nested(self, tmp_path):
+        p = tmp_path / "nf.xml"
+        p.write_text(_NESTED_XML, encoding="utf-8")
+        return parse_contract(p)
+
+    def test_two_level_repeat_depth(self, nested):
+        n = nested.nodes["hh/member/mname"]
+        assert n.repeat_path == ["hh", "member"]  # outer -> inner
+        assert n.repeat_depth == 2
+
+    def test_two_level_repeat_column(self, nested):
+        m = nested.map_column("mname_2_5")
+        assert m["repeat_iterations"] == [("hh", 2), ("member", 5)]
+        assert m["choice_code"] is None
+
+    def test_select_multiple_inside_nested_repeat_choice_is_last(self, nested):
+        # The wide column orders repeat indices first, choice code LAST:
+        # mlangs_<hh>_<member>_<choice>. This locks that ordering assumption.
+        m = nested.map_column("mlangs_2_5_1")
+        assert m["repeat_iterations"] == [("hh", 2), ("member", 5)]
+        assert m["choice_code"] == 1
+        assert m["is_select_multiple"] is True
+
+
+class TestDeterminismAndSecondaryInstance:
+    def test_homonym_resolution_is_deterministic(self, tmp_path):
+        # Two leaves named `income` in different groups. The candidate order (and
+        # thus which node a bare `income` column maps to) must be stable, not
+        # PYTHONHASHSEED-dependent.
+        xml = """<?xml version="1.0"?>
+<h:html xmlns="http://www.w3.org/2002/xforms" xmlns:h="http://www.w3.org/1999/xhtml">
+  <h:head><model>
+    <instance><af id="af" version="1"><ga><income/></ga><gb><income/></gb></af></instance>
+    <bind nodeset="/af/ga/income" type="int"/>
+    <bind nodeset="/af/gb/income" type="string"/>
+  </model></h:head>
+  <h:body/></h:html>"""
+        p = tmp_path / "af.xml"
+        p.write_text(xml, encoding="utf-8")
+        c = parse_contract(p)
+        assert c._by_name["income"] == sorted(c._by_name["income"])  # stable order
+        m = c.map_column("income")
+        assert m["node_path"] == "ga/income"  # lexicographically-first, deterministic
+        assert m["ambiguous"] is True
+
+    def test_secondary_instance_does_not_hijack(self, tmp_path):
+        # A select_from_file / lookup compiles to a SECONDARY <instance id="...">
+        # whose child can satisfy id==tag. The primary <instance> (no id) must win.
+        xml = """<?xml version="1.0"?>
+<h:html xmlns="http://www.w3.org/2002/xforms" xmlns:h="http://www.w3.org/1999/xhtml">
+  <h:head><model>
+    <instance id="citychoices">
+      <citychoices id="citychoices"><item><name/></item></citychoices>
+    </instance>
+    <instance>
+      <realform id="realform" version="2"><hh_income/></realform>
+    </instance>
+    <bind nodeset="/realform/hh_income" type="int"/>
+  </model></h:head>
+  <h:body/></h:html>"""
+        p = tmp_path / "rf.xml"
+        p.write_text(xml, encoding="utf-8")
+        c = parse_contract(p)
+        assert c.formid == "realform"
+        assert c.map_column("hh_income")["kind"] == "matched"
+
+
 class TestPureHelpers:
     def test_is_system_column(self):
         assert is_system_column("KEY")

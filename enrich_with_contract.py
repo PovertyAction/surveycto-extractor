@@ -181,6 +181,10 @@ def enrich_contract(
             continue
 
         node = contract.nodes[m["node_path"]]
+        prior = entry.get("contract") or {}  # a previous run's contract, if any
+        # A string-key fallback match is a heuristic, NOT a deterministic node
+        # match -- label it so a consumer never reads a guess as authoritative.
+        heuristic = m.get("string_key") is not None
         # Surface the useful XML provenance only: where it comes from
         # (data_source = search/pulldata), the derivation (calculate), repeat
         # coords, and preload for SurveyCTO system fields. Constraint/appearance/
@@ -188,6 +192,7 @@ def enrich_contract(
         entry["contract"] = {
             "kind": "matched",
             "node_path": node.path,
+            "match": "string_key" if heuristic else "exact",
             "xml_type": node.xml_type,
             "control": node.control,
             "repeat_path": node.repeat_path,
@@ -206,22 +211,33 @@ def enrich_contract(
 
         # XML is authoritative: the contract's column->node mapping wins. Where it
         # disagrees with the fuzzy match, override (correcting a false-positive or
-        # filling a miss) and re-attach the question metadata for the XML-resolved
-        # node. Where they agree, keep the richer survey block (iteration-specific
-        # skip logic, repeat metadata, etc.).
+        # filling a miss) and attach the question metadata for the XML-resolved
+        # node. Where they already agree, keep the richer existing survey block.
         survey = entry.get("survey") or {}
         prev = survey.get("original_variable_name")
+        resolved_label = "xml-heuristic" if heuristic else "xml"
         if prev != node.name:
             q = qidx.get(node.name)
-            new_survey = {
-                "original_variable_name": node.name,
-                "group_path": "/".join(node.group_path),
-            }
+            if prev is None:
+                # XML resolved a fuzzy MISS: merge so we never discard anything the
+                # column already carried, then fill from the node's question.
+                new_survey = dict(survey)
+            else:
+                # XML CORRECTED a fuzzy false-positive: the old block described the
+                # wrong question, so start clean from the correct node.
+                new_survey = {}
+            new_survey["original_variable_name"] = node.name
+            if not new_survey.get("group_path"):
+                new_survey["group_path"] = "/".join(node.group_path)
             if q:
+                # Copy the full set of question-derived fields the Phase-4 survey
+                # block carries, so a resolved/corrected variable gets a complete
+                # block from the *correct* node, not a stub.
                 for k in (
                     "question_text", "type", "choice_list", "choices",
                     "stata_skip_logic", "group_relevances", "calculation",
-                    "references",
+                    "references", "disabled", "constraint", "stata_constraint",
+                    "choice_filter",
                 ):
                     if q.get(k) not in (None, "", []):
                         new_survey[k] = q.get(k)
@@ -230,8 +246,18 @@ def enrich_contract(
                 entry["contract"]["corrected_from"] = prev
                 n_corrected += 1
             else:
-                entry["contract"]["resolved_by"] = "xml"
+                entry["contract"]["resolved_by"] = resolved_label
                 n_xml_resolved += 1
+        else:
+            # Names already agree. Carry forward a prior run's resolution markers so
+            # re-running enrichment (the Phase-4 hook re-runs on every build) is
+            # idempotent -- both the contract block and the summary counters.
+            if prior.get("resolved_by"):
+                entry["contract"]["resolved_by"] = prior["resolved_by"]
+                n_xml_resolved += 1
+            elif prior.get("corrected_from"):
+                entry["contract"]["corrected_from"] = prior["corrected_from"]
+                n_corrected += 1
 
         # Resolve real value/label options for select-from-file fields from the
         # XML data_source (the from-file choice labels the fuzzy path left as a
@@ -263,6 +289,7 @@ def enrich_contract(
     if versions:
         d["formdef_versions_in_data"] = dict(versions)
     d.setdefault("sources", {})["xml"] = str(xml_path)
+    d.setdefault("summary", {})  # Phase 4 always writes it; guard hand-edited dicts
     d["summary"]["matched_after_xml"] = matched_total
     d["summary"]["resolved_by_xml"] = n_xml_resolved
     d["summary"]["corrected_by_xml"] = n_corrected

@@ -798,8 +798,10 @@ class SurveyStore:
                             f"  xml_decode   : code {contract['choice_code']}"
                             + (f" = {cl}" if cl else "")
                         )
-                    if contract.get("resolved_by") == "xml":
-                        lines.append(f"  xml_resolved : matched by XML (fuzzy missed)")
+                    if contract.get("resolved_by", "").startswith("xml"):
+                        rb = contract["resolved_by"]
+                        note = " (heuristic string-key match)" if rb == "xml-heuristic" else ""
+                        lines.append(f"  xml_resolved : matched by XML (fuzzy missed){note}")
                     if contract.get("corrected_from"):
                         lines.append(
                             f"  xml_corrected: was '{contract['corrected_from']}' "
@@ -922,6 +924,25 @@ class SurveyStore:
                         f" ({entry.get('choice_label', '?')})"
                     )
 
+                # XML contract provenance (only when the dict was enriched). Surface
+                # the high-value signals in batch too: a false-positive correction
+                # and where the value comes from. Additive -- empty when absent.
+                contract_str = ""
+                contract = entry.get("contract")
+                if contract and contract.get("kind") == "matched":
+                    bits = []
+                    if contract.get("corrected_from"):
+                        bits.append(f"xml_corrected (was '{contract['corrected_from']}')")
+                    elif contract.get("resolved_by"):
+                        bits.append(f"resolved_by={contract['resolved_by']}")
+                    ds = contract.get("data_source")
+                    if ds:
+                        bits.append(f"from {ds.get('kind')}('{ds.get('dataset')}')")
+                    if bits:
+                        contract_str = "\n  contract: " + " | ".join(bits)
+                elif contract and contract.get("kind") in ("system", "legacy"):
+                    contract_str = f"\n  contract: {contract['kind']}"
+
                 header = f"=== [{label}] {name} ==="
                 if form_name != name:
                     header += f"  (form: {form_name})"
@@ -938,7 +959,7 @@ class SurveyStore:
                     f"  Q: {qt}\n"
                     f"  skip: {_trunc(skip, 120)}\n"
                     f"  sentinels: {sent_str}"
-                    f"{range_str}{repeat_str}{sm_str}"
+                    f"{range_str}{repeat_str}{sm_str}{contract_str}"
                 )
                 blocks.append(block)
                 break  # first matching survey in scope

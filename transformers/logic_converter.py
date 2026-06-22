@@ -56,22 +56,24 @@ class LogicConverter:
 
     @staticmethod
     def _find_balanced(s: str, open_idx: int) -> int:
-        """
+        r"""
         Given `s` and the index of an opening `(`, return the index of the
         matching closing `)`. Returns -1 if unbalanced.
 
         String-literal aware: parens inside `'...'` / `"..."` do not affect
         depth, so a quoted `)` (e.g. `join(")", ${a}, ${b})`) no longer ends the
-        call early. Mirrors the quote tracker in
-        generators/synthetic_data._split_top_level (close on a matching unescaped
-        quote).
+        call early. SurveyCTO expressions are XPath-based, which has no backslash
+        string escape (a `\` is a literal char, e.g. a regex pattern or path), so
+        a literal closes on the next matching quote — full stop. Treating `\` as
+        an escape would wrongly keep a string open past `'...\'` and orphan the
+        whole call.
         """
         depth = 0
         in_str: Optional[str] = None
         for i in range(open_idx, len(s)):
             ch = s[i]
             if in_str:
-                if ch == in_str and s[i - 1] != "\\":
+                if ch == in_str:
                     in_str = None
             elif ch in ("'", '"'):
                 in_str = ch
@@ -141,16 +143,18 @@ class LogicConverter:
         Split a comma-separated argument string respecting parenthesis depth
         and string literals. A comma or paren inside `'...'` / `"..."` is part
         of the literal, not a separator/nesting token (e.g.
-        `selected(${x}, ',')`). Returns list of stripped argument strings.
+        `selected(${x}, ',')`). XPath has no backslash escape, so a literal
+        closes on the next matching quote. Returns list of stripped argument
+        strings.
         """
         parts: List[str] = []
         depth = 0
         in_str: Optional[str] = None
         cur: List[str] = []
-        for i, ch in enumerate(args_str):
+        for ch in args_str:
             if in_str:
                 cur.append(ch)
-                if ch == in_str and args_str[i - 1] != "\\":
+                if ch == in_str:
                     in_str = None
             elif ch in ("'", '"'):
                 in_str = ch
