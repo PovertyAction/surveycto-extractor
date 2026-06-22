@@ -214,30 +214,38 @@ class FormContract:
                 }
             return {"kind": "unmapped", "base": base, "indices": idxs}
 
+        # SurveyCTO wide-column convention for a select_multiple inside repeat(s):
+        #   base_<choice>_<outer>_..._<inner>   -- the choice code is the FIRST
+        # suffix, then the repeat-iteration chain (outer->inner) follows. This
+        # matches the production Phase-4 matcher (create_variable_dictionaries.py:
+        # double_match groups choice=first/repeat=last) and the concordance-
+        # validated synthetic generator (synthetic_data.py: `_<choice>{repeat
+        # suffix}`). A plain repeat field carries only the iteration chain.
         # Prefer the candidate whose repeat depth (+1 for a select_multiple choice
-        # binary) consumes exactly the trailing indices we peeled.
+        # binary) consumes exactly the indices we peeled.
         chosen = None
+        choice = None
+        rep_idxs = idxs  # iteration indices left after a leading choice is removed
         for path in candidates:
             node = self.nodes[path]
             depth = node.repeat_depth
             if len(idxs) == depth:
-                chosen, choice = node, None
+                chosen, choice, rep_idxs = node, None, idxs
                 break
             if node.is_select_multiple and len(idxs) == depth + 1:
-                chosen, choice = node, idxs[-1]
+                chosen, choice, rep_idxs = node, idxs[0], idxs[1:]
                 break
         if chosen is None:
-            # Fall back to the first candidate; treat surplus trailing index as a
+            # Fall back to the first candidate; treat a leading surplus index as the
             # choice code if it is select_multiple, else leave iterations partial.
             chosen = self.nodes[candidates[0]]
-            choice = (
-                idxs[-1]
-                if chosen.is_select_multiple and len(idxs) == chosen.repeat_depth + 1
-                else None
-            )
+            if chosen.is_select_multiple and len(idxs) == chosen.repeat_depth + 1:
+                choice, rep_idxs = idxs[0], idxs[1:]
+            else:
+                choice, rep_idxs = None, idxs
 
         n_iter = chosen.repeat_depth
-        iters = list(zip(chosen.repeat_path, idxs[:n_iter]))
+        iters = list(zip(chosen.repeat_path, rep_idxs[:n_iter]))
         return {
             "kind": "matched",
             "node_path": chosen.path,

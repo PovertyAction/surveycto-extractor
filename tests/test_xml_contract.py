@@ -212,13 +212,42 @@ class TestNestedRepeats:
         assert m["repeat_iterations"] == [("hh", 2), ("member", 5)]
         assert m["choice_code"] is None
 
-    def test_select_multiple_inside_nested_repeat_choice_is_last(self, nested):
-        # The wide column orders repeat indices first, choice code LAST:
-        # mlangs_<hh>_<member>_<choice>. This locks that ordering assumption.
-        m = nested.map_column("mlangs_2_5_1")
-        assert m["repeat_iterations"] == [("hh", 2), ("member", 5)]
-        assert m["choice_code"] == 1
+    def test_select_multiple_inside_repeat_choice_is_first(self, nested):
+        # SurveyCTO wide export orders the choice code FIRST, then the repeat
+        # chain: base_<choice>_<outer>_<inner>. This is NOT the code's own
+        # assumption -- it is the convention the production Phase-4 matcher
+        # (create_variable_dictionaries.py:745-752, choice=first group) and the
+        # concordance-validated synthetic generator (synthetic_data.py emits
+        # `_<choice>{repeat suffix}`) both use against real exports. So for
+        # choice=7 in repeat (hh=2, member=3) the column is `mlangs_7_2_3`.
+        m = nested.map_column("mlangs_7_2_3")
+        assert m["choice_code"] == 7
+        assert m["repeat_iterations"] == [("hh", 2), ("member", 3)]
         assert m["is_select_multiple"] is True
+
+    def test_single_repeat_decode_agrees_with_phase4(self, tmp_path):
+        # Cross-check the single-repeat select_multiple decode against the actual
+        # Phase-4 regex (base_(\d+)_(\d+): group1=choice, group2=repeat) so the
+        # two paths can't silently diverge again.
+        import re
+        xml = """<?xml version="1.0"?>
+<h:html xmlns="http://www.w3.org/2002/xforms" xmlns:h="http://www.w3.org/1999/xhtml"
+        xmlns:jr="http://openrosa.org/javarosa">
+  <h:head><model>
+    <instance><sf id="sf"><roster jr:template=""><lang/></roster></sf></instance>
+    <bind nodeset="/sf/roster/lang" type="select"/>
+  </model></h:head>
+  <h:body><group ref="/sf/roster"><repeat nodeset="/sf/roster">
+    <select ref="/sf/roster/lang"/>
+  </repeat></group></h:body></h:html>"""
+        p = tmp_path / "sf.xml"
+        p.write_text(xml, encoding="utf-8")
+        c = parse_contract(p)
+        m = c.map_column("lang_2_5")
+        ph = re.match(r"lang_(\d+)_(\d+)$", "lang_2_5")
+        phase4_choice, phase4_repeat = int(ph.group(1)), int(ph.group(2))
+        assert m["choice_code"] == phase4_choice == 2
+        assert m["repeat_iterations"] == [("roster", phase4_repeat)] == [("roster", 5)]
 
 
 class TestDeterminismAndSecondaryInstance:

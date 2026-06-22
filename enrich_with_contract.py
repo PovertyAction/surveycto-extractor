@@ -256,8 +256,10 @@ def enrich_contract(
                     n_xml_resolved += 1
         else:
             # Names already agree. Carry forward a prior run's resolution markers so
-            # re-running enrichment (the Phase-4 hook re-runs on every build) is
-            # idempotent -- both the contract block and the summary counters.
+            # re-running enrichment on an ALREADY-ENRICHED dictionary is idempotent
+            # (markers + counters). Note: the Phase-4 hook writes a fresh dictionary
+            # each build before enriching, so `prior` is empty there -- this branch
+            # only fires on a standalone `enrich_with_contract.py` re-run.
             if prior.get("resolved_by") == "xml-heuristic":
                 entry["contract"]["resolved_by"] = "xml-heuristic"
                 n_xml_heuristic += 1

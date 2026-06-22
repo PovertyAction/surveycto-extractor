@@ -208,8 +208,9 @@ class TestCorrectionHeuristicIdempotence:
         assert d["summary"]["resolved_by_xml"] == 0
 
     def test_idempotent_rerun(self, tmp_path):
-        # The Phase-4 hook re-runs enrichment on every build; a second pass must
-        # not drop provenance markers or zero the counters.
+        # A standalone re-run on an already-enriched dictionary must not drop
+        # provenance markers or zero the counters. (The Phase-4 hook writes a fresh
+        # dict each build, so this guards the standalone enrich_with_contract path.)
         vd, q, xml = _write_corr(tmp_path)
         first = enrich_contract(output_json=vd, questions_json=q, xml_path=xml)
         first_json = json.loads(vd.read_text(encoding="utf-8"))
