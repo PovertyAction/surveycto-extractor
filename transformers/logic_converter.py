@@ -56,15 +56,30 @@ class LogicConverter:
 
     @staticmethod
     def _find_balanced(s: str, open_idx: int) -> int:
-        """
+        r"""
         Given `s` and the index of an opening `(`, return the index of the
         matching closing `)`. Returns -1 if unbalanced.
+
+        String-literal aware: parens inside `'...'` / `"..."` do not affect
+        depth, so a quoted `)` (e.g. `join(")", ${a}, ${b})`) no longer ends the
+        call early. SurveyCTO expressions are XPath-based, which has no backslash
+        string escape (a `\` is a literal char, e.g. a regex pattern or path), so
+        a literal closes on the next matching quote — full stop. Treating `\` as
+        an escape would wrongly keep a string open past `'...\'` and orphan the
+        whole call.
         """
         depth = 0
+        in_str: Optional[str] = None
         for i in range(open_idx, len(s)):
-            if s[i] == '(':
+            ch = s[i]
+            if in_str:
+                if ch == in_str:
+                    in_str = None
+            elif ch in ("'", '"'):
+                in_str = ch
+            elif ch == '(':
                 depth += 1
-            elif s[i] == ')':
+            elif ch == ')':
                 depth -= 1
                 if depth == 0:
                     return i
@@ -87,7 +102,12 @@ class LogicConverter:
         """
         out: List[str] = []
         i = 0
-        rx = re.compile(rf'\b({func_pattern})\s*\(', re.IGNORECASE)
+        # Left boundary `(?<![\w-])` (not `\b`) so a shorter registered name does
+        # not match the hyphen-suffix of a longer SurveyCTO function — e.g. the
+        # `date` family pattern must not eat the `-date(` of `format-date(`, nor
+        # `concat`/`join`/etc. the tail of a hyphenated relative. The trailing
+        # `\s*\(` anchor keeps prefixes distinct in the forward direction.
+        rx = re.compile(rf'(?<![\w-])({func_pattern})\s*\(', re.IGNORECASE)
         while i < len(expr):
             m = rx.search(expr, i)
             if not m:
@@ -120,14 +140,26 @@ class LogicConverter:
     @staticmethod
     def _split_top_level_args(args_str: str) -> List[str]:
         """
-        Split a comma-separated argument string respecting parenthesis depth.
-        Returns list of stripped argument strings.
+        Split a comma-separated argument string respecting parenthesis depth
+        and string literals. A comma or paren inside `'...'` / `"..."` is part
+        of the literal, not a separator/nesting token (e.g.
+        `selected(${x}, ',')`). XPath has no backslash escape, so a literal
+        closes on the next matching quote. Returns list of stripped argument
+        strings.
         """
         parts: List[str] = []
         depth = 0
+        in_str: Optional[str] = None
         cur: List[str] = []
         for ch in args_str:
-            if ch == '(':
+            if in_str:
+                cur.append(ch)
+                if ch == in_str:
+                    in_str = None
+            elif ch in ("'", '"'):
+                in_str = ch
+                cur.append(ch)
+            elif ch == '(':
                 depth += 1
                 cur.append(ch)
             elif ch == ')':
@@ -462,14 +494,19 @@ class LogicConverter:
         # `number(x)` in SurveyCTO converts text to number; Stata is already
         # numeric in numeric context, so drop the wrapper.
         # `int(x)` in SurveyCTO truncates toward zero; Stata `int(x)` matches.
-        expr = re.sub(r'\bnumber\s*\(\s*([^)]+?)\s*\)', r'\1', expr, flags=re.IGNORECASE)
+        # `(?<![\w-])` (not `\b`) so this does not unwrap the `-number(` tail of
+        # `format-number(...)`, which is stripped whole at step 12c instead.
+        expr = re.sub(r'(?<![\w-])number\s*\(\s*([^)]+?)\s*\)', r'\1', expr, flags=re.IGNORECASE)
         # int() — keep as-is; the regex below documents the intentional no-op
         # so future readers see we considered it.
         # expr = re.sub(r'\bint\s*\(([^)]+)\)', r'int(\1)', expr) — no change needed
 
         # --- Step 6: if() → cond() ------------------------------------------
-        # Rename only; argument structure is identical.
-        expr = re.sub(r'\bif\s*\(', 'cond(', expr, flags=re.IGNORECASE)
+        # Rename only; argument structure is identical. `(?<![\w-])` (not `\b`)
+        # so the `if(` inside an aggregate-if family (`count-if(`, `sum-if(`,
+        # `join-if(`, `rank-index-if(`) is NOT rewritten to `-cond(` — those are
+        # stripped whole at step 12c, and a `-cond(` rename would make them leak.
+        expr = re.sub(r'(?<![\w-])if\s*\(', 'cond(', expr, flags=re.IGNORECASE)
 
         # --- Step 7: coalesce() ---------------------------------------------
         # NOTE: [^)]+ patterns here and below don't handle nested parens —
@@ -584,14 +621,17 @@ class LogicConverter:
         # Handles both: func() op value  and  value op func()
         _OP = r'(?:>=|<=|!=|==|>(?!=)|<(?!=))'
         _IDENT = r'\w+(?:\.\w+)?'
+        # `(?<![\w-])` (not `\b`) so `index`/`position` do not match the tail of a
+        # hyphenated function such as `rank-index(...)` (which is stripped whole as
+        # a balanced family at step 12c).
         expr = re.sub(
-            rf'\b(?:position|index)\s*\([^)]*\)\s*{_OP}\s*{_IDENT}',
+            rf'(?<![\w-])(?:position|index)\s*\([^)]*\)\s*{_OP}\s*{_IDENT}',
             _strip_pos, expr, flags=re.IGNORECASE)
         expr = re.sub(
-            rf'{_IDENT}\s*{_OP}\s*(?:position|index)\s*\([^)]*\)',
+            rf'{_IDENT}\s*{_OP}\s*(?<![\w-])(?:position|index)\s*\([^)]*\)',
             _strip_pos, expr, flags=re.IGNORECASE)
         # Bare calls (no comparison):
-        expr = re.sub(r'\b(?:position|index)\s*\([^)]*\)', _strip_pos, expr, flags=re.IGNORECASE)
+        expr = re.sub(r'(?<![\w-])(?:position|index)\s*\([^)]*\)', _strip_pos, expr, flags=re.IGNORECASE)
 
         # once() / jr:choice-name() / choice-label() / selected-at() — each can
         # carry a nested call in its args, so strip the whole balanced call.
@@ -629,6 +669,7 @@ class LogicConverter:
             (r'decimal-date-time', "DATE_FUNCTION"),
             (r'decimal-time',      "DATE_FUNCTION"),
             (r'format-date-time',  "DATE_FUNCTION"),
+            (r'format-date',       "DATE_FUNCTION"),
             (r'date-time',         "DATE_FUNCTION"),
             (r'date',              "DATE_FUNCTION"),
             (r'hash',              "HASH"),

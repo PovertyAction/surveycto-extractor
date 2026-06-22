@@ -16,9 +16,12 @@ Usage:
     --validate     Run select_multiple validation after creation.
     --validate-only  Only run validation on existing dictionaries.
     --xlsx         Export XLSX variable dictionary alongside JSON.
+    --no-enrich-xml  Skip the optional compiled-XForm contract overlay.
 
 Config:
-    Edit config.py to add survey entries to the DATASETS dict.
+    Edit config.py to add survey entries to the DATASETS dict. Add an optional
+    "xml_path" to a dataset to enable the deterministic XML-contract overlay
+    (see enrich_with_contract.py).
 """
 
 import pandas as pd
@@ -1570,6 +1573,9 @@ def main():
                         help='Only run validation on existing dictionaries')
     parser.add_argument('--xlsx', action='store_true',
                         help='Export XLSX variable dictionary alongside JSON')
+    parser.add_argument('--no-enrich-xml', action='store_true',
+                        help='Skip the optional XML-contract overlay even when an '
+                             'xml_path is configured for a dataset')
     args = parser.parse_args()
 
     if not DATASETS:
@@ -1601,6 +1607,18 @@ def main():
         df, questions, cfg, meta, pq_path, ext_missing_counts, minmax = load_data(dataset_name)
         var_dict = create_variable_dictionary(df, questions, dataset_name, ext_missing_counts, minmax, meta=meta)
         export_dictionary(var_dict, df, cfg, dataset_name, meta, parquet_path=pq_path)
+
+        # Optional XML-contract overlay: deterministic column->node mapping from the
+        # compiled XForm, when a usable 'xml_path' is configured for this dataset.
+        # No-op (and dictionary unchanged) when no XML is available — fuzzy matching
+        # from export_dictionary() stays the default. Runs before the graph build so
+        # the graph reflects XML-corrected variable names.
+        if not args.no_enrich_xml:
+            try:
+                from enrich_with_contract import enrich_dataset
+                enrich_dataset(dataset_name, cfg)
+            except Exception as exc:  # noqa: BLE001 — enrichment is additive, never fatal
+                print(f"[WARN] XML-contract enrichment skipped for {dataset_name}: {exc}")
 
         # Build variable relationship graph (needs the JSON dict, not the DataFrame)
         vardict_path = Path(cfg['output_json'])

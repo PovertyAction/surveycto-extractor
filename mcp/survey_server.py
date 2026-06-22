@@ -771,6 +771,45 @@ class SurveyStore:
             if refs:
                 lines.append(f"  references   : {', '.join(refs)}")
 
+            # XML contract — deterministic "where it comes from" provenance, present
+            # only when the dictionary was enriched with a compiled-XForm contract
+            # (enrich_with_contract.py). Purely additive: renders nothing otherwise.
+            contract = entry.get("contract")
+            if contract:
+                kind = contract.get("kind")
+                if kind == "matched":
+                    if contract.get("node_path"):
+                        lines.append(f"  xml_node     : {contract['node_path']}")
+                    ds = contract.get("data_source")
+                    if ds:
+                        if ds.get("kind") == "pulldata":
+                            lines.append(
+                                f"  comes_from   : pulldata('{ds.get('dataset')}', "
+                                f"key={ds.get('key')})"
+                            )
+                        elif ds.get("kind") == "search":
+                            lines.append(
+                                f"  comes_from   : search('{ds.get('dataset')}', "
+                                f"filter={ds.get('filter')})"
+                            )
+                    if contract.get("is_select_multiple") and contract.get("choice_code") is not None:
+                        cl = contract.get("choice_label")
+                        lines.append(
+                            f"  xml_decode   : code {contract['choice_code']}"
+                            + (f" = {cl}" if cl else "")
+                        )
+                    if contract.get("resolved_by", "").startswith("xml"):
+                        rb = contract["resolved_by"]
+                        note = " (heuristic string-key match)" if rb == "xml-heuristic" else ""
+                        lines.append(f"  xml_resolved : matched by XML (fuzzy missed){note}")
+                    if contract.get("corrected_from"):
+                        lines.append(
+                            f"  xml_corrected: was '{contract['corrected_from']}' "
+                            f"(fuzzy false-positive, XML wins)"
+                        )
+                elif kind in ("system", "legacy"):
+                    lines.append(f"  xml_status   : {kind}")
+
             # Repeat group info (pre-computed indexes = O(1))
             rinfo = self._get_repeat_info(label, entry)
             if rinfo:
@@ -885,6 +924,25 @@ class SurveyStore:
                         f" ({entry.get('choice_label', '?')})"
                     )
 
+                # XML contract provenance (only when the dict was enriched). Surface
+                # the high-value signals in batch too: a false-positive correction
+                # and where the value comes from. Additive -- empty when absent.
+                contract_str = ""
+                contract = entry.get("contract")
+                if contract and contract.get("kind") == "matched":
+                    bits = []
+                    if contract.get("corrected_from"):
+                        bits.append(f"xml_corrected (was '{contract['corrected_from']}')")
+                    elif contract.get("resolved_by"):
+                        bits.append(f"resolved_by={contract['resolved_by']}")
+                    ds = contract.get("data_source")
+                    if ds:
+                        bits.append(f"from {ds.get('kind')}('{ds.get('dataset')}')")
+                    if bits:
+                        contract_str = "\n  contract: " + " | ".join(bits)
+                elif contract and contract.get("kind") in ("system", "legacy"):
+                    contract_str = f"\n  contract: {contract['kind']}"
+
                 header = f"=== [{label}] {name} ==="
                 if form_name != name:
                     header += f"  (form: {form_name})"
@@ -901,7 +959,7 @@ class SurveyStore:
                     f"  Q: {qt}\n"
                     f"  skip: {_trunc(skip, 120)}\n"
                     f"  sentinels: {sent_str}"
-                    f"{range_str}{repeat_str}{sm_str}"
+                    f"{range_str}{repeat_str}{sm_str}{contract_str}"
                 )
                 blocks.append(block)
                 break  # first matching survey in scope

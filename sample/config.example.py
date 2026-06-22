@@ -54,6 +54,12 @@ DATASETS = {
         "questions_json": SAMPLE_DIR / "output" / "household_survey_questions.json",
         "output_json":    SAMPLE_DIR / "output" / "household_survey_variable_dictionary.json",
         "output_xlsx":    SAMPLE_DIR / "output" / "household_survey_variable_dictionary.xlsx",
+        # Optional: if you saved the deployed form's compiled XForm XML, point
+        # xml_path at it to enable the deterministic XML-contract overlay
+        # (enrich_with_contract.py). Additive — omit it and Phase 4 is unchanged.
+        # The bundled sample ships no compiled XForm, so this is left commented.
+        #   "xml_path":             SAMPLE_DIR / "Household_Survey.xml",
+        #   "xml_attachments_dirs": [SAMPLE_DIR],
     },
 }
 

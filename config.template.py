@@ -73,6 +73,17 @@ DATASETS = {
     #     "output_json": OUTPUT_DIR / "my_survey" / "my_survey_variable_dictionary.json",
     #     "output_xlsx": OUTPUT_DIR / "my_survey" / "my_survey_variable_dictionary.xlsx",
     #     # "skip_ord_dta": True,  # set True to skip _ord.dta (e.g. underscore-prefix vars or very wide datasets)
+    #
+    #     # --- Optional: compiled-XForm contract overlay (deterministic mapping) ---
+    #     # If you saved the deployed form's compiled XForm XML, point xml_path at
+    #     # it to enable enrich_with_contract.py.  The XML is the authoritative
+    #     # column->node map, so it resolves columns fuzzy matching misses (nested
+    #     # repeats, select_multiple-in-repeat, pulldata preloads) with no false
+    #     # positives, and resolves select-from-file choice labels from the form's
+    #     # attached CSVs.  Purely additive: omit xml_path and Phase 4 behaves
+    #     # exactly as before (fuzzy matching only).  See enrich_with_contract.py.
+    #     # "xml_path":             DATA_DIR / "forms" / "my_survey.xml",
+    #     # "xml_attachments_dirs": [DATA_DIR / "forms"],   # extra dirs for search() CSVs (xml_path.parent is always searched)
     # },
     #
     # Phase 4 also generates *_variable_graph.json alongside the variable

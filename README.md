@@ -163,6 +163,34 @@ access by downstream scripts.
 The export summary lists all-missing and sparse (≥95% missing) variables so
 you can spot data-quality issues immediately.
 
+#### Optional: overlay the compiled-form XML contract
+
+By default the column → question mapping uses heuristic name matching, which is
+the right default when all you have is the dataset plus `questions.json`. On
+complex instruments (nested repeats, `select_multiple` inside repeats,
+`pulldata()` preloads, dotted group nodes) fuzzy matching both leaves real
+columns unmatched and can occasionally mis-match.
+
+If you **saved the deployed form's compiled XForm XML** (Design → Download under
+your SurveyCTO server's form definition), point at it and the extractor uses it
+as the authoritative, deterministic spine:
+
+```python
+# in config.py, on the DATASETS entry:
+"xml_path": DATA_DIR / "forms" / "my_survey.xml",
+```
+
+Then re-run Phase 4 (or `python enrich_with_contract.py --survey my_survey` to
+overlay without rebuilding). Each variable gains a `contract` block recording
+exactly **where it comes from** — `node_path`, repeat coordinates,
+`select_multiple` choice code, and `data_source` (parsed `search()` / `pulldata()`
+provenance). Columns fuzzy matching missed are resolved with no false positives,
+and select-from-file choice labels are pulled from the form's attached CSVs.
+
+This is **optional and additive**: omit `xml_path` and Phase 4 behaves exactly as
+before. It's worth saving the XForm — it is the one input that makes the mapping
+deterministic. See `enrich_with_contract.py`.
+
 ### 2. Use the variable graph
 
 If `networkx` is installed (it's in `requirements.txt`), the variable-
@@ -365,6 +393,8 @@ my_project/
     ├── config.py                           ← copy from config.template.py, fill in
     ├── main.py                             ← instrument-side entry point
     ├── create_variable_dictionaries.py     ← post-collection vardict + graph
+    ├── xml_contract.py                     ← compiled-XForm parser (optional overlay)
+    ├── enrich_with_contract.py             ← overlays the XML contract onto the vardict
     ├── create_summary_stats_dofile.py      ← post-collection summary stats
     └── ...
 ```
