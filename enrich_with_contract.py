@@ -163,7 +163,10 @@ def enrich_contract(
 
     node_choices: dict[str, list | None] = {}  # resolved search choices, per node
     variables = d.get("variables", {})
-    n_system = n_xml_resolved = n_corrected = n_choice_lists = 0
+    # n_xml_resolved counts only DETERMINISTIC (exact node) resolutions; the
+    # heuristic string-key fallback is counted separately so it never inflates the
+    # "XML resolved" headline with guesses.
+    n_system = n_xml_resolved = n_xml_heuristic = n_corrected = n_choice_lists = 0
     legacy: list[str] = []
 
     for col, entry in variables.items():
@@ -247,12 +250,18 @@ def enrich_contract(
                 n_corrected += 1
             else:
                 entry["contract"]["resolved_by"] = resolved_label
-                n_xml_resolved += 1
+                if heuristic:
+                    n_xml_heuristic += 1
+                else:
+                    n_xml_resolved += 1
         else:
             # Names already agree. Carry forward a prior run's resolution markers so
             # re-running enrichment (the Phase-4 hook re-runs on every build) is
             # idempotent -- both the contract block and the summary counters.
-            if prior.get("resolved_by"):
+            if prior.get("resolved_by") == "xml-heuristic":
+                entry["contract"]["resolved_by"] = "xml-heuristic"
+                n_xml_heuristic += 1
+            elif prior.get("resolved_by"):
                 entry["contract"]["resolved_by"] = prior["resolved_by"]
                 n_xml_resolved += 1
             elif prior.get("corrected_from"):
@@ -292,6 +301,7 @@ def enrich_contract(
     d.setdefault("summary", {})  # Phase 4 always writes it; guard hand-edited dicts
     d["summary"]["matched_after_xml"] = matched_total
     d["summary"]["resolved_by_xml"] = n_xml_resolved
+    d["summary"]["resolved_by_xml_heuristic"] = n_xml_heuristic
     d["summary"]["corrected_by_xml"] = n_corrected
     d["summary"]["system_columns"] = n_system
     d["summary"]["legacy_columns"] = len(legacy)
@@ -299,6 +309,7 @@ def enrich_contract(
     d["audit"] = {
         "system_columns": n_system,
         "resolved_by_xml": n_xml_resolved,
+        "resolved_by_xml_heuristic": n_xml_heuristic,
         "corrected_by_xml": n_corrected,
         "choice_lists_resolved_from_xml": n_choice_lists,
         "legacy_columns": legacy,
@@ -310,7 +321,8 @@ def enrich_contract(
     print(
         f"[{dict_path.name}] enriched: "
         f"matched_after_xml={matched_total}/{len(variables)} "
-        f"(+xml_resolved={n_xml_resolved}, corrected_fuzzy={n_corrected}) "
+        f"(+xml_resolved={n_xml_resolved}, +xml_heuristic={n_xml_heuristic}, "
+        f"corrected_fuzzy={n_corrected}) "
         f"system={n_system} legacy={len(legacy)} "
         f"choice_lists_from_xml={n_choice_lists} "
         f"formdef_versions={len(versions)} drift={drift}"

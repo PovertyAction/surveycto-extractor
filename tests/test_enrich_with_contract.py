@@ -132,7 +132,8 @@ class TestOverlay:
     def test_summary_counters(self, enriched):
         s = enriched["summary"]
         assert s["matched_after_xml"] == 3        # name, pre_score, langs_1
-        assert s["resolved_by_xml"] == 2          # pre_score, langs_1
+        assert s["resolved_by_xml"] == 2          # pre_score, langs_1 (both exact)
+        assert s["resolved_by_xml_heuristic"] == 0
         assert s["corrected_by_xml"] == 0
         assert s["system_columns"] == 1
         assert s["legacy_columns"] == 1
@@ -202,6 +203,9 @@ class TestCorrectionHeuristicIdempotence:
         assert c["match"] == "string_key"
         assert c["string_key"] == "xyz"
         assert c["resolved_by"] == "xml-heuristic"   # NOT plain "xml"
+        # the heuristic is counted separately and does NOT inflate resolved_by_xml
+        assert d["summary"]["resolved_by_xml_heuristic"] == 1
+        assert d["summary"]["resolved_by_xml"] == 0
 
     def test_idempotent_rerun(self, tmp_path):
         # The Phase-4 hook re-runs enrichment on every build; a second pass must
@@ -214,5 +218,6 @@ class TestCorrectionHeuristicIdempotence:
         assert second_json == first_json
         assert second["summary"]["corrected_by_xml"] == first["summary"]["corrected_by_xml"] == 1
         assert second["summary"]["resolved_by_xml"] == first["summary"]["resolved_by_xml"]
+        assert second["summary"]["resolved_by_xml_heuristic"] == first["summary"]["resolved_by_xml_heuristic"] == 1
         assert second["variables"]["age"]["contract"]["corrected_from"] == "agee"
         assert second["variables"]["Pre_xyz"]["contract"]["resolved_by"] == "xml-heuristic"
