@@ -33,6 +33,7 @@ import os
 import re
 import sys
 import time
+import unicodedata
 import importlib.util
 from pathlib import Path
 from typing import Optional
@@ -181,12 +182,21 @@ def _is_sentinel_value(value) -> bool:
 # Lightweight TF-IDF index (no external dependencies)
 # ---------------------------------------------------------------------------
 
-_TOKEN_RE = re.compile(r"[a-z0-9]{2,}")
+# [^\W_] = any Unicode letter/digit but not underscore. The old [a-z0-9] was
+# ASCII-only, so accented Spanish/French question text ("cuántos niños")
+# shredded into fragments and never matched an agent's query. (#29.4)
+_TOKEN_RE = re.compile(r"[^\W_]{2,}", re.UNICODE)
 
 
 def _tokenize(text: str) -> list[str]:
-    """Split text into lowercase alpha-numeric tokens (>= 2 chars)."""
-    return _TOKEN_RE.findall(text.lower())
+    """Split text into lowercase tokens (>= 2 chars), accent-insensitive.
+
+    NFKD-normalises and strips combining marks so accented and unaccented
+    forms match both ways (an agent typing "ninos" hits "niños"), then
+    casefolds; non-Latin scripts are preserved."""
+    norm = unicodedata.normalize("NFKD", text)
+    norm = "".join(c for c in norm if not unicodedata.combining(c))
+    return _TOKEN_RE.findall(norm.casefold())
 
 
 class _TfidfIndex:
@@ -390,11 +400,15 @@ class SurveyStore:
             )
 
     def _load_survey(self, label: str, cfg: dict):
-        q_path = Path(cfg.get("questions_json", ""))
-        v_path = Path(cfg.get("output_json", ""))
+        # Only build a Path from a NON-EMPTY config value. Path("") is Path("."),
+        # whose .exists() is True and .with_name(...) raises ValueError -- so a
+        # DATASETS entry missing output_json used to crash the whole server on
+        # startup instead of degrading that one survey. (#29.2)
+        q_path = Path(cfg["questions_json"]) if cfg.get("questions_json") else None
+        v_path = Path(cfg["output_json"]) if cfg.get("output_json") else None
 
         # Variable dictionary (primary)
-        if v_path.exists():
+        if v_path and v_path.exists():
             try:
                 with open(v_path, encoding="utf-8") as f:
                     raw = json.load(f)
@@ -405,20 +419,24 @@ class SurveyStore:
                 }
                 self._mtimes[str(v_path)] = self._mtime(v_path)
             except (json.JSONDecodeError, OSError) as exc:
+                # Keep any previously-loaded data instead of wiping it: a reload
+                # firing mid-write (create_variable_dictionaries still writing)
+                # would otherwise serve "no data" until the next debounce. The
+                # mtime is NOT recorded, so the next check retries. (#29.3)
                 print(
-                    f"[survey-expert] WARNING: Failed to load {v_path}: {exc}",
+                    f"[survey-expert] WARNING: Failed to load {v_path} "
+                    f"(keeping previous data): {exc}",
                     file=sys.stderr,
                 )
-                self._vardicts[label] = {}
-                self._dataset_meta[label] = {}
-                self._graphs.pop(label, None)
+                self._vardicts.setdefault(label, {})
+                self._dataset_meta.setdefault(label, {})
         else:
             self._vardicts[label] = {}
             self._dataset_meta[label] = {}
             self._graphs.pop(label, None)
 
         # Questions (supplement)
-        if q_path.exists():
+        if q_path and q_path.exists():
             try:
                 with open(q_path, encoding="utf-8") as f:
                     questions = json.load(f)
@@ -431,11 +449,12 @@ class SurveyStore:
                 self._mtimes[str(q_path)] = self._mtime(q_path)
             except (json.JSONDecodeError, OSError) as exc:
                 print(
-                    f"[survey-expert] WARNING: Failed to load {q_path}: {exc}",
+                    f"[survey-expert] WARNING: Failed to load {q_path} "
+                    f"(keeping previous data): {exc}",
                     file=sys.stderr,
                 )
-                self._questions[label] = []
-                self._q_index[label] = {}
+                self._questions.setdefault(label, [])
+                self._q_index.setdefault(label, {})
         else:
             self._questions[label] = []
             self._q_index[label] = {}
@@ -444,7 +463,7 @@ class SurveyStore:
         self._build_indexes(label)
 
         # Load variable graph (convention: *_variable_graph.json next to vardict)
-        if _NX_AVAILABLE:
+        if _NX_AVAILABLE and v_path:
             graph_path = v_path.with_name(
                 v_path.stem.replace("_variable_dictionary", "_variable_graph") + ".json"
             )
@@ -543,11 +562,14 @@ class SurveyStore:
             return
         self._last_reload_check = now
         for label, cfg in self._config.items():
-            q_path = Path(cfg.get("questions_json", ""))
-            v_path = Path(cfg.get("output_json", ""))
-            # Also check graph file (convention-based path)
-            paths = [q_path, v_path]
+            # Skip empty config values (Path("") is Path(".") -- statting the
+            # cwd would trigger a spurious reload every check). (#29.2)
+            paths = []
+            if cfg.get("questions_json"):
+                paths.append(Path(cfg["questions_json"]))
             if cfg.get("output_json"):
+                v_path = Path(cfg["output_json"])
+                paths.append(v_path)
                 gp = v_path.with_name(
                     v_path.stem.replace("_variable_dictionary", "_variable_graph") + ".json"
                 )
@@ -1129,8 +1151,21 @@ class SurveyStore:
             lines.append(f"  [{label}]")
             lines.append(f"    observations       : {nn_str}")
             lines.append(f"    total_variables    : {sm.get('total_variables', '?')}")
-            lines.append(f"    matched_to_form    : {sm.get('matched_to_questions', '?')}")
-            lines.append(f"    unmatched          : {sm.get('unmatched', '?')}")
+            # Prefer the post-XML-overlay counts when enrichment has run --
+            # matched_to_questions/unmatched are the stale pre-XML fuzzy counts
+            # and understate matched / overstate unmatched for enriched
+            # dictionaries. (#24)
+            if "matched_after_xml" in sm:
+                _matched = sm["matched_after_xml"]
+                _total = sm.get("total_variables")
+                _unmatched = (_total - _matched
+                              if isinstance(_total, int) and isinstance(_matched, int)
+                              else sm.get("unmatched", "?"))
+                lines.append(f"    matched_to_form    : {_matched} (post-XML)")
+                lines.append(f"    unmatched          : {_unmatched}")
+            else:
+                lines.append(f"    matched_to_form    : {sm.get('matched_to_questions', '?')}")
+                lines.append(f"    unmatched          : {sm.get('unmatched', '?')}")
             lines.append(f"    from_repeat_groups : {sm.get('from_repeat_groups', '?')}")
             lines.append(f"    repeat_vars_loaded : {n_repeat}")
             lines.append(f"    select_multiple    : {sm.get('select_multiple_choices', '?')}")
