@@ -149,6 +149,44 @@ class TestMapColumn:
         m = contract.map_column("not_a_real_field")
         assert m["kind"] == "unmapped"
 
+    def test_negative_choice_code(self, contract):
+        # langs__66 (dash->double-underscore) is select_multiple choice -66,
+        # not a string-key fallback with choice_code None. (#23.1)
+        m = contract.map_column("langs__66")
+        assert m["kind"] == "matched"
+        assert m["node_path"] == "langs"
+        assert m["is_select_multiple"] is True
+        assert m["choice_code"] == -66
+
+    def test_leading_zero_choice_preserved_as_string(self, contract):
+        # langs_01 keeps "01" as a string rather than collapsing to int 1. (#23.1)
+        m = contract.map_column("langs_01")
+        assert m["choice_code"] == "01"
+
+    def test_ragged_under_indexed_repeat_flagged(self, contract):
+        # A repeat field with fewer indices than its depth is flagged ragged
+        # instead of silently dropping the level. (#23.2)
+        m = contract.map_column("member_name")   # depth 1, zero indices
+        assert m.get("ragged") is True
+
+
+class TestBalancedArgParsing:
+    """#23.4 -- search()/pulldata() args parsed balanced + quote-aware."""
+
+    def test_search_value_with_close_paren(self):
+        r = _parse_search("search('choices', 'matches', 'list', 'a)b')")
+        assert r["filter"] == {"list": "a)b"}
+
+    def test_pulldata_nested_concat_value_intact(self):
+        r = _parse_pulldata("pulldata('ds', concat('a', 'b'), 'k', node)")
+        assert r["dataset"] == "ds"
+        assert r["value"] == "concat('a', 'b')"
+        assert r["key"] == "k"
+
+    def test_search_dynamic_node_ref_value_is_none(self):
+        r = _parse_search("search('choices', 'matches', 'col', node_ref)")
+        assert r["filter"] == {"col": None}
+
 
 class TestBuildContractIO:
     def test_writes_json(self, tmp_path):

@@ -206,6 +206,9 @@ def enrich_contract(
             "data_source": node.data_source,
             "calculate": node.calculate,
         }
+        if m.get("ragged"):
+            # Column carried fewer repeat indices than the node's depth (#23.2).
+            entry["contract"]["ragged"] = True
         if node.preload:
             entry["contract"]["preload"] = {
                 "type": node.preload,
