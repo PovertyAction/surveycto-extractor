@@ -468,6 +468,10 @@ class QuestionIndex:
     lower:         Dict[str, List[Dict]]
     trunc32:       Dict[str, List[Dict]]
     lower_trunc32: Dict[str, List[Dict]] = field(default_factory=dict)
+    # Names of repeat groups (from each repeat_count question's
+    # repeat_group_name). Used to gate the suffix matcher so it only stamps
+    # repeat_iteration on a field that actually lives inside a repeat. (#26.2)
+    repeat_group_names: set = field(default_factory=set)
 
 
 def _build_question_index(questions: List[Dict]) -> QuestionIndex:
@@ -515,8 +519,29 @@ def _build_question_index(questions: List[Dict]) -> QuestionIndex:
                   f"variables: {names} - resolver will decline case-insensitive "
                   f"fallback for this name to avoid silent ambiguity")
 
+    repeat_group_names = _repeat_group_names(questions)
+
     return QuestionIndex(exact=exact, lower=lower, trunc32=trunc32,
-                         lower_trunc32=lower_trunc32)
+                         lower_trunc32=lower_trunc32,
+                         repeat_group_names=repeat_group_names)
+
+
+def _repeat_group_names(questions: List[Dict]) -> set:
+    """Names of every repeat group, taken from the repeat_count questions
+    (each declares the group it counts via repeat_group_name)."""
+    names = set()
+    for q in questions:
+        if q.get('type') == 'repeat_count':
+            rg = q.get('repeat_group_name')
+            if rg:
+                names.add(rg)
+    return names
+
+
+def _question_in_repeat(question: Dict, repeat_group_names: set) -> bool:
+    """True if any segment of the question's group_path is a repeat group."""
+    gp = question.get('group_path') or []
+    return any(seg in repeat_group_names for seg in gp)
 
 
 def _resolve_unambiguous(bucket_map: Dict[str, List[Dict]], key: str) -> Optional[Dict]:
@@ -772,20 +797,49 @@ def determine_variable_source(var_name: str, questions: List[Dict],
     result['references'] = refs if refs else None
 
     base_name = question['variable_name']
+    rgs = _index.repeat_group_names if _index is not None else _repeat_group_names(questions)
+    in_repeat = _question_in_repeat(question, rgs)
+    q_is_sm = question.get('type') == 'select_multiple'
+    choice_values = [str(c.get('value', '')) for c in (question.get('choices') or [])]
+
+    def _mark_select_multiple(code: str) -> None:
+        result['is_select_multiple'] = True
+        result['choice_code'] = code
+        result['choice_label'] = get_choice_label(question, code)
+        result['special_code_meaning'] = get_special_code_meaning(code)
+        result['choice_index'] = (choice_values.index(code)
+                                  if code in choice_values else None)
+
     if var_name != base_name:
+        # 1. Double suffix `base_<a>_<b>`: only a genuine select_multiple-in-
+        #    repeat indicator (type is SM, <a> is a real choice code, and the
+        #    field lives in a repeat). Otherwise it's a plain field with two
+        #    repeat indices -- mark repeat only, never fabricate a choice code
+        #    on a non-SM field. (#26.1)
         double_match = re.match(rf'{re.escape(base_name)}_(\d+)_(\d+)$', var_name)
+        # 2. Negative-code SM indicator `base__<n>` (dash->underscore), optionally
+        #    followed by repeat indices. The (\d+) suffix regexes below can't
+        #    cross the `__`, so this class was silently demoted to a plain
+        #    field before. (#26.3 -- same class as #23)
+        neg_match = re.match(rf'{re.escape(base_name)}__(\d+)((?:_\d+)*)$', var_name)
+
         if double_match:
-            choice_num = double_match.group(1)
-            repeat_num = double_match.group(2)
-            result['is_repeat'] = True
-            result['repeat_iteration'] = int(repeat_num)
-            result['is_select_multiple'] = True
-            result['choice_code'] = choice_num
-            result['choice_label'] = get_choice_label(question, choice_num)
-            result['special_code_meaning'] = get_special_code_meaning(choice_num)
-            # choice_index: position of this choice in the choice list (0-based)
-            choice_values = [str(c.get('value', '')) for c in (question.get('choices') or [])]
-            result['choice_index'] = choice_values.index(choice_num) if choice_num in choice_values else None
+            choice_num, repeat_num = double_match.group(1), double_match.group(2)
+            if q_is_sm and choice_num in choice_values and in_repeat:
+                result['is_repeat'] = True
+                result['repeat_iteration'] = int(repeat_num)
+                _mark_select_multiple(choice_num)
+            elif in_repeat:
+                # Plain field with two repeat indices; iteration = last suffix.
+                result['is_repeat'] = True
+                result['repeat_iteration'] = int(repeat_num)
+            # else: base mapping stands, no fabricated flags.
+        elif neg_match and q_is_sm and f"-{neg_match.group(1)}" in choice_values:
+            _mark_select_multiple(f"-{neg_match.group(1)}")
+            trailing = neg_match.group(2)
+            if trailing and in_repeat:
+                result['is_repeat'] = True
+                result['repeat_iteration'] = int(trailing.strip('_').split('_')[-1])
         else:
             match = re.match(rf'{re.escape(base_name)}_(\d+)$', var_name)
             # Fallback: digit appended directly without underscore (e.g. base "f_hr_fn_r" → "f_hr_fn_r1")
@@ -793,18 +847,13 @@ def determine_variable_source(var_name: str, questions: List[Dict],
             active_match = match or match_direct
             if active_match:
                 suffix_num = active_match.group(1)
-                if question['type'] == 'select_multiple':
-                    choice_values = [str(c.get('value', '')) for c in (question.get('choices') or [])]
-                    if str(suffix_num) in choice_values:
-                        result['is_select_multiple'] = True
-                        result['choice_code'] = suffix_num
-                        result['choice_label'] = get_choice_label(question, suffix_num)
-                        result['special_code_meaning'] = get_special_code_meaning(suffix_num)
-                        result['choice_index'] = choice_values.index(suffix_num) if suffix_num in choice_values else None
-                    else:
-                        result['is_repeat'] = True
-                        result['repeat_iteration'] = int(suffix_num)
-                else:
+                if q_is_sm and str(suffix_num) in choice_values:
+                    _mark_select_multiple(suffix_num)
+                elif in_repeat:
+                    # Only stamp repeat_iteration on a field that actually lives
+                    # in a repeat -- otherwise a post-processing column like
+                    # `income2` off top-level `income` got a fabricated
+                    # iteration and a bogus per-iteration skip-logic rewrite. (#26.2)
                     result['is_repeat'] = True
                     result['repeat_iteration'] = int(suffix_num)
 
@@ -1243,33 +1292,41 @@ def validate_select_multiple(dict_path, dataset_name: str):
         questions = json.load(f)
 
     questions_dict = {q['variable_name']: q for q in questions}
-    sm_vars = {
-        var_name: var_info
-        for var_name, var_info in variables.items()
-        if (var_info.get('survey', {}).get('type') == 'select_multiple' and
-            isinstance(var_info.get('survey', {}).get('choices'), dict))
-    }
 
-    print(f"\nFound {len(sm_vars)} select_multiple variables")
-    if len(sm_vars) == 0:
-        print("No select_multiple variables to validate.")
-        return True
+    # Scan EVERY variable, not just those already shaped like an SM indicator.
+    # The old pre-filter (type==SM AND choices-is-dict) made the two failure
+    # classes below structurally invisible -- it validated only entries that
+    # already looked correct. (#26.4)
+    _NEG_INDICATOR_RE = re.compile(r".*__\d+(?:_\d+)*$")
+    candidates = []          # (var_name, survey_info) claiming to be SM indicators
+    for var_name, var_info in variables.items():
+        survey_info = var_info.get('survey', {})
+        if isinstance(survey_info.get('choices'), dict):
+            candidates.append((var_name, survey_info))
+
+    print(f"\nFound {len(candidates)} select_multiple indicator column(s)")
 
     mismatches = []
     valid_count = 0
 
-    for var_name, var_info in sm_vars.items():
-        survey_info = var_info['survey']
+    for var_name, survey_info in candidates:
         choice_dict = survey_info.get('choices')
         original_var_name = survey_info.get('original_variable_name')
-
-        if not choice_dict or not isinstance(choice_dict, dict):
-            mismatches.append({'variable': var_name, 'issue': 'No choice dict found', 'original_variable': original_var_name})
-            continue
-
         original_question = questions_dict.get(original_var_name)
+
         if not original_question:
             mismatches.append({'variable': var_name, 'issue': 'Original question not found', 'original_variable': original_var_name})
+            continue
+
+        # (b) Fabricated select_multiple: an indicator-shaped entry whose
+        # original question is NOT actually a select_multiple.
+        if original_question.get('type') != 'select_multiple':
+            mismatches.append({
+                'variable': var_name,
+                'issue': f"fabricated select_multiple (original '{original_var_name}' is "
+                         f"'{original_question.get('type')}', not select_multiple)",
+                'original_variable': original_var_name,
+            })
             continue
 
         original_choices = original_question.get('choices', [])
@@ -1286,6 +1343,28 @@ def validate_select_multiple(dict_path, dataset_name: str):
             })
         else:
             valid_count += 1
+
+    # (c) Demoted negative-code columns: a `base__<n>[...]` column that resolved
+    # to a plain field (no indicator dict) even though its original question is
+    # a select_multiple -- the negative code was silently dropped.
+    for var_name, var_info in variables.items():
+        survey_info = var_info.get('survey', {})
+        if isinstance(survey_info.get('choices'), dict):
+            continue  # already handled as an indicator above
+        if not _NEG_INDICATOR_RE.match(var_name):
+            continue
+        original_var_name = survey_info.get('original_variable_name')
+        original_question = questions_dict.get(original_var_name)
+        if original_question and original_question.get('type') == 'select_multiple':
+            mismatches.append({
+                'variable': var_name,
+                'issue': "negative-code select_multiple column demoted to plain field",
+                'original_variable': original_var_name,
+            })
+
+    if not candidates and not mismatches:
+        print("No select_multiple variables to validate.")
+        return True
 
     print(f"\nValidation Results:")
     print(f"  Valid mappings: {valid_count}")
