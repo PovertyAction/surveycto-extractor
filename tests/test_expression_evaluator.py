@@ -132,6 +132,34 @@ class TestNumericSemantics:
     def test_mod_truncates_toward_zero(self):
         assert evaluate("-3 mod 2", ctx()) == -1.0
 
+
+class TestNestedRepeatScoping:
+    def test_outer_field_not_bled_from_inner_index(self):
+        # At (outer=2, inner=3), a reference to an outer-scoped field `a`
+        # (stored a_2) must resolve to a_2, NOT a_3 (a different outer
+        # iteration) -- the cross-iteration bleed of #28.4.
+        c = ctx(row={"a_2": "two", "a_3": "three"},
+                repeat_stack=[("outer", 2), ("inner", 3)])
+        assert evaluate("${a}", c) == "two"
+
+    def test_nested_field_resolves_full_chain(self):
+        c = ctx(row={"b_2_3": "correct", "b_2_1": "other", "b_1_3": "wrong"},
+                repeat_stack=[("outer", 2), ("inner", 3)])
+        assert evaluate("${b}", c) == "correct"
+
+    def test_sum_over_nested_field_scoped_to_current_outer(self):
+        # sum(${plot}) inside parcel 2 sums only parcel 2's plots (#28.5) --
+        # the old single-suffix enumeration found nothing for nested storage.
+        c = ctx(row={"plot_1_1": "10", "plot_1_2": "20",
+                     "plot_2_1": "3", "plot_2_2": "4"},
+                repeat_stack=[("parcel", 2)])
+        assert evaluate("sum(${plot})", c) == 7  # 3 + 4, not 37 and not 0
+
+    def test_single_repeat_sum_unchanged(self):
+        # Regression guard: a plain single-level repeat still sums all.
+        c = ctx(row={"x_1": "1", "x_2": "2", "x_3": "3"})
+        assert evaluate("sum(${x})", c) == 6
+
     def test_empty_function(self):
         assert evaluate_bool("empty(${missing})", ctx(row={})) is True
 

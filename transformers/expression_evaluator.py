@@ -422,21 +422,25 @@ class EvalContext:
         """Resolve a ${var} reference against the row state, accounting for
         wide-format repeat-suffix expansion if we're inside a repeat."""
         if self.repeat_stack:
-            # Innermost first — try the deepest single-suffix match. Covers
-            # single-level repeats (``var_i``) and the evaluator's own repeat
-            # aggregation (count/sum/join push one level at a time).
-            for _rep, idx in reversed(self.repeat_stack):
-                key = f"{name}_{idx}"
+            idxs = [idx for _rep, idx in self.repeat_stack]
+            # 1. Chain-first: full ancestor->self chain, then progressively
+            #    shorter OUTER prefixes down to the outermost single suffix.
+            #    This resolves an outer-scoped field (stored ``var_<outer>``) to
+            #    the CURRENT outer iteration BEFORE the single-suffix fallback
+            #    can wrongly grab a deeper index -- e.g. at (outer=2, inner=3) a
+            #    reference to an outer field ``a`` hits ``a_2``, not ``a_3``.
+            #    (#28.4 -- was: innermost single-suffix loop ran first and bled
+            #    iteration 3's value into iteration 2's row.)
+            for k in range(len(idxs), 0, -1):
+                key = name + "".join(f"_{j}" for j in idxs[:k])
                 if key in self.row:
                     return self.row[key]
-            # Nested repeats store combined suffixes (``var_o_i``). Try the
-            # full ancestor→self chain, then progressively shorter prefixes so
-            # an inner-context reference to an OUTER-level field (stored
-            # ``var_o``) still resolves. Outermost-first matches how
-            # ``_repeat_chain`` builds the suffix.
-            idxs = [idx for _rep, idx in self.repeat_stack]
-            for k in range(len(idxs), 1, -1):
-                key = name + "".join(f"_{j}" for j in idxs[:k])
+            # 2. Innermost-first single-suffix fallback: covers an aggregate
+            #    over a different repeat's field (stored ``var_i``) evaluated
+            #    while nested inside another repeat. The outermost single suffix
+            #    was already tried by chain k=1, so skip it here.
+            for _rep, idx in reversed(self.repeat_stack[1:]):
+                key = f"{name}_{idx}"
                 if key in self.row:
                     return self.row[key]
         if name in self.row:
@@ -901,20 +905,43 @@ def _fn_if_empty_date(args, ctx):
 
 # ── Aggregates over repeated fields ──────────────────────────────────────────
 
+def _collect_repeat_instances(var_name: str, ctx: EvalContext) -> List[Tuple[tuple, Any]]:
+    """Return [(index_tuple, value), ...] for every wide-format instance of
+    ``var_name`` (``var_1`` ... and nested ``var_o_i`` ...), sorted by index.
+
+    Nested-repeat fields are stored with a combined suffix (``var_o_i``), which
+    the old single-suffix enumeration (``var_1, var_2, ...``) never found, so
+    aggregates over a nested field silently returned nothing. When evaluated
+    inside a repeat, scopes to the current outer iteration by keeping the
+    longest current-chain prefix that yields any hits (so ``sum(${plot})``
+    inside parcel 2 sums only parcel 2's plots), falling back to the full set
+    if no prefix matches. (#28.5)"""
+    rx = re.compile(rf"^{re.escape(var_name)}((?:_\d+)+)$")
+    matches: List[Tuple[tuple, Any]] = []
+    for key, v in ctx.row.items():
+        m = rx.match(key)
+        if m:
+            idxs = tuple(int(p) for p in m.group(1).split("_") if p != "")
+            matches.append((idxs, v))
+    if not matches:
+        return []
+    if ctx.repeat_stack:
+        chain = tuple(idx for _rep, idx in ctx.repeat_stack)
+        for k in range(len(chain), 0, -1):
+            prefix = chain[:k]
+            scoped = [(idxs, v) for idxs, v in matches if idxs[:k] == prefix]
+            if scoped:
+                matches = scoped
+                break
+    matches.sort(key=lambda t: t[0])
+    return matches
+
+
 def _collect_repeat_values(var_name: str, ctx: EvalContext) -> List[Any]:
-    """Return [row[var_1], row[var_2], ...] in iteration order, dropping
+    """Values of every instance of ``var_name`` in iteration order, dropping
     empty cells. Used by sum/min/max/count/join and their -if variants."""
-    out: List[Any] = []
-    i = 1
-    while True:
-        key = f"{var_name}_{i}"
-        if key not in ctx.row:
-            break
-        v = ctx.row[key]
-        if v != "" and v is not None:
-            out.append(v)
-        i += 1
-    return out
+    return [v for _idxs, v in _collect_repeat_instances(var_name, ctx)
+            if v != "" and v is not None]
 
 
 def _aggregate_arity_error(name: str, got: int, expected: int) -> EvaluationError:
@@ -1645,15 +1672,12 @@ def _eval_repeat_aggregate(name: str, raw_args: List[Any], ctx: EvalContext) -> 
         )
 
     base = field_node.name
-    # Enumerate every iteration with the same prefix in the row dict.
-    instances: List[Tuple[int, Any]] = []
-    i = 1
-    while True:
-        key = f"{base}_{i}"
-        if key not in ctx.row:
-            break
-        instances.append((i, ctx.row[key]))
-        i += 1
+    # Enumerate every iteration (nested-aware, scoped to the current repeat
+    # chain). The local index is the last suffix component, which is what the
+    # per-iteration push and rank-index semantics key on. (#28.5)
+    instances: List[Tuple[int, Any]] = [
+        (idxs[-1], v) for idxs, v in _collect_repeat_instances(base, ctx)
+    ]
 
     # Apply predicate (if any) by re-binding the repeat stack so that inner
     # ${var} references resolve to that iteration's values.
