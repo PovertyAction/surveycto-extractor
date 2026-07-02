@@ -58,7 +58,9 @@ except ImportError:
 
 # Pull DATASETS from this project's config.py (same directory as this script)
 sys.path.insert(0, str(Path(__file__).parent))
+import config
 from config import DATASETS
+import sentinels as _sentinels
 
 
 def _write_parquet_sidecar(df: pd.DataFrame, dta_path: Path) -> Optional[Path]:
@@ -311,8 +313,13 @@ def load_data(dataset_name: str):
     return df, questions, cfg, meta, pq_path, ext_missing_counts, minmax
 
 
-SENTINEL_CODES_LIST = [-99, -88, -98, -77, -66, -55]
-SENTINEL_STRINGS_SET = {"-99", "-88", "-98", "-77", "-66", "-55"}
+# Resolved once from the shared sentinels module + this project's config.py
+# (config may override SENTINEL_MEANINGS / SENTINEL_SCAN_ONLY). Single source
+# of truth shared with load_survey_metadata.py -- see sentinels.py / #26.8.
+_SENTINEL_MEANINGS = _sentinels.resolve_sentinel_meanings(config)
+_SCAN_ONLY = _sentinels.resolve_scan_only(config)
+SENTINEL_CODES_LIST = _sentinels.sentinel_scan_codes(_SENTINEL_MEANINGS, _SCAN_ONLY)
+SENTINEL_STRINGS_SET = _sentinels.sentinel_scan_strings(_SENTINEL_MEANINGS, _SCAN_ONLY)
 
 
 def batch_sentinel_scan(
@@ -666,13 +673,9 @@ def adjust_skip_logic_for_repeats(metadata: Dict, var_name: str, questions: List
 
 
 def get_special_code_meaning(choice_code: str) -> Optional[str]:
-    """Get meaning for special missing value codes."""
-    special_codes = {
-        '-99': 'Refused to answer',
-        '-98': "Don't know",
-        '-97': 'Other (specify)'
-    }
-    return special_codes.get(str(choice_code))
+    """Human label for a special missing/sentinel code, from the resolved
+    (config-overridable) meanings table. Returns None for a non-sentinel code."""
+    return _sentinels.sentinel_meaning(choice_code, _SENTINEL_MEANINGS)
 
 
 def determine_variable_source(var_name: str, questions: List[Dict],

@@ -3,6 +3,20 @@ import re
 
 import pandas as pd
 
+# Sentinel recode table -- shared with create_variable_dictionaries.py via
+# sentinels.py so the mvdecode mapping and the choice-code labels can't drift
+# (#26.8). config (if importable) may override SENTINEL_MEANINGS.
+try:
+    import config as _config
+except Exception:  # standalone import without config on path
+    _config = None
+try:
+    import sentinels as _sentinels
+    _SENTINEL_MEANINGS = _sentinels.resolve_sentinel_meanings(_config)
+except Exception:
+    _sentinels = None
+    _SENTINEL_MEANINGS = None
+
 
 def load_survey_metadata(json_path: str) -> pd.DataFrame:
     """
@@ -359,16 +373,21 @@ def write_destring_block(
         lines.append(f"        if `\"`r(varlist)'\"' != \"\" destring `r(varlist)', replace")
     lines += ["    }", ""]
 
-    # Pass 2: mvdecode inside quietly
+    # Pass 2: mvdecode inside quietly. Recode spec comes from the shared
+    # sentinels table (config-overridable); byte-identical to the historical
+    # hand-written mapping for the default IPA convention.
+    _mv = (_sentinels.mvdecode_spec(_SENTINEL_MEANINGS)
+           if _sentinels is not None else "-99=.d \\ -88=.r \\ -77=.n \\ -66=.o \\ -55=.m")
+    _mv_comment = "  ".join(part.strip() for part in _mv.split("\\"))
     lines += [
-        "    * Pass 2: recode sentinels (-99=.d  -88=.r  -77=.n  -66=.o  -55=.m)",
+        f"    * Pass 2: recode sentinels ({_mv_comment})",
         "    quietly {",
     ]
     for i in range(1, len(mv_chunks) + 1):
         lines.append(f"        ds `mv_{i}', has(type numeric)")
         lines.append(
             f"        if `\"`r(varlist)'\"' != \"\" "
-            f"mvdecode `r(varlist)', mv(-99=.d \\ -88=.r \\ -77=.n \\ -66=.o \\ -55=.m)"
+            f"mvdecode `r(varlist)', mv({_mv})"
         )
     lines += ["    }", ""]
 

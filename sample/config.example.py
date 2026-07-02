@@ -72,3 +72,10 @@ EXCLUDED_TYPES = [
 ]
 
 SYSTEM_PREFIXES = ["instanceID", "instanceName", "KEY", "SET-OF-"]
+
+
+# Optional: override sentinel codes (default = IPA convention -99/-88/...).
+# See config.template.py for the format. The sample form uses 3-digit codes
+# (-999/-888/...) in its choice lists, which are project data, not recode
+# targets, so no override is needed here.
+# SENTINEL_MEANINGS = {-99: ("Don't know", ".d"), -88: ("Refused to answer", ".r")}

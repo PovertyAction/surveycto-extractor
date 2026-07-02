@@ -136,3 +136,18 @@ SYSTEM_PREFIXES = [
     "KEY",
     "SET-OF-"
 ]
+
+
+# --- Optional: sentinel / special-missing codes -----------------------------
+# Numeric codes standing in for non-response reasons. This is a PROJECT
+# CONVENTION, not a standard -- override it to match your survey's codes.
+# Format: {code: (human_label, stata_extended_missing)}. Omit to use the IPA
+# default (-99=Don't know/.d, -88=Refused/.r, -77=N/A/.n, -66=Other/.o,
+# -55=Not in list/.m). Consumed by create_variable_dictionaries.py (choice-code
+# labels + data scan) and load_survey_metadata.py (Stata mvdecode recode).
+# SENTINEL_MEANINGS = {
+#     -99: ("Don't know", ".d"),
+#     -88: ("Refused to answer", ".r"),
+# }
+# Extra codes to scan/count as sentinels but never recode (default: [-98]).
+# SENTINEL_SCAN_ONLY = [-98]
