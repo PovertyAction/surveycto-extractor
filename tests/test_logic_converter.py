@@ -132,3 +132,43 @@ class TestRegressionGuards:
 
     def test_selected_select_multiple(self):
         assert convert("selected(${ls}, '2')", {"ls": "select_multiple"}) == "(ls_2 == 1)"
+
+
+class TestStructuralIssues:
+    """#27.7 -- structural_issues must flag every corruption mode a strip or
+    translate bug can leave behind. Inputs are the exact corrupted outputs
+    quoted in issues #22 and #27."""
+
+    issues = staticmethod(LogicConverter.structural_issues)
+
+    def test_leftover_sentinel(self):
+        assert "leftover __STRIP__ sentinel" in self.issues("a == 1 & __STRIP__")
+
+    def test_residual_single_quote(self):
+        # From #22 case 3: contains needle emptied with orphan quote tail.
+        assert "residual single quote" in self.issues("strpos(a, \"\") > 0')")
+
+    def test_orphan_comma(self):
+        # From #27.6: sentinel-as-argument leaves cond( , 2, 3).
+        assert "orphan comma" in self.issues("cond( , 2, 3) > 1")
+
+    def test_unbalanced_parens(self):
+        # From #22 case 2: index(pos(${a})) > 2 -> ') > 2'.
+        assert "unbalanced parentheses" in self.issues(") > 2")
+
+    def test_dangling_bang(self):
+        # From #22 case 1: 'a == 1 & !' -- invalid Stata.
+        assert "dangling !" in self.issues("a == 1 & !")
+
+    def test_leaked_function(self):
+        assert any(i.startswith("leaked function: pulldata")
+                   for i in self.issues("pulldata('x', 'y', 'z', a) == 1"))
+
+    def test_quoted_content_ignored(self):
+        # Parens, commas, quotes inside a double-quoted Stata literal are fine.
+        assert self.issues('regexm(a, "(x,y) \'q\'") & b == 1') == []
+
+    def test_clean_conditions_pass(self):
+        assert self.issues("x > 5 & !missing(x)") == []
+        assert self.issues("cond(missing(a), b, a) == 2") == []
+        assert self.issues("!(a == 1) | inlist(b, 1, 2)") == []

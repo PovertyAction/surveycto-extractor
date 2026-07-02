@@ -824,6 +824,82 @@ class LogicConverter:
 
     # ------------------------------------------------------------------
 
+    # Every function name the converter can legitimately EMIT into Stata
+    # output. Anything else followed by `(` in a converted condition is a
+    # leaked (untranslated or half-stripped) call.
+    _EMIT_WHITELIST = frozenset({
+        "cond", "missing", "inlist", "strpos", "regexm", "substr",
+        "strlen", "strlower", "strupper", "rowtotal", "mod", "int",
+        "min", "max",
+    })
+
+    @staticmethod
+    def _remove_double_quoted(s: str) -> str:
+        """Replace double-quoted literal spans (the converter's own emissions,
+        e.g. regexm(v, "...")) with a neutral placeholder token so structural
+        checks don't false-positive on quotes/parens/commas that live inside a
+        legitimate Stata string. A placeholder (not deletion) keeps argument
+        structure intact -- deleting the literal from `regexm(a, "x")` would
+        leave `regexm(a, )` and trip the orphan-comma check."""
+        out: List[str] = []
+        in_str = False
+        for ch in s:
+            if in_str:
+                if ch == '"':
+                    in_str = False
+                    out.append("_LIT_")
+            elif ch == '"':
+                in_str = True
+            else:
+                out.append(ch)
+        return ''.join(out)
+
+    @staticmethod
+    def structural_issues(condition: str) -> List[str]:
+        """
+        Return a list of structural-corruption findings in an
+        already-converted Stata condition. Empty list = structurally sound.
+
+        These are the corruption modes a strip/translate bug leaves behind:
+        a leftover __STRIP__ sentinel, a residual single quote (Stata does
+        not allow them), orphan commas from a half-stripped call, unbalanced
+        parentheses, a dangling `!`, or a leaked function name the converter
+        never emits. All checks ignore double-quoted string literals.
+        """
+        issues: List[str] = []
+        if _SENTINEL in condition:
+            issues.append("leftover __STRIP__ sentinel")
+
+        bare = LogicConverter._remove_double_quoted(condition)
+
+        if "'" in bare:
+            issues.append("residual single quote")
+
+        if (re.search(r'\(\s*,', bare) or re.search(r',\s*\)', bare)
+                or re.search(r',\s*,', bare)
+                or re.match(r'^\s*,', bare) or re.search(r',\s*$', bare)):
+            issues.append("orphan comma")
+
+        depth = 0
+        for ch in bare:
+            if ch == '(':
+                depth += 1
+            elif ch == ')':
+                depth -= 1
+                if depth < 0:
+                    break
+        if depth != 0:
+            issues.append("unbalanced parentheses")
+
+        if re.search(r'!\s*(?:$|[&|,)])', bare):
+            issues.append("dangling !")
+
+        for m in re.finditer(r'\b([a-z][a-z0-9:-]*)\s*\(', bare):
+            if m.group(1) not in LogicConverter._EMIT_WHITELIST:
+                issues.append(f"leaked function: {m.group(1)}()")
+
+        return issues
+
     @staticmethod
     def validate_translations(conditions: list) -> None:
         """
@@ -866,6 +942,22 @@ class LogicConverter:
             print(f"  {fname:22s}  {status}")
             if hits:
                 print(f"    example: {hits[0][:110]}")
+
+        # Structural corruption sweep: catches half-stripped calls, orphan
+        # punctuation, and leaked functions that the per-function checks
+        # above cannot see (they only match known SurveyCTO names).
+        print("  --- STRUCTURAL ---")
+        struct_hits: Dict[str, List[str]] = {}
+        for c in conditions:
+            if not c:
+                continue
+            for issue in LogicConverter.structural_issues(c):
+                struct_hits.setdefault(issue, []).append(c)
+        if not struct_hits:
+            print("  no structural issues       OK (0)")
+        for issue, examples in sorted(struct_hits.items()):
+            print(f"  {issue:26s}  REMAINING: {len(examples)}")
+            print(f"    example: {examples[0][:110]}")
 
     @staticmethod
     def combine_conditions(conditions: List[str], operator: str = "&") -> Optional[str]:
