@@ -456,13 +456,26 @@ def _to_number(value: Any) -> float:
         return 1.0 if value else 0.0
     if isinstance(value, (int, float)):
         return float(value)
+    # Dates/datetimes coerce to decimal days since the epoch, matching XPath
+    # (dates behave as numbers in arithmetic) and decimal-date-time(). Without
+    # this, `today() - date(${dob})` fell through to str()->NaN->0, making the
+    # ubiquitous age calc `int((today() - date(dob)) div 365.25)` yield 0 for
+    # every respondent (#28.3). datetime is a subclass of date, so test it first.
+    if isinstance(value, datetime.datetime):
+        return (value - _EPOCH_DATETIME).total_seconds() / 86_400.0
+    if isinstance(value, datetime.date):
+        return float((value - _EPOCH_DATE).days)
     s = str(value).strip()
     if s == "":
-        return 0.0  # XPath number('') is NaN, but SurveyCTO behaves like 0 in arithmetic
+        # XPath number('') is NaN. Comparisons with NaN are false and NaN
+        # arithmetic yields NaN, which serialises to a blank cell -- matching
+        # SurveyCTO, where a blank/skipped field neither satisfies a gate nor
+        # contributes a 0 to a sum. (The old 0.0 leaked through `< N`
+        # comparisons and `+` arithmetic -- #28.1/#28.2.)
+        return float("nan")
     if _NUM_RX.match(s):
         return float(s)
-    # Non-numeric string -> NaN-like; we use 0.0 to keep arithmetic from
-    # propagating exceptions. Comparisons against this should be careful.
+    # Non-numeric, non-empty string -> NaN (comparisons false, arithmetic NaN).
     return float("nan")
 
 
@@ -470,6 +483,11 @@ def _to_string(value: Any) -> str:
     if isinstance(value, bool):
         return "true" if value else "false"
     if isinstance(value, float):
+        # NaN (a blank/skipped numeric or blank arithmetic result) serialises
+        # to an empty cell, not the literal "nan" -- this is the single point
+        # that turns propagated-blank NaN into a blank CSV value. (#28.2)
+        if value != value:
+            return ""
         # SurveyCTO does not render trailing .0 for integer floats
         if value.is_integer():
             return str(int(value))
@@ -592,8 +610,8 @@ def _fn_int(args, ctx):
     if len(args) != 1:
         raise EvaluationError(f"int() expects 1 arg, got {len(args)}")
     n = _to_number(args[0])
-    if n != n:  # NaN
-        return 0.0
+    if n != n:  # NaN in -> NaN out (blank propagates; was 0.0, which made
+        return float("nan")  # int() of a blank/undated field read as 0 -- #28.3)
     return float(int(n))
 
 
@@ -680,11 +698,16 @@ def _fn_pulldata(args, ctx):
     key_col = _to_string(args[2])
     key_val = args[3]
     if ctx.pulldata_lookup is None:
+        # No lookup wired in -> blank, as before (see test_pulldata_without_lookup).
         return ""
+    # A configured lookup that RAISES is a real error (bad column/key name, a
+    # bug in the lookup) and must surface via safe_evaluate's strip log rather
+    # than silently degrade to a blank cell -- mirrors the regex() contract
+    # from #12 ("log or raise, never hide"). (#28.9)
     try:
         return ctx.pulldata_lookup(csv_name, col, key_col, key_val)
-    except Exception:
-        return ""
+    except Exception as e:
+        raise EvaluationError(f"pulldata({csv_name!r}, {col!r}, ...) failed: {e}")
 
 
 # ── Date / time helpers ──────────────────────────────────────────────────────
@@ -1214,7 +1237,10 @@ def _fn_round(args, ctx):
     digits = int(_to_number(args[1])) if len(args) == 2 else 0
     if n != n:
         return float("nan")
-    return round(n, digits)
+    # XPath/SurveyCTO round() is round-half-up, not Python's banker's rounding:
+    # round(2.5) is 3, round(-2.5) is -2 (half rounds toward +inf).
+    scale = 10 ** digits
+    return math.floor(n * scale + 0.5) / scale
 
 
 @_register("pow")
@@ -1492,7 +1518,9 @@ def _eval_binop(node: BinOp, ctx: EvalContext) -> Any:
         r = _to_number(right)
         if r == 0:
             return float("nan")
-        return _to_number(left) % r
+        # XPath mod truncates toward zero (like C fmod), so -3 mod 2 == -1;
+        # Python's % is floored (-3 % 2 == 1). Use fmod to match SurveyCTO.
+        return math.fmod(_to_number(left), r)
     raise EvaluationError(f"unknown binary op {op}")
 
 
@@ -1639,7 +1667,11 @@ def _eval_repeat_aggregate(name: str, raw_args: List[Any], ctx: EvalContext) -> 
             selected.append((idx, value))
 
     if name == "count-if":
-        return float(sum(1 for _, v in selected if v != "" and v is not None))
+        # SurveyCTO count-if counts every iteration whose criterion holds,
+        # regardless of the counted field's own emptiness -- a skipped-but-
+        # qualifying iteration still counts. (Was: only non-empty values,
+        # which undercounted -- #28.10.)
+        return float(len(selected))
     if name == "sum-if":
         return sum(_to_number(v) for _, v in selected if _to_number(v) == _to_number(v))
     if name in ("min-if", "max-if"):

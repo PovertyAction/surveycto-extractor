@@ -53,14 +53,23 @@ class TestShortCircuit:
 
 
 class TestMissingValues:
-    def test_blank_numeric_field_coerces_to_zero_in_comparison(self):
-        # The evaluator coerces a blank field to 0 in numeric context (see
-        # _to_number), so a blank behaves as 0 -- NOT as Stata's +inf missing
-        # and NOT as an always-False NaN. This is the synth-vs-Stata gap
-        # documented in docs/synthetic-generator.md.
+    def test_blank_numeric_field_comparison_is_false_both_ways(self):
+        # A blank/skipped numeric field is NaN (XPath number('')), so a
+        # comparison is False in BOTH directions -- matching SurveyCTO, where a
+        # skipped field does not satisfy a gate. (Previously blank coerced to 0,
+        # so `${age} < 18` wrongly fired and the synth populated questions real
+        # SurveyCTO would hide -- #28.1.)
         c = ctx(row={"age": ""})
-        assert evaluate_bool("${age} > 18", c) is False   # 0 > 18
-        assert evaluate_bool("${age} < 18", c) is True     # 0 < 18
+        assert evaluate_bool("${age} > 18", c) is False
+        assert evaluate_bool("${age} < 18", c) is False
+
+    def test_blank_arithmetic_propagates_blank(self):
+        # Blank + blank is NaN, which serialises to an empty string, not 0 or
+        # "nan" -- matching a blank SurveyCTO export cell. (#28.2)
+        c = ctx(row={"inc1": "", "inc2": ""})
+        assert evaluate("${inc1} + ${inc2}", c) != evaluate("${inc1} + ${inc2}", c)  # NaN
+        from transformers.expression_evaluator import _to_string
+        assert _to_string(evaluate("${inc1} + ${inc2}", c)) == ""
 
     def test_explicit_nan_operand_makes_comparison_false(self):
         # Only an explicit NaN operand (here, an unparseable date) forces the
@@ -72,6 +81,56 @@ class TestMissingValues:
         c = ctx(row={"name": ""})
         assert evaluate_bool("${name} = ''", c) is True
         assert evaluate_bool("${name} != ''", c) is False
+
+    def test_equal_semantics_audit(self):
+        # Guards for the NaN change: blank must NOT equal 0, blank equals blank,
+        # numeric-string equals numeric.
+        assert evaluate_bool("${x} = 0", ctx(row={"x": ""})) is False
+        assert evaluate_bool("${x} = ''", ctx(row={"x": ""})) is True
+        assert evaluate_bool("'2' = 2", ctx()) is True
+
+
+class TestDateArithmetic:
+    def test_age_calc_yields_real_age_not_zero(self):
+        # int((today() - date(${dob})) div 365.25) -- the ubiquitous age calc.
+        # Dates must coerce to decimal days so this is the true age, not 0
+        # (which every respondent got when date subtraction fell to NaN). #28.3
+        c = ctx(row={"dob": "1990-01-01"}, now=datetime.datetime(2020, 1, 1))
+        age = evaluate("int((today() - date(${dob})) div 365.25)", c)
+        assert age == 29 or age == 30  # ~30 years, floor after div
+
+    def test_age_gate_now_reachable(self):
+        c = ctx(row={"dob": "1990-01-01"}, now=datetime.datetime(2020, 1, 1))
+        assert evaluate_bool(
+            "int((today() - date(${dob})) div 365.25) >= 18", c) is True
+
+    def test_blank_dob_age_is_nan_not_zero(self):
+        c = ctx(row={"dob": ""}, now=datetime.datetime(2020, 1, 1))
+        age = evaluate("int((today() - date(${dob})) div 365.25)", c)
+        assert age != age  # NaN, not 0
+
+
+class TestPulldataErrorContract:
+    def test_pulldata_without_lookup_returns_empty(self):
+        assert evaluate("pulldata('f', 'c', 'k', 1)", ctx()) == ""
+
+    def test_pulldata_raising_lookup_surfaces_error(self):
+        def _boom(*a):
+            raise KeyError("no such column")
+        c = ctx(pulldata_lookup=_boom)
+        # safe_evaluate should log/raise, not silently blank (#28.9).
+        with pytest.raises(EvaluationError):
+            evaluate("pulldata('f', 'c', 'k', 1)", c)
+
+
+class TestNumericSemantics:
+    def test_round_half_up(self):
+        assert evaluate("round(2.5)", ctx()) == 3
+        assert evaluate("round(3.5)", ctx()) == 4
+        assert evaluate("round(-2.5)", ctx()) == -2
+
+    def test_mod_truncates_toward_zero(self):
+        assert evaluate("-3 mod 2", ctx()) == -1.0
 
     def test_empty_function(self):
         assert evaluate_bool("empty(${missing})", ctx(row={})) is True
