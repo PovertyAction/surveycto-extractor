@@ -212,7 +212,11 @@ def _scan_and_clean_extended_missings(
     t0 = time.perf_counter()
     result: Dict[str, Dict[str, int]] = {}
 
-    obj_cols = [c for c in df.columns if df[c].dtype == object]
+    # Object OR string dtype: under pandas 3 a text column can arrive as the
+    # new `str` dtype rather than `object`, and a `== object`-only filter would
+    # silently skip it (so the scan would never run on string columns).
+    obj_cols = [c for c in df.columns
+                if df[c].dtype == object or pd.api.types.is_string_dtype(df[c].dtype)]
     if not obj_cols:
         print(f"  Extended missing scan+clean: 0 object cols, skipped ({time.perf_counter() - t0:.1f}s)")
         return df, result
@@ -220,17 +224,22 @@ def _scan_and_clean_extended_missings(
     for col in obj_cols:
         # Vectorized check: isin is C-level, much faster than .apply(lambda)
         mask = df[col].isin(_EXT_MISSING_LETTERS)
-        n_ext = mask.sum()
-        if n_ext > 0:
-            # Count by letter
-            counts = df[col][mask].value_counts()
-            result[col] = {str(k): int(v) for k, v in counts.items()}
-            # Replace in-place and coerce back to numeric
-            df.loc[mask, col] = np.nan
-            try:
-                df[col] = pd.to_numeric(df[col])
-            except (ValueError, TypeError):
-                pass  # genuine string column — leave as object
+        if not mask.any():
+            continue
+        # Probe on a COPY first: only treat the single-letter values as
+        # extended-missing tags (NaN them, count them) if blanking them lets
+        # the column coerce to numeric. In a genuine STRING column, "n"/"y"/"d"
+        # are real answers -- the old code NaN'd them BEFORE the numeric probe,
+        # destroying real data in the parquet sidecar / _ord.dta and miscounting
+        # them as extended missings. (#26.6)
+        probed = df[col].mask(mask)
+        try:
+            coerced = pd.to_numeric(probed)
+        except (ValueError, TypeError):
+            continue  # genuine string column: leave values AND counts untouched
+        counts = df[col][mask].value_counts()
+        result[col] = {str(k): int(v) for k, v in counts.items()}
+        df[col] = coerced
 
     elapsed = time.perf_counter() - t0
     n_vars = len(result)
