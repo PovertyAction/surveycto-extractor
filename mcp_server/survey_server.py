@@ -19,7 +19,7 @@ Setup:
        "mcpServers": {
          "survey-expert": {
            "command": "python",
-           "args": ["<path-to>/surveycto_extractor/mcp/survey_server.py"]
+           "args": ["<path-to>/surveycto_extractor/mcp_server/survey_server.py"]
          }
        }
      }
@@ -51,7 +51,7 @@ except ImportError:
 # ---------------------------------------------------------------------------
 
 def _find_config() -> Optional[Path]:
-    """Locate config.py: env var SURVEY_CONFIG, or parent of mcp/."""
+    """Locate config.py: env var SURVEY_CONFIG, or parent of mcp_server/."""
     env = os.environ.get("SURVEY_CONFIG")
     if env:
         p = Path(env)

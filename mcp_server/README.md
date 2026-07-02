@@ -4,6 +4,13 @@ Keeps survey metadata in memory for instant variable lookups.
 Complement to the `skill/search_survey.py` for high-volume query sessions
 (10-50+ variable lookups per cleaning module).
 
+> **Migrating from `mcp/`?** This directory was renamed `mcp/` ->
+> `mcp_server/` (the old name shadowed the `mcp` PyPI package this server
+> imports from). Update the `args` path in your `.mcp.json` or
+> `.claude/settings.json`; the symptom of a stale path is the server showing
+> "failed to connect" in `/mcp`. A ready-made `.mcp.json.example` sits in the
+> repo root (`cp .mcp.json.example .mcp.json`).
+
 ## Prerequisites
 
 - Python 3.10+
@@ -26,7 +33,7 @@ pip install "mcp[cli]" networkx
   "mcpServers": {
     "survey-expert": {
       "command": "python",
-      "args": ["path/to/surveycto_extractor/mcp/survey_server.py"]
+      "args": ["path/to/surveycto_extractor/mcp_server/survey_server.py"]
     }
   }
 }
@@ -39,7 +46,7 @@ Or in `.claude/settings.json`:
   "mcpServers": {
     "survey-expert": {
       "command": "python",
-      "args": ["path/to/surveycto_extractor/mcp/survey_server.py"]
+      "args": ["path/to/surveycto_extractor/mcp_server/survey_server.py"]
     }
   }
 }
@@ -53,7 +60,7 @@ To override, set `SURVEY_CONFIG` env var:
   "mcpServers": {
     "survey-expert": {
       "command": "python",
-      "args": ["path/to/surveycto_extractor/mcp/survey_server.py"],
+      "args": ["path/to/surveycto_extractor/mcp_server/survey_server.py"],
       "env": {
         "SURVEY_CONFIG": "/absolute/path/to/config.py"
       }
@@ -86,14 +93,14 @@ dictionary, the server reloads automatically on the next query.
 
 ```bash
 # Test the server loads correctly
-python mcp/survey_server.py
+python mcp_server/survey_server.py
 # Should print: [survey-expert] Loaded N survey(s): X variables, Y questions
 # Then wait for MCP stdio input (Ctrl+C to stop)
 ```
 
 ## Skill vs MCP
 
-| | skill/search_survey.py | mcp/survey_server.py |
+| | skill/search_survey.py | mcp_server/survey_server.py |
 |---|---|---|
 | Loads JSON | Every call | Once at startup |
 | Dependencies | None (stdlib only) | `mcp[cli]` |

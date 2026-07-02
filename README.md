@@ -272,11 +272,11 @@ The skill auto-discovers all surveys under `DOCS` by scanning for
 
 ### MCP server (optional, higher-performance)
 
-The `mcp/` directory contains an optional MCP server that keeps variable
+The `mcp_server/` directory contains an optional MCP server that keeps variable
 dictionaries in memory for instant lookups — the high-performance alternative
 for sessions with heavy query volume (10–50+ lookups per cleaning module).
 
-| | `skill/search_survey.py` | `mcp/survey_server.py` |
+| | `skill/search_survey.py` | `mcp_server/survey_server.py` |
 |---|---|---|
 | Loads JSON | Every call | Once at startup |
 | Dependencies | None (stdlib) | `mcp[cli]` |
@@ -292,23 +292,28 @@ for sessions with heavy query volume (10–50+ lookups per cleaning module).
 pip install "mcp[cli]" networkx
 ```
 
-Add to your project's `.mcp.json`:
+Add to your project's `.mcp.json` (a ready-made `.mcp.json.example` in the
+repo root works out of the box for the sample: `cp .mcp.json.example .mcp.json`):
 
 ```json
 {
   "mcpServers": {
     "survey-expert": {
       "command": "python",
-      "args": ["path/to/surveycto_extractor/mcp/survey_server.py"]
+      "args": ["path/to/surveycto_extractor/mcp_server/survey_server.py"]
     }
   }
 }
 ```
 
+> **Note:** this directory was previously named `mcp/`. If your `.mcp.json`
+> still points at `mcp/survey_server.py`, update the path — a stale path shows
+> up as "failed to connect" in `/mcp`.
+
 The server finds `config.py` in its parent directory automatically (override
 with the `SURVEY_CONFIG` env var). It degrades gracefully — if config or JSON
 files are missing, tools return setup instructions rather than crashing. See
-`mcp/README.md` for full details.
+`mcp_server/README.md` for full details.
 
 ### Coding guidelines for agents
 

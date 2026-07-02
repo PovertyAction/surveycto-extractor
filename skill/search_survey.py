@@ -63,7 +63,7 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 # ---------------------------------------------------------------------------
-# Lightweight TF-IDF index (shared with mcp/survey_server.py)
+# Lightweight TF-IDF index (shared with mcp_server/survey_server.py)
 # ---------------------------------------------------------------------------
 
 _TOKEN_RE = re.compile(r"[a-z0-9]{2,}")
