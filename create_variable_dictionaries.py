@@ -58,8 +58,15 @@ except ImportError:
 
 # Pull DATASETS from this project's config.py (same directory as this script)
 sys.path.insert(0, str(Path(__file__).parent))
-import config
-from config import DATASETS
+# config.py is per-project and gitignored; import it gracefully so the module
+# can be imported (e.g. by tests, or on CI) without a config present. main()
+# fails with a clear message if DATASETS is empty when actually run.
+try:
+    import config
+    from config import DATASETS
+except ModuleNotFoundError:
+    config = None
+    DATASETS = {}
 import sentinels as _sentinels
 from transformers.logic_converter import LogicConverter
 

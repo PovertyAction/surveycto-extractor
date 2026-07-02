@@ -12,10 +12,9 @@ absent, so the vardict counts are asserted as invariants/floors, not exact.
 import json
 import shutil
 import sys
+import types
 
 import pytest
-
-SAMPLE = None  # set at import time below
 
 
 def _sample_dir():
@@ -49,19 +48,30 @@ def sample_env(tmp_path, monkeypatch):
         "output_xlsx": out / "household_survey_variable_dictionary.xlsx",
     }}
 
-    import config
+    # Inject a stub `config` module (the real config.py is gitignored and absent
+    # on CI) so `import config` in main.py resolves. Register it before importing
+    # the pipeline scripts, then also monkeypatch already-imported modules.
+    stub = types.ModuleType("config")
+    stub.SURVEYS = surveys
+    stub.DATASETS = datasets
+    stub.SURVEY_COLUMNS = ["type", "name", "label", "constraint",
+                           "relevance", "required", "calculation"]
+    stub.CHOICES_COLUMNS = ["list_name", "value", "label"]
+    stub.EXCLUDED_TYPES = ["begin group", "end group", "begin repeat",
+                           "end repeat", "note", "start", "end", "deviceid",
+                           "username", "simserial", "phonenumber"]
+    stub.SYSTEM_PREFIXES = ["instanceID", "instanceName", "KEY", "SET-OF-"]
+    monkeypatch.setitem(sys.modules, "config", stub)
+
     import main
     import create_variable_dictionaries as cvd
 
-    monkeypatch.setattr(config, "SURVEYS", surveys, raising=False)
-    monkeypatch.setattr(config, "DATASETS", datasets, raising=False)
+    # main/cvd may have been imported earlier with config=None (no config.py);
+    # point their module-level references at the stub for this test.
+    monkeypatch.setattr(main, "config", stub, raising=False)
+    monkeypatch.setattr(cvd, "config", stub, raising=False)
     monkeypatch.setattr(cvd, "DATASETS", datasets, raising=False)
     return out, main, cvd
-
-
-def _run(argv_module, argv, monkeypatch, fn):
-    monkeypatch.setattr(sys, "argv", argv)
-    fn()
 
 
 def test_instrument_day_and_phase4(sample_env, monkeypatch):
