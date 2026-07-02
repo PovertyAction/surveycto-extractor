@@ -86,6 +86,53 @@ class LogicConverter:
         return -1
 
     @staticmethod
+    def _mask_literals(expr: str):
+        """Replace every quoted string literal (both ' and " styles) with a
+        neutral placeholder token ``__STATA_LIT_{i}__`` and return
+        ``(masked_expr, literals)``.
+
+        Late-stage rewrites (not()->!(, = -> ==, div/mod, and/or -> &/|,
+        _clean_sentinels, missing-guards, whitespace collapse) must never
+        reach inside a literal -- a needle like ``'x > 5'`` or ``' and '`` in
+        an emitted ``regexm``/``strpos`` call would otherwise be corrupted.
+        Masking after the string-function step (which needs real quotes) and
+        unmasking at the very end (after whitespace collapse, so multi-space
+        needles survive) prevents that.
+
+        XPath has no backslash escape (see ``_find_balanced``), so a literal
+        closes on the next matching quote; an unterminated quote keeps the
+        remainder verbatim. The placeholder is a single ``\\w+`` run distinct
+        from ``_SENTINEL`` -- inert to every late-stage regex, and unmasked by
+        id so a placeholder absorbed by sentinel cleanup simply never returns.
+        """
+        out: List[str] = []
+        lits: List[str] = []
+        i = 0
+        n = len(expr)
+        while i < n:
+            ch = expr[i]
+            if ch in ("'", '"'):
+                j = expr.find(ch, i + 1)
+                if j < 0:
+                    out.append(expr[i:])   # unterminated — verbatim
+                    break
+                lits.append(expr[i:j + 1])
+                out.append(f"__STATA_LIT_{len(lits) - 1}__")
+                i = j + 1
+            else:
+                out.append(ch)
+                i += 1
+        return ''.join(out), lits
+
+    @staticmethod
+    def _unmask_literals(expr: str, lits: List[str]) -> str:
+        """Restore literals masked by ``_mask_literals`` (by id; missing ids,
+        e.g. a placeholder absorbed by sentinel cleanup, are simply skipped)."""
+        for idx, lit in enumerate(lits):
+            expr = expr.replace(f"__STATA_LIT_{idx}__", lit)
+        return expr
+
+    @staticmethod
     def _sub_function_balanced(
         expr: str,
         func_pattern: str,
@@ -723,6 +770,16 @@ class LogicConverter:
         for pattern, reason in _REGEX_STRIP_FUNCS:
             expr = re.sub(pattern, _make_stripper(reason), expr, flags=re.IGNORECASE)
 
+        # --- Step 12e: mask string literals from the late-stage rewrites -----
+        # Everything up to here needs real quotes (step 3b consumes quoted
+        # RHSs; step 8 emits double-quoted needles; _find_balanced /
+        # _split_top_level_args are quote-aware). Everything after -- 12b's
+        # not() scan, step 13 not(->!(, step 14 = -> ==, 14b/14c div/mod,
+        # step 15 and/or -> &/|, _clean_sentinels, missing-guards, whitespace
+        # collapse -- must NEVER see inside a literal, or a needle like
+        # 'x > 5' / ' and ' gets silently corrupted. Restored at step 19.
+        expr, _literals = LogicConverter._mask_literals(expr)
+
         # --- Step 12b: strip entire not(…) when its body contains a sentinel --
         # Stripping a clause from inside not() flips the boolean — unsafe.
         # Per §12.4 of the reference doc: strip the whole not(…) block instead.
@@ -777,6 +834,10 @@ class LogicConverter:
 
         # --- Step 18: final whitespace normalisation -------------------------
         expr = ' '.join(expr.split())
+
+        # --- Step 19: restore masked string literals -------------------------
+        # After whitespace collapse, so multi-space needle content survives.
+        expr = LogicConverter._unmask_literals(expr, _literals)
 
         return expr if expr else None
 

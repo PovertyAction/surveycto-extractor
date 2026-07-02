@@ -172,3 +172,38 @@ class TestStructuralIssues:
         assert self.issues("x > 5 & !missing(x)") == []
         assert self.issues("cond(missing(a), b, a) == 2") == []
         assert self.issues("!(a == 1) | inlist(b, 1, 2)") == []
+
+
+class TestLiteralMasking:
+    """#27 Class B -- late-stage operator rewrites must not reach inside the
+    string literals the converter itself emits at step 8."""
+
+    def test_regex_needle_equals_not_doubled(self):
+        # Step 14 (= -> ==) must not touch the '=' inside the emitted needle.
+        result = convert("regex(${id}, '^ab=')", {})
+        assert result == 'regexm(id, "^ab=")'
+
+    def test_contains_needle_and_not_ampersanded(self):
+        # Step 15 (and -> &) must not touch ' and ' inside the needle.
+        result = convert("contains(${occ}, ' and ')", {})
+        assert result == 'strpos(occ, " and ") > 0'
+
+    def test_contains_needle_or_preserved(self):
+        result = convert("contains(${v}, 'x or y')", {})
+        assert result == 'strpos(v, "x or y") > 0'
+
+    def test_regex_needle_no_spurious_missing_guard(self):
+        # A '>' inside the needle must not trigger _add_missing_guards.
+        result = convert("regex(${v}, 'x > 5')", {})
+        assert result == 'regexm(v, "x > 5")'
+        assert "missing" not in result
+
+    def test_needle_multispace_survives_whitespace_collapse(self):
+        # Step 18 collapses whitespace; a masked needle keeps its two spaces.
+        result = convert("regex(${v}, 'a  b')", {})
+        assert result == 'regexm(v, "a  b")'
+
+    def test_needle_div_mod_words_untouched(self):
+        # Steps 14b/14c must not rewrite 'div'/'mod' inside a needle.
+        result = convert("contains(${v}, 'a div b mod c')", {})
+        assert result == 'strpos(v, "a div b mod c") > 0'
