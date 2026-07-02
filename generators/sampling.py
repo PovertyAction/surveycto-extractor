@@ -25,8 +25,13 @@ from typing import Any, Dict, List, Optional, Tuple
 
 # ── Bound extraction ──────────────────────────────────────────────────────────
 
+# LHS is the current-value token `.` ONLY. A bound clause about a DIFFERENT
+# variable (e.g. `. >= 30 and ${x} <= 10`) must not contribute a bound on the
+# current field -- the old `[A-Za-z_]\w*` alternative picked up `${x} <= 10` as
+# an upper bound, producing an inverted (30, 10) range that then got swapped to
+# (10, 30) and sampled a value violating the real `. >= 30`. (#28.7)
 _NUM_BOUND_RX = re.compile(
-    r'(?:\.|[A-Za-z_]\w*)\s*(>=|<=|>(?!=)|<(?!=))\s*(-?\d+(?:\.\d+)?)'
+    r'\.\s*(>=|<=|>(?!=)|<(?!=))\s*(-?\d+(?:\.\d+)?)'
 )
 
 
@@ -63,8 +68,10 @@ def _has_top_level_or(constraint: str) -> bool:
 def numeric_bounds(constraint: Optional[str]) -> Tuple[Optional[float], Optional[float]]:
     """Extract ``(lower, upper)`` numeric bounds from a constraint expression.
 
-    Recognises clauses like ``. >= N``, ``. > N``, ``. <= N``, ``. < N``,
-    ``var >= N``, etc. on either side of ``and``. Inclusive on ``>=`` /
+    Recognises clauses about the current value only -- ``. >= N``, ``. > N``,
+    ``. <= N``, ``. < N`` -- on either side of ``and``. A clause about a
+    different variable (``${x} <= N``) is deliberately ignored, since it does
+    not bound the current field. Inclusive on ``>=`` /
     ``<=``; for strict ``>`` / ``<`` we pin by ``+/- 1`` to land on an
     integer-safe inclusive bound. Returns ``(None, None)`` if no clean
     bound is extractable.
@@ -266,6 +273,7 @@ def sample_python_value(
     epoch_span_days: int = DEFAULT_EPOCH_SPAN_DAYS,
     geo_bbox: Tuple[float, float, float, float] = DEFAULT_GEO_BBOX,
     appearance: Optional[str] = None,
+    now: Optional[datetime.datetime] = None,
 ) -> Any:
     """Sample one typed Python value for a SurveyCTO question type.
 
@@ -297,8 +305,11 @@ def sample_python_value(
         base = epoch_start or DEFAULT_EPOCH_START
         # Cap the span so we never emit a date in the future. SurveyCTO
         # real exports can't contain post-collection-day dates, and HFC
-        # checks routinely flag future dates as out-of-range.
-        today = datetime.date.today()
+        # checks routinely flag future dates as out-of-range. `now` is passed
+        # from the generator's frozen run-context so two passes at the same
+        # seed stay byte-identical even across a midnight boundary; it falls
+        # back to the wall clock for standalone callers.
+        today = (now.date() if now is not None else datetime.date.today())
         max_offset = max(0, min(epoch_span_days, (today - base).days))
         offset = rng.randint(0, max_offset)
         return base + datetime.timedelta(days=offset)
@@ -307,8 +318,8 @@ def sample_python_value(
         base = datetime.datetime.combine(
             epoch_start or DEFAULT_EPOCH_START, datetime.time()
         )
-        now = datetime.datetime.now()
-        max_secs = max(0, min(epoch_span_days * 86_400, int((now - base).total_seconds())))
+        now_dt = now if now is not None else datetime.datetime.now()
+        max_secs = max(0, min(epoch_span_days * 86_400, int((now_dt - base).total_seconds())))
         secs = rng.randint(0, max_secs)
         return base + datetime.timedelta(seconds=secs)
 
