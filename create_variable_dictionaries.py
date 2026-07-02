@@ -273,11 +273,30 @@ def load_data(dataset_name: str):
         # Scan + clean extended missings in one fused pass (vectorized isin)
         df, ext_missing_counts = _scan_and_clean_extended_missings(df)
     else:
-        df = pd.read_stata(cfg['data'])
+        # convert_categoricals=False keeps value-labeled columns as their
+        # numeric codes, matching the pyreadstat path (which reads codes by
+        # default). The alternative -- reading Categoricals and .astype(object)
+        # -- would surface label STRINGS instead of codes and silently corrupt
+        # the sentinel scan, data_min/data_max, and the parquet stats.
+        df = pd.read_stata(cfg['data'], convert_categoricals=False)
         meta = None
         elapsed = time.perf_counter() - t0
         print(f"  Loaded {len(df)} obs x {len(df.columns)} vars "
               f"from .dta ({elapsed:.1f}s)")
+        print(
+            "  [WARN] pyreadstat not installed -- fell back to pd.read_stata. "
+            "Extended-missing counts (.d, .r, ...) will be 0 and stata_type "
+            "falls back to pandas dtypes. Install pyreadstat for full fidelity.",
+            file=sys.stderr,
+        )
+        cat_cols = [c for c in df.columns
+                    if isinstance(df[c].dtype, pd.CategoricalDtype)]
+        if cat_cols:
+            raise TypeError(
+                f"pd.read_stata fallback returned Categorical columns despite "
+                f"convert_categoricals=False: {cat_cols[:5]} -- the downstream "
+                f"scans cannot handle Categorical dtypes."
+            )
 
     # Write parquet sidecar for fast columnar access downstream
     pq_path = _write_parquet_sidecar(df, dta_path)
