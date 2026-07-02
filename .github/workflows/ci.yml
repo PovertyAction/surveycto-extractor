@@ -1,0 +1,62 @@
+# CI matrix rationale:
+# - pandas majors have twice broken this pipeline (2.3 StringDtype, 3.0
+#   Categorical setitem), so every Python runs against BOTH the minimum
+#   supported pandas (2.3.*) and latest.
+# - On py3.10, "latest" pandas resolves to 2.x (pandas 3 requires >=3.11);
+#   that is intentional coverage, not a gap.
+# - One job removes pyreadstat to exercise the pd.read_stata fallback path
+#   in create_variable_dictionaries.load_data (the path that shipped broken
+#   for months because nothing ran it -- see #25).
+# - One Windows job covers the primary dev platform (path/encoding quirks).
+name: CI
+
+on:
+  push:
+    branches: [master, dev]
+  pull_request:
+
+jobs:
+  tests:
+    name: py${{ matrix.python-version }} / pandas-${{ matrix.pandas }}${{ matrix.no-pyreadstat && ' / no-pyreadstat' || '' }}${{ matrix.os == 'windows-latest' && ' / windows' || '' }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+        pandas: [minimum, latest]
+        no-pyreadstat: [false]
+        include:
+          # Fallback path: no pyreadstat wheel installed
+          - os: ubuntu-latest
+            python-version: "3.13"
+            pandas: latest
+            no-pyreadstat: true
+          # Primary dev platform
+          - os: windows-latest
+            python-version: "3.12"
+            pandas: latest
+            no-pyreadstat: false
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r mcp_server/requirements.txt pytest
+
+      - name: Pin minimum pandas
+        if: matrix.pandas == 'minimum'
+        run: pip install "pandas==2.3.*"
+
+      - name: Remove pyreadstat (fallback-path job)
+        if: matrix.no-pyreadstat
+        run: pip uninstall -y pyreadstat
+
+      - name: Run tests
+        run: python -m pytest -q
