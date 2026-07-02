@@ -1031,7 +1031,7 @@ def main():
     parser.add_argument("--context", metavar="N", type=int, default=0,
                         help="Show N adjacent questions on each side + resolve relevance gate (default: 0)")
     parser.add_argument("--survey", metavar="KEY", default=None,
-                        help="Filter to surveys whose key contains KEY (e.g. 'endline', 'ltfu', 'c2')")
+                        help="Filter to surveys whose key contains KEY (e.g. 'endline', 'household', 'baseline')")
     args = parser.parse_args()
 
     if args.var:

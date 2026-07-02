@@ -24,7 +24,8 @@ python create_variable_dictionaries.py --survey household_survey --xlsx
 
 Outputs land in `sample/output/`. The sample uses the
 [IPA High Frequency Checks](https://github.com/PovertyAction/high-frequency-checks)
-training dataset.
+training dataset — a public training resource; every person name appearing in
+`sample/household_survey.dta` is fictional.
 
 ---
 
@@ -193,9 +194,9 @@ deterministic. See `enrich_with_contract.py`.
 
 ### 2. Use the variable graph
 
-If `networkx` is installed (it's in `requirements.txt`), the variable-
-dictionary step also writes `<survey>_variable_graph.json` — a directed graph
-capturing how variables relate:
+The variable-dictionary step also writes `<survey>_variable_graph.json` — a
+directed graph capturing how variables relate (requires `networkx`, which
+`pip install -r requirements.txt` now includes):
 
 - `calculates_from` — A's calculation references B.
 - `gated_by` — A's relevance references B.
