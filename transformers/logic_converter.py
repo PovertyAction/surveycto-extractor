@@ -133,6 +133,51 @@ class LogicConverter:
         return expr
 
     @staticmethod
+    def _literal_spans(expr: str) -> List[tuple]:
+        """Return (start, end) index pairs of quoted string-literal spans (both
+        ' and " styles; end is one past the closing quote). Same next-matching-
+        quote, no-backslash-escape convention as ``_find_balanced``."""
+        spans: List[tuple] = []
+        i, n = 0, len(expr)
+        while i < n:
+            ch = expr[i]
+            if ch in ("'", '"'):
+                j = expr.find(ch, i + 1)
+                if j < 0:
+                    spans.append((i, n))
+                    break
+                spans.append((i, j + 1))
+                i = j + 1
+            else:
+                i += 1
+        return spans
+
+    @staticmethod
+    def _sub_outside_literals(pattern: 're.Pattern', repl, expr: str) -> str:
+        """Apply ``pattern`` substitutions but skip any match that BEGINS inside
+        a quoted literal. This stops a comparison regex (steps 3/3b) from
+        matching a ``word op '...'`` shape that actually lies inside a
+        function's quoted argument -- e.g. ``contains(a, 'x=')`` where the `x`
+        sits inside the literal and `'([^']+)'` would otherwise greedily latch
+        onto the literal's closing quote and swallow the rest of the
+        expression."""
+        spans = LogicConverter._literal_spans(expr)
+
+        def _in_span(pos: int) -> bool:
+            return any(s <= pos < e for s, e in spans)
+
+        out: List[str] = []
+        last = 0
+        for m in pattern.finditer(expr):
+            if _in_span(m.start()):
+                continue
+            out.append(expr[last:m.start()])
+            out.append(repl(m))
+            last = m.end()
+        out.append(expr[last:])
+        return ''.join(out)
+
+    @staticmethod
     def _sub_function_balanced(
         expr: str,
         func_pattern: str,
@@ -222,6 +267,16 @@ class LogicConverter:
         return parts
 
     @staticmethod
+    def _unwrap_one_quote(s: str) -> str:
+        """Strip exactly one matching outer quote pair from a needle, leaving
+        any inner quotes/parens intact. `.strip("'\\"")` would over-strip a
+        needle like `'')'` -- we only want to remove the enclosing pair."""
+        s = s.strip()
+        if len(s) >= 2 and s[0] in ("'", '"') and s[-1] == s[0]:
+            return s[1:-1]
+        return s
+
+    @staticmethod
     def _translate_selected(
         args_str: str,
         full_call: str,
@@ -306,7 +361,7 @@ class LogicConverter:
         return f"rowtotal({' '.join(cols)})"
 
     @staticmethod
-    def _translate_coalesce(match: re.Match, varname: str) -> str:
+    def _translate_coalesce(args_str: str, full_call: str, varname: str) -> str:
         """
         N-ary coalesce: returns the first non-missing argument.
 
@@ -318,10 +373,12 @@ class LogicConverter:
         SurveyCTO requires coalesce to have at least 2 arguments and accepts
         any larger number of non-repeated arguments. We expand inductively
         from the right; 0- or 1-arg calls are reported as a strip reason.
+        Called via balanced-paren matching, so a nested call in any argument
+        (e.g. coalesce(if(${a},${b},${c}), ${d})) is kept intact.
         """
-        parts = LogicConverter._split_top_level_args(match.group(1))
+        parts = LogicConverter._split_top_level_args(args_str)
         if len(parts) < 2:
-            _log_strip(varname, match.group(0), "COALESCE_BAD_ARITY")
+            _log_strip(varname, full_call, "COALESCE_BAD_ARITY")
             return _SENTINEL
 
         # Build the nested cond() from the right: result_n = parts[-1]
@@ -398,20 +455,50 @@ class LogicConverter:
         # token is anything that isn't a logical operator or paren.
         _OP = r'(?:>=|<=|!=|==|>(?!=)|<(?!=))'
         _OPERAND = r'[^\s&|()]+'
+        # Arithmetic operand excludes the arithmetic operators too, so an
+        # adjacency collapse doesn't run past the next operator.
+        _ARITH_OPERAND = r'[^\s&|()+*/-]+'
+        _SEN = re.escape(_SENTINEL)
 
         prev = None
         while prev != expr:
             prev = expr
+            # A call whose argument was stripped is itself unknowable:
+            # `fn(...__STRIP__...)` with no inner parens -> _SENTINEL. Bottom-up
+            # via the fixpoint loop, since only paren-free bodies match. (#27.6)
+            expr = re.sub(
+                rf'\w+\s*\([^()]*{_SEN}[^()]*\)', _SENTINEL, expr)
+            # Balanced form: any call carrying a sentinel among its (possibly
+            # nested, paren-containing) args is unknowable -> _SENTINEL. Catches
+            # cond(cond1, __STRIP__) where a sibling arg has parens so the
+            # [^()]* rule above cannot span it (e.g. a cond() whose branch was
+            # stripped, leaving an orphan-comma `cond(x, )`). (#27.6)
+            if _SENTINEL in expr:
+                def _collapse_if_sentinel(args: str, _full: str) -> str:
+                    return _SENTINEL if _SENTINEL in args else _full
+                expr = LogicConverter._sub_function_balanced(
+                    expr, r'[A-Za-z_]\w*', _collapse_if_sentinel)
+            # Bare parenthesised sentinel: `(__STRIP__)` -> _SENTINEL
+            expr = re.sub(rf'\(\s*{_SEN}\s*\)', _SENTINEL, expr)
+            # Dangling `!` in front of a sentinel: `!__STRIP__` -> _SENTINEL,
+            # so the negation doesn't survive as a bare `!`. (#22.1)
+            expr = re.sub(rf'!\s*{_SEN}', _SENTINEL, expr)
+            # Arithmetic adjacency: a sentinel next to +,-,*,/ makes the whole
+            # arithmetic operand unknowable. `operand OP __STRIP__` and mirror. (#27.6)
+            expr = re.sub(
+                rf'{_ARITH_OPERAND}\s*[+\-*/]\s*{_SEN}', _SENTINEL, expr)
+            expr = re.sub(
+                rf'{_SEN}\s*[+\-*/]\s*{_ARITH_OPERAND}', _SENTINEL, expr)
             # Strip _SENTINEL with adjacent comparison: `_SENTINEL op operand`
             expr = re.sub(
-                rf'{re.escape(_SENTINEL)}\s*{_OP}\s*{_OPERAND}',
+                rf'{_SEN}\s*{_OP}\s*{_OPERAND}',
                 _SENTINEL, expr)
             # Mirror: `operand op _SENTINEL`
             expr = re.sub(
-                rf'{_OPERAND}\s*{_OP}\s*{re.escape(_SENTINEL)}',
+                rf'{_OPERAND}\s*{_OP}\s*{_SEN}',
                 _SENTINEL, expr)
             # Remove sentinel surrounded by whitespace
-            expr = re.sub(r'\s*' + re.escape(_SENTINEL) + r'\s*', ' ', expr)
+            expr = re.sub(r'\s*' + _SEN + r'\s*', ' ', expr)
             # Dangling & or | at start / end of full expression
             expr = re.sub(r'^\s*[&|]\s*', '', expr)
             expr = re.sub(r'\s*[&|]\s*$', '', expr)
@@ -485,10 +572,16 @@ class LogicConverter:
         expr = re.sub(r'\bstring\s*\(([^)]+)\)', _strip_string_literal, expr, flags=re.IGNORECASE)
 
         # --- Step 3: Empty-string comparisons (before = → ==) ---------------
-        # var != '' → !missing(var)
-        expr = re.sub(r'(\w+)\s*!=\s*[\'"][\'"]', r'!missing(\1)', expr)
-        # var = '' → missing(var)
-        expr = re.sub(r'(\w+)\s*=\s*[\'"][\'"]', r'missing(\1)', expr)
+        # var != '' → !missing(var) ; var = '' → missing(var). Routed through
+        # _sub_outside_literals so a `''`/`""` pair that is really the tail of
+        # one literal and the head of the next is not mistaken for an
+        # empty-string comparison. (#27.2)
+        _EMPTY_NE = re.compile(r'(\w+)\s*!=\s*([\'"])\2')
+        _EMPTY_EQ = re.compile(r'(\w+)\s*=\s*([\'"])\2')
+        expr = LogicConverter._sub_outside_literals(
+            _EMPTY_NE, lambda m: f'!missing({m.group(1)})', expr)
+        expr = LogicConverter._sub_outside_literals(
+            _EMPTY_EQ, lambda m: f'missing({m.group(1)})', expr)
 
         # --- Step 3b: Single-quoted non-empty comparisons (e.g. var != '-55') ---
         # SurveyCTO uses single quotes around choice codes in direct comparisons:
@@ -496,24 +589,27 @@ class LogicConverter:
         # Single quotes are INVALID in Stata if-expressions.
         # Translation:
         #   select_multiple var: var != 'N' → var_N != 1  (binary col)
-        #   other vars:          var != 'N' → var != N    (strip quotes, numeric)
+        #   numeric code:        var != 'N' → var != N    (strip quotes)
+        #   non-numeric code:    var != 'X' → var != "X"  (Stata string literal)
         def _single_quoted_cmp(m: re.Match) -> str:
             vname = m.group(1)
             op    = m.group(2)    # != or = or ==
             code  = m.group(3)   # inner value without quotes
+            stata_op = "!=" if op == "!=" else "=="
             if question_types.get(vname) == "select_multiple":
                 suffix = LogicConverter._selected_column_suffix(code)
-                col = vname + suffix
-                stata_op = "!=" if op == "!=" else "=="
-                return f"{col} {stata_op} 1"
-            else:
-                # strip quotes, treat code as numeric
-                stata_op = "!=" if op == "!=" else "=="
+                return f"{vname}{suffix} {stata_op} 1"
+            if re.match(r'^-?\d+(?:\.\d+)?$', code):
+                # numeric choice code -> unquoted numeric comparison
                 return f"{vname} {stata_op} {code}"
-        expr = re.sub(
-            r"(\w+)\s*(!=|==?)\s*'([^']+)'",
-            _single_quoted_cmp, expr
-        )
+            # non-numeric literal -> a real Stata (double-quoted) string compare,
+            # not a bare identifier. (#27.1)
+            return f'{vname} {stata_op} "{code}"'
+        # _sub_outside_literals skips a match whose word starts inside a literal,
+        # so `contains(a, 'x=') or contains(b, 'y=')` is left for step 8. (#27.2)
+        expr = LogicConverter._sub_outside_literals(
+            re.compile(r"(\w+)\s*(!=|==?)\s*'([^']+)'"),
+            _single_quoted_cmp, expr)
 
         # --- Step 4: string-length() ----------------------------------------
         # string-length(var) > 0 → !missing(var)
@@ -556,55 +652,55 @@ class LogicConverter:
         expr = re.sub(r'(?<![\w-])if\s*\(', 'cond(', expr, flags=re.IGNORECASE)
 
         # --- Step 7: coalesce() ---------------------------------------------
-        # NOTE: [^)]+ patterns here and below don't handle nested parens —
-        # e.g. coalesce(if(x, a, b), c) won't match.  These cases are rare in
-        # SurveyCTO instruments and fall through unchanged.  A full balanced-paren
-        # parser would fix this but is deferred until a real instrument triggers it.
-        def _coalesce_sub(m: re.Match) -> str:
-            return LogicConverter._translate_coalesce(m, varname)
-        expr = re.sub(r'\bcoalesce\s*\(([^)]+)\)', _coalesce_sub, expr, flags=re.IGNORECASE)
+        # Balanced-paren matching so a nested call in any argument
+        # (coalesce(if(x, a, b), c)) is handled as a unit, not truncated at
+        # the first inner ')'. (#27.4)
+        def _coalesce_replacer(args: str, full_call: str) -> str:
+            return LogicConverter._translate_coalesce(args, full_call, varname)
+        expr = LogicConverter._sub_function_balanced(expr, r'coalesce', _coalesce_replacer)
 
         # --- Step 8: String functions ----------------------------------------
+        # All four route through balanced-paren matching + top-level arg split,
+        # so a needle containing ')' (e.g. regex(${a}, '[0-9])')) is parsed
+        # correctly instead of truncated by a bounded [^)]+ regex. (#22.3)
 
         # regex(var, 'pat') → regexm(var, "pat")
-        def _regex_sub(m: re.Match) -> str:
-            parts = [p.strip() for p in m.group(1).split(',', 1)]
+        def _regex_replacer(args: str, full_call: str) -> str:
+            parts = LogicConverter._split_top_level_args(args)
             if len(parts) != 2:
-                return m.group(0)
+                return full_call
             v, pat = parts
-            pat_inner = pat.strip("'\"")
-            return f'regexm({v}, "{pat_inner}")'
-        expr = re.sub(r'\bregex\s*\(([^)]+)\)', _regex_sub, expr, flags=re.IGNORECASE)
+            return f'regexm({v}, "{LogicConverter._unwrap_one_quote(pat)}")'
+        expr = LogicConverter._sub_function_balanced(expr, r'regex', _regex_replacer)
 
         # contains(var, 'str') → strpos(var, "str") > 0
-        def _contains_sub(m: re.Match) -> str:
-            parts = [p.strip() for p in m.group(1).split(',', 1)]
+        def _contains_replacer(args: str, full_call: str) -> str:
+            parts = LogicConverter._split_top_level_args(args)
             if len(parts) != 2:
-                return m.group(0)
+                return full_call
             v, s = parts
-            s_inner = s.strip("'\"")
-            return f'strpos({v}, "{s_inner}") > 0'
-        expr = re.sub(r'\bcontains\s*\(([^)]+)\)', _contains_sub, expr, flags=re.IGNORECASE)
+            return f'strpos({v}, "{LogicConverter._unwrap_one_quote(s)}") > 0'
+        expr = LogicConverter._sub_function_balanced(expr, r'contains', _contains_replacer)
 
         # starts-with(var, 'str') → substr(var, 1, len) == "str"
-        def _starts_with_sub(m: re.Match) -> str:
-            parts = [p.strip() for p in m.group(1).split(',', 1)]
+        def _starts_with_replacer(args: str, full_call: str) -> str:
+            parts = LogicConverter._split_top_level_args(args)
             if len(parts) != 2:
-                return m.group(0)
+                return full_call
             v, s = parts
-            s_inner = s.strip("'\"")
+            s_inner = LogicConverter._unwrap_one_quote(s)
             return f'substr({v}, 1, {len(s_inner)}) == "{s_inner}"'
-        expr = re.sub(r'\bstarts-with\s*\(([^)]+)\)', _starts_with_sub, expr, flags=re.IGNORECASE)
+        expr = LogicConverter._sub_function_balanced(expr, r'starts-with', _starts_with_replacer)
 
         # ends-with(var, 'str') → substr(var, -len, .) == "str"
-        def _ends_with_sub(m: re.Match) -> str:
-            parts = [p.strip() for p in m.group(1).split(',', 1)]
+        def _ends_with_replacer(args: str, full_call: str) -> str:
+            parts = LogicConverter._split_top_level_args(args)
             if len(parts) != 2:
-                return m.group(0)
+                return full_call
             v, s = parts
-            s_inner = s.strip("'\"")
+            s_inner = LogicConverter._unwrap_one_quote(s)
             return f'substr({v}, -{len(s_inner)}, .) == "{s_inner}"'
-        expr = re.sub(r'\bends-with\s*\(([^)]+)\)', _ends_with_sub, expr, flags=re.IGNORECASE)
+        expr = LogicConverter._sub_function_balanced(expr, r'ends-with', _ends_with_replacer)
 
         # lower(x) → strlower(x) ; upper(x) → strupper(x)
         expr = re.sub(r'\blower\s*\(', 'strlower(', expr, flags=re.IGNORECASE)
@@ -635,9 +731,14 @@ class LogicConverter:
                 return _SENTINEL
             target, _grp, idx = parts
             idx = idx.strip()
-            if re.match(r'^-?\d+$', idx):
+            # Only a positive integer literal maps to a real wide column
+            # `target_N`. A negative literal would emit `target_-1`, an invalid
+            # Stata name, so strip it instead of emitting garbage. (#27.9)
+            if re.match(r'^\d+$', idx):
                 return f"{target}_{idx}"
-            _log_strip(varname, full_call, "INDEXED_REPEAT_DYNAMIC")
+            reason = ("INDEXED_REPEAT_BAD_INDEX" if re.match(r'^-\d+$', idx)
+                      else "INDEXED_REPEAT_DYNAMIC")
+            _log_strip(varname, full_call, reason)
             return _SENTINEL
         expr = LogicConverter._sub_function_balanced(expr, r'indexed-repeat', _ir_replacer)
 
@@ -659,26 +760,14 @@ class LogicConverter:
         # _translate_selected already strips those, so this rarely fires.
         expr = LogicConverter._strip_balanced(expr, r'selected', varname, "DYNAMIC_SELECTED")
 
-        # position() / index()
-        def _strip_pos(m: re.Match) -> str:
-            _log_strip(varname, m.group(0), "POSITION")
-            return _SENTINEL
-        # Strip `index()/position()` together with any adjacent comparison:
-        #   index() > hh_size_pre  →  _SENTINEL   (not just index())
-        # Handles both: func() op value  and  value op func()
-        _OP = r'(?:>=|<=|!=|==|>(?!=)|<(?!=))'
-        _IDENT = r'\w+(?:\.\w+)?'
-        # `(?<![\w-])` (not `\b`) so `index`/`position` do not match the tail of a
-        # hyphenated function such as `rank-index(...)` (which is stripped whole as
-        # a balanced family at step 12c).
-        expr = re.sub(
-            rf'(?<![\w-])(?:position|index)\s*\([^)]*\)\s*{_OP}\s*{_IDENT}',
-            _strip_pos, expr, flags=re.IGNORECASE)
-        expr = re.sub(
-            rf'{_IDENT}\s*{_OP}\s*(?<![\w-])(?:position|index)\s*\([^)]*\)',
-            _strip_pos, expr, flags=re.IGNORECASE)
-        # Bare calls (no comparison):
-        expr = re.sub(r'(?<![\w-])(?:position|index)\s*\([^)]*\)', _strip_pos, expr, flags=re.IGNORECASE)
+        # position() / index() -> _SENTINEL, balanced so a nested call in the
+        # args (index(pos(${a}))) is consumed as a unit rather than truncated
+        # at the first inner ')' (which orphaned a stray ')' -- #22.2). Any
+        # adjacent comparison (index() > hh_size_pre) is then absorbed by
+        # _clean_sentinels' comparison rule, so no bespoke comparison-eating
+        # regex is needed. `(?<![\w-])` (in _sub_function_balanced) keeps
+        # `index` from matching the tail of `rank-index`.
+        expr = LogicConverter._strip_balanced(expr, r'position|index', varname, "POSITION")
 
         # once() / jr:choice-name() / choice-label() / selected-at() — each can
         # carry a nested call in its args, so strip the whole balanced call.
@@ -770,6 +859,16 @@ class LogicConverter:
         for pattern, reason in _REGEX_STRIP_FUNCS:
             expr = re.sub(pattern, _make_stripper(reason), expr, flags=re.IGNORECASE)
 
+        # --- Step 12f: residual single-quoted comparison operands -> Stata ----
+        # By now every translatable function is converted (emitting double
+        # quotes) and every untranslatable one is stripped, so any surviving
+        # single-quoted literal is a comparison operand whose LHS/RHS step 3b
+        # could not match as a bare identifier -- e.g. substr(v, 1, 1) = '0'.
+        # Single quotes are never valid in a Stata if-expr, so convert the pair
+        # to a double-quoted string literal. (#27.1, generalised)
+        expr = re.sub(r"(!=|<=|>=|==?|<|>)\s*'([^']*)'", r'\1 "\2"', expr)
+        expr = re.sub(r"'([^']*)'\s*(!=|<=|>=|==?|<|>)", r'"\1" \2', expr)
+
         # --- Step 12e: mask string literals from the late-stage rewrites -----
         # Everything up to here needs real quotes (step 3b consumes quoted
         # RHSs; step 8 emits double-quoted needles; _find_balanced /
@@ -783,14 +882,17 @@ class LogicConverter:
         # --- Step 12b: strip entire not(…) when its body contains a sentinel --
         # Stripping a clause from inside not() flips the boolean — unsafe.
         # Per §12.4 of the reference doc: strip the whole not(…) block instead.
+        # Balanced-paren matching so a not() whose body contains parens (e.g. a
+        # translated selected() -> `(x == 1)`) is still recognised — the old
+        # [^)]+ regex failed to match once the body had a paren, leaving the
+        # sentinel to be cleaned normally and the boolean wrongly flipped. (#27.5)
         if _SENTINEL in expr:
-            def _strip_not_with_sentinel(m: re.Match) -> str:
-                if _SENTINEL in m.group(1):
-                    _log_strip(varname, m.group(0), "NOT_SAFE_TO_STRIP")
+            def _not_replacer(args: str, full_call: str) -> str:
+                if _SENTINEL in args:
+                    _log_strip(varname, full_call, "NOT_SAFE_TO_STRIP")
                     return _SENTINEL
-                return m.group(0)
-            # Only handles one level of nesting — sufficient for all real survey patterns
-            expr = re.sub(r'\bnot\s*\(([^)]+)\)', _strip_not_with_sentinel, expr, flags=re.IGNORECASE)
+                return full_call
+            expr = LogicConverter._sub_function_balanced(expr, r'not', _not_replacer)
 
         # --- Step 13: not( → !( --------------------------------------------
         expr = re.sub(r'\bnot\s*\(', '!(', expr, flags=re.IGNORECASE)
@@ -811,9 +913,19 @@ class LogicConverter:
         # function. We only convert when LHS and RHS are simple identifiers
         # or numeric literals — complex sub-expressions on either side stay
         # unchanged and will fail in Stata (rare in practice).
+        # Skip when the operand is directly adjacent to `*` or `/`: `2 * x mod 3`
+        # is `(2*x) mod 3` in XPath, but `2 * mod(x, 3)` in Stata changes the
+        # result, so leave it unconverted (the validator flags the residual). (#27.8)
+        def _mod_sub(m: re.Match) -> str:
+            s = m.string
+            left = s[:m.start()].rstrip()
+            right = s[m.end():].lstrip()
+            if left[-1:] in ('*', '/') or right[:1] in ('*', '/'):
+                return m.group(0)
+            return f'mod({m.group(1)}, {m.group(2)})'
         expr = re.sub(
             r'\b(\w+)\s+mod\s+(-?\d+(?:\.\d+)?|\w+)\b',
-            r'mod(\1, \2)', expr, flags=re.IGNORECASE)
+            _mod_sub, expr, flags=re.IGNORECASE)
 
         # --- Step 15: and/or → &/| ------------------------------------------
         expr = re.sub(r'\band\b', '&', expr, flags=re.IGNORECASE)
