@@ -9,6 +9,7 @@ single-suffix column regardless of whether the field was in a repeat. (#26)
 from create_variable_dictionaries import (
     determine_variable_source,
     _build_question_index,
+    adjust_skip_logic_for_repeats,
 )
 
 # outer repeat "orpt" containing inner repeat "irpt"; a plain int inside the
@@ -75,3 +76,54 @@ def test_single_level_repeat_field():
 def test_unmatched_column_returns_empty_source():
     r = _src("totally_unknown_var")
     assert r["original_variable_name"] is None
+
+
+# --- C14: iteration-specific group relevances through the converter (#26.5/7) --
+
+_REL_QUESTIONS = [
+    {"variable_name": "rc", "type": "repeat_count",
+     "repeat_group_name": "rpt", "group_path": []},
+    {"variable_name": "n", "type": "integer", "group_path": []},          # top-level
+    {"variable_name": "sib", "type": "integer", "group_path": ["rpt"]},   # repeat sibling
+    {"variable_name": "sm", "type": "select_multiple", "group_path": ["rpt"],
+     "choices": [{"value": "1"}]},
+    {"variable_name": "q", "type": "text", "group_path": ["rpt"]},
+]
+_REL_IDX = _build_question_index(_REL_QUESTIONS)
+
+
+def _iteration_relevances(relevances):
+    meta = {
+        "is_repeat": True, "repeat_iteration": 2, "group_path": "rpt",
+        "stata_skip_logic": "", "group_relevances": relevances,
+        "skip_logic_template": None, "group_relevances_template": None,
+        "skip_logic_iteration_specific": None,
+        "group_relevances_iteration_specific": None,
+    }
+    out = adjust_skip_logic_for_repeats(meta, "q_2", _REL_QUESTIONS, _index=_REL_IDX)
+    return out["group_relevances_iteration_specific"]
+
+
+def test_ge_relevance_not_corrupted_to_double_equals():
+    # The old .replace('=','==') turned '>=' into '>=='. `n` is top-level so it
+    # is not suffixed; the converter adds a missing-guard. (#26.5)
+    out = _iteration_relevances(["${n} >= 2"])
+    assert out == ["n >= 2 & !missing(n)"]
+    assert ">==" not in out[0]
+
+
+def test_repeat_sibling_ref_suffixed():
+    # sib lives in rpt (a shorter path than q's), so it must be iteration-
+    # suffixed -- the old substring test missed it. (#26.7)
+    out = _iteration_relevances(["${sib} = 1"])
+    assert out == ["sib_2 == 1"]
+
+
+def test_selected_in_relevance_not_transposed():
+    # selected(${sm}, '1'): the SM ref is left unsuffixed so the converter
+    # emits the choice-first indicator sm_1 -- NOT sm_2_1, which would be the
+    # transposed (repeat-then-choice) order PR #21's blocker fixed. The
+    # per-iteration column isn't represented in this doc field by design.
+    out = _iteration_relevances(["selected(${sm}, '1')"])
+    assert out == ["(sm_1 == 1)"]
+    assert "sm_2_1" not in out[0]

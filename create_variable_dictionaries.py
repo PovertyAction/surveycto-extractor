@@ -61,6 +61,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 import config
 from config import DATASETS
 import sentinels as _sentinels
+from transformers.logic_converter import LogicConverter
 
 
 def _write_parquet_sidecar(df: pd.DataFrame, dta_path: Path) -> Optional[Path]:
@@ -647,9 +648,56 @@ def get_choice_label(question: Dict, choice_code: str) -> Optional[str]:
     return None
 
 
-def adjust_variable_refs(logic_str: str, repeat_group: str, iteration: int,
+class _SuffixFallbackMap(dict):
+    """A dict whose ``.get`` falls back from a suffixed wide-column name to its
+    base: ``get('x_2')`` returns ``self['x']`` when ``x_2`` is absent. Lets the
+    logic converter resolve iteration-suffixed refs (``selected(x_2, '1')``)
+    against the form's base question types/choice codes without copying the
+    whole map per variable."""
+    def get(self, key, default=None):
+        if key in self:
+            return self[key]
+        base = re.sub(r'(?:_\d+)+$', '', key) if key else key
+        if base != key and base in self:
+            return self[base]
+        return default
+
+
+_TYPE_CHOICE_CACHE: Dict[int, tuple] = {}
+
+
+def _base_type_choice_maps(questions: List[Dict]) -> tuple:
+    """(question_types, choice_codes) suffix-fallback maps, built once per
+    questions list (memoised on identity) so repeat-relevance conversion does
+    not rescan the whole form per variable."""
+    key = id(questions)
+    cached = _TYPE_CHOICE_CACHE.get(key)
+    if cached is None:
+        types = _SuffixFallbackMap()
+        codes = _SuffixFallbackMap()
+        for q in questions:
+            name = q.get('variable_name')
+            if not name:
+                continue
+            types[name] = q.get('type', '')
+            codes[name] = [str(c.get('value', '')) for c in (q.get('choices') or [])]
+        cached = (types, codes)
+        _TYPE_CHOICE_CACHE[key] = cached
+    return cached
+
+
+def adjust_variable_refs(logic_str: str, repeat_groups: set, iteration: int,
                          questions: List[Dict], _index: Optional[QuestionIndex] = None) -> str:
-    """Adjust variable references in skip logic for repeat iteration."""
+    """Suffix ``${var}`` references that live inside one of ``repeat_groups``
+    with the current iteration index, keeping the ``${...}`` wrapper so the
+    logic converter can still process the result.
+
+    A referenced var is suffixed iff a repeat group the CURRENT variable is
+    nested in also appears in the REFERENCED var's own group_path segments --
+    replacing the old substring test of the current var's full path against the
+    referenced var's path, which missed a repeat-scoped sibling on a shorter
+    path. (#26.7)
+    """
     if not logic_str:
         return logic_str
 
@@ -657,14 +705,22 @@ def adjust_variable_refs(logic_str: str, repeat_group: str, iteration: int,
     result = logic_str
     for var_ref in var_refs:
         question = find_question_for_variable(var_ref, questions, _index=_index)
-        if question:
-            var_group_path = '/'.join(question.get('group_path', []))
-            if repeat_group in var_group_path:
-                result = result.replace(f'${{{var_ref}}}', f'{var_ref}_{iteration}')
-            else:
-                result = result.replace(f'${{{var_ref}}}', var_ref)
-        else:
-            result = result.replace(f'${{{var_ref}}}', var_ref)
+        if not question:
+            continue
+        ref_segments = question.get('group_path', []) or []
+        if not any(rg in ref_segments for rg in repeat_groups):
+            continue  # not repeat-scoped -> leave ${var_ref} for the converter
+        # A select_multiple ref is NOT iteration-suffixed here: the converter
+        # turns selected(${sm}, C) into the choice indicator sm_C, and the
+        # canonical wide column for an SM-in-repeat is base_<choice>_<repeat>
+        # (choice-first, per the Phase-4 matcher + synthetic generator). Pre-
+        # suffixing the iteration would make the converter emit sm_<repeat>_C
+        # -- the exact transposition PR #21's blocker fixed. So we leave SM refs
+        # to the converter (their per-iteration column is not represented in
+        # this doc field; the XML-contract overlay is the deterministic path).
+        if question.get('type') == 'select_multiple':
+            continue
+        result = result.replace(f'${{{var_ref}}}', f'${{{var_ref}_{iteration}}}')
     return result
 
 
@@ -684,23 +740,35 @@ def adjust_skip_logic_for_repeats(metadata: Dict, var_name: str, questions: List
     iteration = metadata['repeat_iteration']
     group_path = metadata['group_path']
 
+    # The repeat groups the CURRENT variable is nested in (its group_path
+    # segments that are repeat groups). A referenced var is iteration-suffixed
+    # only if it shares one of these. (#26.7)
+    rgs = _index.repeat_group_names if _index is not None else _repeat_group_names(questions)
+    gp_segments = [p for p in group_path.split('/') if p] if group_path else []
+    repeat_groups = {rg for rg in rgs if rg in gp_segments}
+
     metadata['skip_logic_template'] = metadata['stata_skip_logic']
     metadata['group_relevances_template'] = metadata['group_relevances']
 
     if metadata['stata_skip_logic']:
         adjusted_logic = adjust_variable_refs(
-            metadata['stata_skip_logic'], group_path, iteration, questions, _index=_index
+            metadata['stata_skip_logic'], repeat_groups, iteration, questions, _index=_index
         )
         adjusted_logic = replace_index_function(adjusted_logic, iteration)
         metadata['skip_logic_iteration_specific'] = adjusted_logic
 
     if metadata['group_relevances']:
+        # group_relevances are RAW SurveyCTO. Suffix repeat-scoped refs (keeping
+        # ${...}), substitute index(), then run the real converter -- NOT a
+        # naive .replace('=','=='), which corrupted >=/<=/!= into >==/<==/!==
+        # and doubled existing == into ====. (#26.5)
+        types, codes = _base_type_choice_maps(questions)
         adjusted_relevances = []
         for relevance in metadata['group_relevances']:
-            adjusted = adjust_variable_refs(relevance, group_path, iteration, questions, _index=_index)
+            adjusted = adjust_variable_refs(relevance, repeat_groups, iteration, questions, _index=_index)
             adjusted = replace_index_function(adjusted, iteration)
-            adjusted = adjusted.replace('${', '').replace('}', '').replace('=', '==')
-            adjusted_relevances.append(adjusted)
+            converted = LogicConverter.convert_to_stata(adjusted, types, codes, var_name)
+            adjusted_relevances.append(converted)
         metadata['group_relevances_iteration_specific'] = adjusted_relevances
 
     return metadata
