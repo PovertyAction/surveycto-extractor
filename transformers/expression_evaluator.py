@@ -1691,22 +1691,27 @@ def _eval_repeat_aggregate(name: str, raw_args: List[Any], ctx: EvalContext) -> 
 
     base = field_node.name
     # Enumerate every iteration (nested-aware, scoped to the current repeat
-    # chain). The local index is the last suffix component, which is what the
-    # per-iteration push and rank-index semantics key on. (#28.5)
-    instances: List[Tuple[int, Any]] = [
-        (idxs[-1], v) for idxs, v in _collect_repeat_instances(base, ctx)
-    ]
+    # chain), keeping the FULL absolute index tuple. A nested field stored as
+    # base_o_i needs its predicate resolved via the COMPLETE suffix, so we push
+    # the chain levels not already on the stack. Collapsing to the innermost
+    # index (idxs[-1]) and pushing only that made a TOP-LEVEL nested aggregate
+    # resolve ${x} to base_i (which doesn't exist) instead of base_o_i, so the
+    # predicate was always false and count-if/sum-if/... came back 0/empty.
+    # (review #3 -- completes the #28.5 nested-aggregate work, which had only
+    # fixed the predicate-free sum(${plot}) path.)
+    existing_depth = len(ctx.repeat_stack)
+    instances: List[Tuple[tuple, Any]] = _collect_repeat_instances(base, ctx)
 
     # Apply predicate (if any) by re-binding the repeat stack so that inner
     # ${var} references resolve to that iteration's values.
-    selected: List[Tuple[int, Any]] = []
-    for idx, value in instances:
+    selected: List[Tuple[tuple, Any]] = []
+    for idxs, value in instances:
         if pred_node is None:
-            selected.append((idx, value))
+            selected.append((idxs, value))
             continue
-        sub_ctx = _push_iter_ctx(ctx, base, idx)
+        sub_ctx = _push_iter_chain(ctx, base, idxs[existing_depth:])
         if _to_bool(_eval(pred_node, sub_ctx)):
-            selected.append((idx, value))
+            selected.append((idxs, value))
 
     if name == "count-if":
         # SurveyCTO count-if counts every iteration whose criterion holds,
@@ -1734,16 +1739,17 @@ def _eval_repeat_aggregate(name: str, raw_args: List[Any], ctx: EvalContext) -> 
         except (TypeError, ValueError):
             return 999.0
         # Find the value at that instance index from the full instances list.
+        # `wanted` is a local iteration number, so match on the innermost suffix.
         target_value = None
-        for idx, v in instances:
-            if idx == wanted:
+        for idxs, v in instances:
+            if idxs[-1] == wanted:
                 target_value = v
                 break
         if target_value is None:
             return 999.0
         # Sort by numeric value descending; ties keep insertion order.
         numeric_selected = [
-            (_to_number(v), idx) for idx, v in selected
+            (_to_number(v), idxs[-1]) for idxs, v in selected
             if _to_number(v) == _to_number(v)
         ]
         if not numeric_selected:
@@ -1766,6 +1772,29 @@ def _push_iter_ctx(ctx: EvalContext, base: str, idx: int) -> EvalContext:
         choices=ctx.choices,
         pulldata_lookup=ctx.pulldata_lookup,
         repeat_stack=ctx.repeat_stack + [(base, idx)],
+        rng=ctx.rng,
+        now=ctx.now,
+        current_var=ctx.current_var,
+        choice_row=ctx.choice_row,
+        repeat_values=ctx.repeat_values,
+        var_to_choice_list=ctx.var_to_choice_list,
+        duration_secs=ctx.duration_secs,
+    )
+
+
+def _push_iter_chain(ctx: EvalContext, base: str, idxs) -> EvalContext:
+    """Like :func:`_push_iter_ctx` but pushes a FULL chain of iteration indices
+    at once. ``idxs`` are the chain levels not already on ``ctx.repeat_stack``;
+    pushing all of them lets a nested-repeat field's predicate resolve via the
+    complete ``base_o_i`` suffix instead of only the innermost ``base_i``. Empty
+    ``idxs`` returns ``ctx`` unchanged."""
+    if not idxs:
+        return ctx
+    return EvalContext(
+        row=ctx.row,
+        choices=ctx.choices,
+        pulldata_lookup=ctx.pulldata_lookup,
+        repeat_stack=ctx.repeat_stack + [(base, i) for i in idxs],
         rng=ctx.rng,
         now=ctx.now,
         current_var=ctx.current_var,

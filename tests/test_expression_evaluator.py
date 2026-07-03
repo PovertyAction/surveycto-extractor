@@ -72,6 +72,41 @@ class TestBlankNumericArgsDoNotCrash:
         assert safe_evaluate("substr(${s}, ${n})", ctx(row={"s": "hi", "n": ""}),
                              default="DEFAULT") == ""
 
+
+class TestNestedRepeatIfAggregates:
+    """Review HIGH #3 -- count-if/sum-if/... over a NESTED repeat field (stored
+    base_o_i) returned 0/empty: the predicate was pushed only the innermost
+    index, so ${x} resolved to base_i (nonexistent) instead of base_o_i.
+    #28.5 had only fixed the predicate-free sum(${plot}) path."""
+
+    def _nested(self):
+        # parcels(o) -> plots(i): plot_1_1, plot_1_2 (parcel 1), plot_2_1 (parcel 2)
+        return {
+            "plot_1_1": "1", "plot_1_2": "1", "plot_2_1": "1",
+            "plot_status_1_1": "active", "plot_status_1_2": "active",
+            "plot_status_2_1": "active",
+        }
+
+    def test_count_if_nested_counts_all(self):
+        assert evaluate("count-if(${plot}, ${plot_status}='active')",
+                        ctx(row=self._nested())) == 3.0
+
+    def test_count_if_nested_respects_predicate(self):
+        row = self._nested()
+        row["plot_status_2_1"] = "fallow"
+        assert evaluate("count-if(${plot}, ${plot_status}='active')",
+                        ctx(row=row)) == 2.0
+
+    def test_sum_if_nested(self):
+        row = {"yield_1_1": "10", "yield_1_2": "20", "yield_2_1": "30",
+               "ok_1_1": "1", "ok_1_2": "1", "ok_2_1": "0"}
+        assert evaluate("sum-if(${yield}, ${ok}='1')", ctx(row=row)) == 30.0
+
+    def test_single_level_if_still_works(self):
+        # Guard against regressing the single-suffix path that already worked.
+        row = {"x_1": "1", "x_2": "1", "y_1": "a", "y_2": "b"}
+        assert evaluate("count-if(${x}, ${y}='a')", ctx(row=row)) == 1.0
+
     def test_basic_truth_tables(self):
         assert evaluate_bool("true() or false()", ctx()) is True
         assert evaluate_bool("true() and false()", ctx()) is False
