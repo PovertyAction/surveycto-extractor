@@ -322,6 +322,26 @@ class TestStartsEndsWith:
         assert convert("ends-with(${v}, 'xy')", {}) == 'substr(v, -2, .) == "xy"'
 
 
+class TestReviewMedLowFixes:
+    """Review MEDIUM/LOW findings on the emitted-Stata path."""
+
+    def test_single_quotes_inside_needle_not_corrupted(self):
+        # #9: step 12f's single->double rewrite must not treat single quotes
+        # INSIDE an emitted double-quoted needle as comparison operands.
+        # Was: strpos(x, "a= "b"") (broken nested quoting).
+        assert convert('contains(${x}, "a=\'b\'")', {}) == 'strpos(x, "a=\'b\'") > 0'
+
+    def test_structural_issues_passes_through_valid_math(self):
+        # #12: round/sqrt/abs/... are valid in Stata AND SurveyCTO; not leaks.
+        assert LogicConverter.structural_issues("round(resp) > 5") == []
+        assert LogicConverter.structural_issues("sqrt(a) > abs(b)") == []
+
+    def test_structural_issues_flags_uppercase_leak(self):
+        # #12: the check is now case-insensitive, so PULLDATA(...) is caught.
+        assert LogicConverter.structural_issues("PULLDATA(x) > 5") == \
+            ["leaked function: PULLDATA()"]
+
+
 class TestConstraintCorruptionsFromSample:
     """C7 -- three real corruptions the structural validator surfaced in the
     sample's own constraint expressions (all `.`-form constraints)."""

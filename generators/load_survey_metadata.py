@@ -17,7 +17,12 @@ if str(_ROOT) not in sys.path:
 # drift (#26.8). config (if importable) may override SENTINEL_MEANINGS.
 try:
     import config as _config
-except Exception:  # standalone import without config on path
+except ModuleNotFoundError:  # config.py genuinely absent (standalone/CI) -- fine
+    # Narrow catch (matching create_variable_dictionaries.py): a PRESENT-but-
+    # broken config.py (SyntaxError, bad import) must fail loudly here rather
+    # than silently reverting to the default recode while the dict-builder
+    # crashes on the same config -- that reintroduced the #26.8 code/label
+    # drift. (review #5)
     _config = None
 try:
     from core import sentinels as _sentinels
@@ -385,8 +390,19 @@ def write_destring_block(
     # Pass 2: mvdecode inside quietly. Recode spec comes from the shared
     # sentinels table (config-overridable); byte-identical to the historical
     # hand-written mapping for the default IPA convention.
-    _mv = (_sentinels.mvdecode_spec(_SENTINEL_MEANINGS)
-           if _sentinels is not None else "-99=.d \\ -88=.r \\ -77=.n \\ -66=.o \\ -55=.m")
+    if _sentinels is not None:
+        _mv = _sentinels.mvdecode_spec(_SENTINEL_MEANINGS)
+    else:
+        # sentinels module unavailable: still honour a config.SENTINEL_MEANINGS
+        # override, so a custom recode isn't silently replaced by the IPA
+        # default exactly when the shared module is missing. (review #13)
+        _override = getattr(_config, "SENTINEL_MEANINGS", None) if _config is not None else None
+        _fb_meanings = ({int(k): tuple(v) for k, v in _override.items()}
+                        if _override is not None
+                        else {-99: ("", ".d"), -88: ("", ".r"), -77: ("", ".n"),
+                              -66: ("", ".o"), -55: ("", ".m")})
+        _mv = " \\ ".join(f"{code}={miss}" for code, (_lbl, miss)
+                          in sorted(_fb_meanings.items()))
     _mv_comment = "  ".join(part.strip() for part in _mv.split("\\"))
     lines += [
         f"    * Pass 2: recode sentinels ({_mv_comment})",

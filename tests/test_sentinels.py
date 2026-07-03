@@ -47,3 +47,13 @@ class TestConfigOverride:
 
     def test_none_config_is_default(self):
         assert s.resolve_sentinel_meanings(None) == s.DEFAULT_SENTINEL_MEANINGS
+
+    def test_empty_dict_override_disables_recoding(self):
+        # SENTINEL_MEANINGS = {} is a deliberate "disable sentinel recoding"
+        # override (e.g. -99 is a real response value). It must be honoured,
+        # not silently replaced by the IPA default. (review #6)
+        cfg = types.SimpleNamespace(SENTINEL_MEANINGS={})
+        assert s.resolve_sentinel_meanings(cfg) == {}
+        # ... and the scan list then carries only the scan-only codes.
+        assert s.sentinel_scan_codes(s.resolve_sentinel_meanings(cfg),
+                                     s.resolve_scan_only(cfg)) == [-98]

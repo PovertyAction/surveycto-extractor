@@ -127,3 +127,33 @@ def test_selected_in_relevance_not_transposed():
     out = _iteration_relevances(["selected(${sm}, '1')"])
     assert out == ["(sm_1 == 1)"]
     assert "sm_2_1" not in out[0]
+
+
+# --- review #8: stale-bridge degraded repeat detection --------------------------
+
+def test_stale_bridge_falls_back_to_suffix_stamping():
+    # A bridge JSON produced before the repeat_group_name field existed: the
+    # repeat_count questions carry NO repeat_group_name, so the precise gate is
+    # empty. Rather than collapse every repeat column to its base, fall back to
+    # suffix-based iteration stamping. (review #8)
+    stale = [
+        {"variable_name": "irpt_count", "type": "repeat_count", "group_path": []},
+        {"variable_name": "plot_area", "type": "integer", "group_path": ["irpt"]},
+    ]
+    idx = _build_question_index(stale)
+    assert idx.repeat_detection_degraded is True
+    r = determine_variable_source("plot_area_3", stale, _index=idx)
+    assert r["is_repeat"] is True
+    assert r["repeat_iteration"] == 3
+
+
+def test_no_repeat_counts_is_not_degraded_no_false_stamp():
+    # A survey with genuinely NO repeats (no repeat_count questions) must NOT
+    # trigger the fallback -- otherwise `income2` off top-level `income` would
+    # get a fabricated iteration (the #26.2 false positive).
+    norep = [{"variable_name": "income", "type": "integer", "group_path": []}]
+    idx = _build_question_index(norep)
+    assert idx.repeat_detection_degraded is False
+    r = determine_variable_source("income2", norep, _index=idx)
+    assert r["is_repeat"] is False
+    assert r["repeat_iteration"] is None

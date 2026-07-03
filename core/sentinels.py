@@ -35,9 +35,15 @@ DEFAULT_SCAN_ONLY: List[int] = [-98]
 
 def resolve_sentinel_meanings(config=None) -> Dict[int, Tuple[str, str]]:
     """Resolve the active meanings table: ``config.SENTINEL_MEANINGS`` if the
-    config module defines it (wholesale override), else the IPA default."""
-    if config is not None and getattr(config, "SENTINEL_MEANINGS", None):
-        return {int(k): tuple(v) for k, v in config.SENTINEL_MEANINGS.items()}
+    config module defines it (wholesale override), else the IPA default.
+
+    Gate on ``is not None`` (like ``resolve_scan_only``), NOT truthiness: an
+    empty ``SENTINEL_MEANINGS = {}`` is a deliberate "disable sentinel recoding"
+    override (e.g. a study where -99 is a legitimate response), and must be
+    honoured rather than silently falling through to the IPA default. (review #6)"""
+    override = getattr(config, "SENTINEL_MEANINGS", None) if config is not None else None
+    if override is not None:
+        return {int(k): tuple(v) for k, v in override.items()}
     return dict(DEFAULT_SENTINEL_MEANINGS)
 
 
