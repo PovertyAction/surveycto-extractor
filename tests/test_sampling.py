@@ -25,8 +25,18 @@ class TestNumericBounds:
     def test_strict_less_shifts_down_by_one(self):
         assert numeric_bounds(". < 18") == (None, 17)
 
-    def test_single_sided_lower_on_named_var(self):
-        assert numeric_bounds("hh_size >= 5") == (5, None)
+    def test_named_var_bound_ignored(self):
+        # A bound on a DIFFERENT variable is not a bound on the current field
+        # (constraints use `.` for the current value), so it must be ignored
+        # rather than mis-applied. (#28.7)
+        assert numeric_bounds("hh_size >= 5") == (None, None)
+
+    def test_foreign_clause_does_not_invert_current_bound(self):
+        # `. >= 30 and ${x} <= 10`: the foreign `${x} <= 10` must NOT become an
+        # upper bound of 10 on the current field (which produced an inverted
+        # (30, 10) -> swapped (10, 30) range and sampled a value violating the
+        # real `. >= 30`). Only the current-value clause counts. (#28.7)
+        assert numeric_bounds(". >= 30 and ${x} <= 10") == (30, None)
 
     def test_decimal_bounds_preserved(self):
         assert numeric_bounds(". >= 1.5 and . <= 9.5") == (1.5, 9.5)

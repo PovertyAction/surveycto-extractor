@@ -47,20 +47,89 @@ class TestShortCircuit:
     def test_and_short_circuits_before_error(self):
         assert evaluate_bool("1 = 2 and regex('x', '[')", ctx()) is False
 
+
+class TestBlankNumericArgsDoNotCrash:
+    """A blank numeric arg coerces to NaN; int(NaN) raises ValueError -- which
+    is NOT an ExpressionError, so it used to escape safe_evaluate and abort the
+    whole pipeline instead of degrading. round()/substr() must handle it."""
+
+    def test_round_blank_precision_defaults_to_zero(self):
+        # Was: ValueError("cannot convert float NaN to integer") escapes.
+        assert evaluate("round(5.5, ${d})", ctx(row={"d": ""})) == 6.0
+
+    def test_substr_blank_start_returns_empty(self):
+        assert evaluate("substr(${s}, ${n})", ctx(row={"s": "hi", "n": ""})) == ""
+
+    def test_substr_blank_end_runs_to_end(self):
+        assert evaluate("substr(${s}, 1, ${n})",
+                        ctx(row={"s": "hello", "n": ""})) == "ello"
+
+    def test_safe_evaluate_no_longer_raises_on_blank_args(self):
+        # The pipeline calls these through safe_evaluate; confirm no ValueError
+        # leaks (it would if the fns raised a non-ExpressionError).
+        assert safe_evaluate("round(5.5, ${d})", ctx(row={"d": ""}),
+                             default="DEFAULT") == 6.0
+        assert safe_evaluate("substr(${s}, ${n})", ctx(row={"s": "hi", "n": ""}),
+                             default="DEFAULT") == ""
+
+
+class TestNestedRepeatIfAggregates:
+    """Review HIGH #3 -- count-if/sum-if/... over a NESTED repeat field (stored
+    base_o_i) returned 0/empty: the predicate was pushed only the innermost
+    index, so ${x} resolved to base_i (nonexistent) instead of base_o_i.
+    #28.5 had only fixed the predicate-free sum(${plot}) path."""
+
+    def _nested(self):
+        # parcels(o) -> plots(i): plot_1_1, plot_1_2 (parcel 1), plot_2_1 (parcel 2)
+        return {
+            "plot_1_1": "1", "plot_1_2": "1", "plot_2_1": "1",
+            "plot_status_1_1": "active", "plot_status_1_2": "active",
+            "plot_status_2_1": "active",
+        }
+
+    def test_count_if_nested_counts_all(self):
+        assert evaluate("count-if(${plot}, ${plot_status}='active')",
+                        ctx(row=self._nested())) == 3.0
+
+    def test_count_if_nested_respects_predicate(self):
+        row = self._nested()
+        row["plot_status_2_1"] = "fallow"
+        assert evaluate("count-if(${plot}, ${plot_status}='active')",
+                        ctx(row=row)) == 2.0
+
+    def test_sum_if_nested(self):
+        row = {"yield_1_1": "10", "yield_1_2": "20", "yield_2_1": "30",
+               "ok_1_1": "1", "ok_1_2": "1", "ok_2_1": "0"}
+        assert evaluate("sum-if(${yield}, ${ok}='1')", ctx(row=row)) == 30.0
+
+    def test_single_level_if_still_works(self):
+        # Guard against regressing the single-suffix path that already worked.
+        row = {"x_1": "1", "x_2": "1", "y_1": "a", "y_2": "b"}
+        assert evaluate("count-if(${x}, ${y}='a')", ctx(row=row)) == 1.0
+
     def test_basic_truth_tables(self):
         assert evaluate_bool("true() or false()", ctx()) is True
         assert evaluate_bool("true() and false()", ctx()) is False
 
 
 class TestMissingValues:
-    def test_blank_numeric_field_coerces_to_zero_in_comparison(self):
-        # The evaluator coerces a blank field to 0 in numeric context (see
-        # _to_number), so a blank behaves as 0 -- NOT as Stata's +inf missing
-        # and NOT as an always-False NaN. This is the synth-vs-Stata gap
-        # documented in docs/synthetic-generator.md.
+    def test_blank_numeric_field_comparison_is_false_both_ways(self):
+        # A blank/skipped numeric field is NaN (XPath number('')), so a
+        # comparison is False in BOTH directions -- matching SurveyCTO, where a
+        # skipped field does not satisfy a gate. (Previously blank coerced to 0,
+        # so `${age} < 18` wrongly fired and the synth populated questions real
+        # SurveyCTO would hide -- #28.1.)
         c = ctx(row={"age": ""})
-        assert evaluate_bool("${age} > 18", c) is False   # 0 > 18
-        assert evaluate_bool("${age} < 18", c) is True     # 0 < 18
+        assert evaluate_bool("${age} > 18", c) is False
+        assert evaluate_bool("${age} < 18", c) is False
+
+    def test_blank_arithmetic_propagates_blank(self):
+        # Blank + blank is NaN, which serialises to an empty string, not 0 or
+        # "nan" -- matching a blank SurveyCTO export cell. (#28.2)
+        c = ctx(row={"inc1": "", "inc2": ""})
+        assert evaluate("${inc1} + ${inc2}", c) != evaluate("${inc1} + ${inc2}", c)  # NaN
+        from transformers.expression_evaluator import _to_string
+        assert _to_string(evaluate("${inc1} + ${inc2}", c)) == ""
 
     def test_explicit_nan_operand_makes_comparison_false(self):
         # Only an explicit NaN operand (here, an unparseable date) forces the
@@ -72,6 +141,84 @@ class TestMissingValues:
         c = ctx(row={"name": ""})
         assert evaluate_bool("${name} = ''", c) is True
         assert evaluate_bool("${name} != ''", c) is False
+
+    def test_equal_semantics_audit(self):
+        # Guards for the NaN change: blank must NOT equal 0, blank equals blank,
+        # numeric-string equals numeric.
+        assert evaluate_bool("${x} = 0", ctx(row={"x": ""})) is False
+        assert evaluate_bool("${x} = ''", ctx(row={"x": ""})) is True
+        assert evaluate_bool("'2' = 2", ctx()) is True
+
+
+class TestDateArithmetic:
+    def test_age_calc_yields_real_age_not_zero(self):
+        # int((today() - date(${dob})) div 365.25) -- the ubiquitous age calc.
+        # Dates must coerce to decimal days so this is the true age, not 0
+        # (which every respondent got when date subtraction fell to NaN). #28.3
+        c = ctx(row={"dob": "1990-01-01"}, now=datetime.datetime(2020, 1, 1))
+        age = evaluate("int((today() - date(${dob})) div 365.25)", c)
+        assert age == 29 or age == 30  # ~30 years, floor after div
+
+    def test_age_gate_now_reachable(self):
+        c = ctx(row={"dob": "1990-01-01"}, now=datetime.datetime(2020, 1, 1))
+        assert evaluate_bool(
+            "int((today() - date(${dob})) div 365.25) >= 18", c) is True
+
+    def test_blank_dob_age_is_nan_not_zero(self):
+        c = ctx(row={"dob": ""}, now=datetime.datetime(2020, 1, 1))
+        age = evaluate("int((today() - date(${dob})) div 365.25)", c)
+        assert age != age  # NaN, not 0
+
+
+class TestPulldataErrorContract:
+    def test_pulldata_without_lookup_returns_empty(self):
+        assert evaluate("pulldata('f', 'c', 'k', 1)", ctx()) == ""
+
+    def test_pulldata_raising_lookup_surfaces_error(self):
+        def _boom(*a):
+            raise KeyError("no such column")
+        c = ctx(pulldata_lookup=_boom)
+        # safe_evaluate should log/raise, not silently blank (#28.9).
+        with pytest.raises(EvaluationError):
+            evaluate("pulldata('f', 'c', 'k', 1)", c)
+
+
+class TestNumericSemantics:
+    def test_round_half_up(self):
+        assert evaluate("round(2.5)", ctx()) == 3
+        assert evaluate("round(3.5)", ctx()) == 4
+        assert evaluate("round(-2.5)", ctx()) == -2
+
+    def test_mod_truncates_toward_zero(self):
+        assert evaluate("-3 mod 2", ctx()) == -1.0
+
+
+class TestNestedRepeatScoping:
+    def test_outer_field_not_bled_from_inner_index(self):
+        # At (outer=2, inner=3), a reference to an outer-scoped field `a`
+        # (stored a_2) must resolve to a_2, NOT a_3 (a different outer
+        # iteration) -- the cross-iteration bleed of #28.4.
+        c = ctx(row={"a_2": "two", "a_3": "three"},
+                repeat_stack=[("outer", 2), ("inner", 3)])
+        assert evaluate("${a}", c) == "two"
+
+    def test_nested_field_resolves_full_chain(self):
+        c = ctx(row={"b_2_3": "correct", "b_2_1": "other", "b_1_3": "wrong"},
+                repeat_stack=[("outer", 2), ("inner", 3)])
+        assert evaluate("${b}", c) == "correct"
+
+    def test_sum_over_nested_field_scoped_to_current_outer(self):
+        # sum(${plot}) inside parcel 2 sums only parcel 2's plots (#28.5) --
+        # the old single-suffix enumeration found nothing for nested storage.
+        c = ctx(row={"plot_1_1": "10", "plot_1_2": "20",
+                     "plot_2_1": "3", "plot_2_2": "4"},
+                repeat_stack=[("parcel", 2)])
+        assert evaluate("sum(${plot})", c) == 7  # 3 + 4, not 37 and not 0
+
+    def test_single_repeat_sum_unchanged(self):
+        # Regression guard: a plain single-level repeat still sums all.
+        c = ctx(row={"x_1": "1", "x_2": "2", "x_3": "3"})
+        assert evaluate("sum(${x})", c) == 6
 
     def test_empty_function(self):
         assert evaluate_bool("empty(${missing})", ctx(row={})) is True

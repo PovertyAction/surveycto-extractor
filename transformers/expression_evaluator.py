@@ -422,21 +422,25 @@ class EvalContext:
         """Resolve a ${var} reference against the row state, accounting for
         wide-format repeat-suffix expansion if we're inside a repeat."""
         if self.repeat_stack:
-            # Innermost first — try the deepest single-suffix match. Covers
-            # single-level repeats (``var_i``) and the evaluator's own repeat
-            # aggregation (count/sum/join push one level at a time).
-            for _rep, idx in reversed(self.repeat_stack):
-                key = f"{name}_{idx}"
+            idxs = [idx for _rep, idx in self.repeat_stack]
+            # 1. Chain-first: full ancestor->self chain, then progressively
+            #    shorter OUTER prefixes down to the outermost single suffix.
+            #    This resolves an outer-scoped field (stored ``var_<outer>``) to
+            #    the CURRENT outer iteration BEFORE the single-suffix fallback
+            #    can wrongly grab a deeper index -- e.g. at (outer=2, inner=3) a
+            #    reference to an outer field ``a`` hits ``a_2``, not ``a_3``.
+            #    (#28.4 -- was: innermost single-suffix loop ran first and bled
+            #    iteration 3's value into iteration 2's row.)
+            for k in range(len(idxs), 0, -1):
+                key = name + "".join(f"_{j}" for j in idxs[:k])
                 if key in self.row:
                     return self.row[key]
-            # Nested repeats store combined suffixes (``var_o_i``). Try the
-            # full ancestor→self chain, then progressively shorter prefixes so
-            # an inner-context reference to an OUTER-level field (stored
-            # ``var_o``) still resolves. Outermost-first matches how
-            # ``_repeat_chain`` builds the suffix.
-            idxs = [idx for _rep, idx in self.repeat_stack]
-            for k in range(len(idxs), 1, -1):
-                key = name + "".join(f"_{j}" for j in idxs[:k])
+            # 2. Innermost-first single-suffix fallback: covers an aggregate
+            #    over a different repeat's field (stored ``var_i``) evaluated
+            #    while nested inside another repeat. The outermost single suffix
+            #    was already tried by chain k=1, so skip it here.
+            for _rep, idx in reversed(self.repeat_stack[1:]):
+                key = f"{name}_{idx}"
                 if key in self.row:
                     return self.row[key]
         if name in self.row:
@@ -456,13 +460,26 @@ def _to_number(value: Any) -> float:
         return 1.0 if value else 0.0
     if isinstance(value, (int, float)):
         return float(value)
+    # Dates/datetimes coerce to decimal days since the epoch, matching XPath
+    # (dates behave as numbers in arithmetic) and decimal-date-time(). Without
+    # this, `today() - date(${dob})` fell through to str()->NaN->0, making the
+    # ubiquitous age calc `int((today() - date(dob)) div 365.25)` yield 0 for
+    # every respondent (#28.3). datetime is a subclass of date, so test it first.
+    if isinstance(value, datetime.datetime):
+        return (value - _EPOCH_DATETIME).total_seconds() / 86_400.0
+    if isinstance(value, datetime.date):
+        return float((value - _EPOCH_DATE).days)
     s = str(value).strip()
     if s == "":
-        return 0.0  # XPath number('') is NaN, but SurveyCTO behaves like 0 in arithmetic
+        # XPath number('') is NaN. Comparisons with NaN are false and NaN
+        # arithmetic yields NaN, which serialises to a blank cell -- matching
+        # SurveyCTO, where a blank/skipped field neither satisfies a gate nor
+        # contributes a 0 to a sum. (The old 0.0 leaked through `< N`
+        # comparisons and `+` arithmetic -- #28.1/#28.2.)
+        return float("nan")
     if _NUM_RX.match(s):
         return float(s)
-    # Non-numeric string -> NaN-like; we use 0.0 to keep arithmetic from
-    # propagating exceptions. Comparisons against this should be careful.
+    # Non-numeric, non-empty string -> NaN (comparisons false, arithmetic NaN).
     return float("nan")
 
 
@@ -470,6 +487,11 @@ def _to_string(value: Any) -> str:
     if isinstance(value, bool):
         return "true" if value else "false"
     if isinstance(value, float):
+        # NaN (a blank/skipped numeric or blank arithmetic result) serialises
+        # to an empty cell, not the literal "nan" -- this is the single point
+        # that turns propagated-blank NaN into a blank CSV value. (#28.2)
+        if value != value:
+            return ""
         # SurveyCTO does not render trailing .0 for integer floats
         if value.is_integer():
             return str(int(value))
@@ -592,8 +614,8 @@ def _fn_int(args, ctx):
     if len(args) != 1:
         raise EvaluationError(f"int() expects 1 arg, got {len(args)}")
     n = _to_number(args[0])
-    if n != n:  # NaN
-        return 0.0
+    if n != n:  # NaN in -> NaN out (blank propagates; was 0.0, which made
+        return float("nan")  # int() of a blank/undated field read as 0 -- #28.3)
     return float(int(n))
 
 
@@ -680,11 +702,16 @@ def _fn_pulldata(args, ctx):
     key_col = _to_string(args[2])
     key_val = args[3]
     if ctx.pulldata_lookup is None:
+        # No lookup wired in -> blank, as before (see test_pulldata_without_lookup).
         return ""
+    # A configured lookup that RAISES is a real error (bad column/key name, a
+    # bug in the lookup) and must surface via safe_evaluate's strip log rather
+    # than silently degrade to a blank cell -- mirrors the regex() contract
+    # from #12 ("log or raise, never hide"). (#28.9)
     try:
         return ctx.pulldata_lookup(csv_name, col, key_col, key_val)
-    except Exception:
-        return ""
+    except Exception as e:
+        raise EvaluationError(f"pulldata({csv_name!r}, {col!r}, ...) failed: {e}")
 
 
 # ── Date / time helpers ──────────────────────────────────────────────────────
@@ -878,20 +905,43 @@ def _fn_if_empty_date(args, ctx):
 
 # ── Aggregates over repeated fields ──────────────────────────────────────────
 
+def _collect_repeat_instances(var_name: str, ctx: EvalContext) -> List[Tuple[tuple, Any]]:
+    """Return [(index_tuple, value), ...] for every wide-format instance of
+    ``var_name`` (``var_1`` ... and nested ``var_o_i`` ...), sorted by index.
+
+    Nested-repeat fields are stored with a combined suffix (``var_o_i``), which
+    the old single-suffix enumeration (``var_1, var_2, ...``) never found, so
+    aggregates over a nested field silently returned nothing. When evaluated
+    inside a repeat, scopes to the current outer iteration by keeping the
+    longest current-chain prefix that yields any hits (so ``sum(${plot})``
+    inside parcel 2 sums only parcel 2's plots), falling back to the full set
+    if no prefix matches. (#28.5)"""
+    rx = re.compile(rf"^{re.escape(var_name)}((?:_\d+)+)$")
+    matches: List[Tuple[tuple, Any]] = []
+    for key, v in ctx.row.items():
+        m = rx.match(key)
+        if m:
+            idxs = tuple(int(p) for p in m.group(1).split("_") if p != "")
+            matches.append((idxs, v))
+    if not matches:
+        return []
+    if ctx.repeat_stack:
+        chain = tuple(idx for _rep, idx in ctx.repeat_stack)
+        for k in range(len(chain), 0, -1):
+            prefix = chain[:k]
+            scoped = [(idxs, v) for idxs, v in matches if idxs[:k] == prefix]
+            if scoped:
+                matches = scoped
+                break
+    matches.sort(key=lambda t: t[0])
+    return matches
+
+
 def _collect_repeat_values(var_name: str, ctx: EvalContext) -> List[Any]:
-    """Return [row[var_1], row[var_2], ...] in iteration order, dropping
+    """Values of every instance of ``var_name`` in iteration order, dropping
     empty cells. Used by sum/min/max/count/join and their -if variants."""
-    out: List[Any] = []
-    i = 1
-    while True:
-        key = f"{var_name}_{i}"
-        if key not in ctx.row:
-            break
-        v = ctx.row[key]
-        if v != "" and v is not None:
-            out.append(v)
-        i += 1
-    return out
+    return [v for _idxs, v in _collect_repeat_instances(var_name, ctx)
+            if v != "" and v is not None]
 
 
 def _aggregate_arity_error(name: str, got: int, expected: int) -> EvaluationError:
@@ -1036,11 +1086,21 @@ def _fn_substr(args, ctx):
     if len(args) not in (2, 3):
         raise EvaluationError(f"substr() expects 2 or 3 args, got {len(args)}")
     s = _to_string(args[0])
-    start = int(_to_number(args[1]))
+    # A blank/non-numeric index coerces to NaN, and int(NaN) raises ValueError,
+    # which escapes safe_evaluate and aborts the pipeline. Guard both indices
+    # like selected-at/item-at do: a blank start can't be computed (return ""),
+    # a blank end means "to the end of the string".
+    try:
+        start = int(_to_number(args[1]))
+    except (TypeError, ValueError):
+        return ""
     if start < 0:
         start = max(0, len(s) + start)
     if len(args) == 3:
-        end = int(_to_number(args[2]))
+        try:
+            end = int(_to_number(args[2]))
+        except (TypeError, ValueError):
+            return s[start:]
         if end < 0:
             end = max(0, len(s) + end)
         return s[start:end]
@@ -1211,10 +1271,21 @@ def _fn_round(args, ctx):
     if len(args) not in (1, 2):
         raise EvaluationError(f"round() expects 1 or 2 args, got {len(args)}")
     n = _to_number(args[0])
-    digits = int(_to_number(args[1])) if len(args) == 2 else 0
+    # A blank/non-numeric digits arg coerces to NaN, and int(NaN) raises
+    # ValueError -- which is NOT an ExpressionError, so it escapes
+    # safe_evaluate and aborts the whole pipeline. Default a blank precision to
+    # 0 (round to integer), matching the guarded pattern used by selected-at /
+    # item-at / indexed-repeat.
+    try:
+        digits = int(_to_number(args[1])) if len(args) == 2 else 0
+    except (TypeError, ValueError):
+        digits = 0
     if n != n:
         return float("nan")
-    return round(n, digits)
+    # XPath/SurveyCTO round() is round-half-up, not Python's banker's rounding:
+    # round(2.5) is 3, round(-2.5) is -2 (half rounds toward +inf).
+    scale = 10 ** digits
+    return math.floor(n * scale + 0.5) / scale
 
 
 @_register("pow")
@@ -1492,7 +1563,9 @@ def _eval_binop(node: BinOp, ctx: EvalContext) -> Any:
         r = _to_number(right)
         if r == 0:
             return float("nan")
-        return _to_number(left) % r
+        # XPath mod truncates toward zero (like C fmod), so -3 mod 2 == -1;
+        # Python's % is floored (-3 % 2 == 1). Use fmod to match SurveyCTO.
+        return math.fmod(_to_number(left), r)
     raise EvaluationError(f"unknown binary op {op}")
 
 
@@ -1617,29 +1690,35 @@ def _eval_repeat_aggregate(name: str, raw_args: List[Any], ctx: EvalContext) -> 
         )
 
     base = field_node.name
-    # Enumerate every iteration with the same prefix in the row dict.
-    instances: List[Tuple[int, Any]] = []
-    i = 1
-    while True:
-        key = f"{base}_{i}"
-        if key not in ctx.row:
-            break
-        instances.append((i, ctx.row[key]))
-        i += 1
+    # Enumerate every iteration (nested-aware, scoped to the current repeat
+    # chain), keeping the FULL absolute index tuple. A nested field stored as
+    # base_o_i needs its predicate resolved via the COMPLETE suffix, so we push
+    # the chain levels not already on the stack. Collapsing to the innermost
+    # index (idxs[-1]) and pushing only that made a TOP-LEVEL nested aggregate
+    # resolve ${x} to base_i (which doesn't exist) instead of base_o_i, so the
+    # predicate was always false and count-if/sum-if/... came back 0/empty.
+    # (review #3 -- completes the #28.5 nested-aggregate work, which had only
+    # fixed the predicate-free sum(${plot}) path.)
+    existing_depth = len(ctx.repeat_stack)
+    instances: List[Tuple[tuple, Any]] = _collect_repeat_instances(base, ctx)
 
     # Apply predicate (if any) by re-binding the repeat stack so that inner
     # ${var} references resolve to that iteration's values.
-    selected: List[Tuple[int, Any]] = []
-    for idx, value in instances:
+    selected: List[Tuple[tuple, Any]] = []
+    for idxs, value in instances:
         if pred_node is None:
-            selected.append((idx, value))
+            selected.append((idxs, value))
             continue
-        sub_ctx = _push_iter_ctx(ctx, base, idx)
+        sub_ctx = _push_iter_chain(ctx, base, idxs[existing_depth:])
         if _to_bool(_eval(pred_node, sub_ctx)):
-            selected.append((idx, value))
+            selected.append((idxs, value))
 
     if name == "count-if":
-        return float(sum(1 for _, v in selected if v != "" and v is not None))
+        # SurveyCTO count-if counts every iteration whose criterion holds,
+        # regardless of the counted field's own emptiness -- a skipped-but-
+        # qualifying iteration still counts. (Was: only non-empty values,
+        # which undercounted -- #28.10.)
+        return float(len(selected))
     if name == "sum-if":
         return sum(_to_number(v) for _, v in selected if _to_number(v) == _to_number(v))
     if name in ("min-if", "max-if"):
@@ -1660,16 +1739,17 @@ def _eval_repeat_aggregate(name: str, raw_args: List[Any], ctx: EvalContext) -> 
         except (TypeError, ValueError):
             return 999.0
         # Find the value at that instance index from the full instances list.
+        # `wanted` is a local iteration number, so match on the innermost suffix.
         target_value = None
-        for idx, v in instances:
-            if idx == wanted:
+        for idxs, v in instances:
+            if idxs[-1] == wanted:
                 target_value = v
                 break
         if target_value is None:
             return 999.0
         # Sort by numeric value descending; ties keep insertion order.
         numeric_selected = [
-            (_to_number(v), idx) for idx, v in selected
+            (_to_number(v), idxs[-1]) for idxs, v in selected
             if _to_number(v) == _to_number(v)
         ]
         if not numeric_selected:
@@ -1692,6 +1772,29 @@ def _push_iter_ctx(ctx: EvalContext, base: str, idx: int) -> EvalContext:
         choices=ctx.choices,
         pulldata_lookup=ctx.pulldata_lookup,
         repeat_stack=ctx.repeat_stack + [(base, idx)],
+        rng=ctx.rng,
+        now=ctx.now,
+        current_var=ctx.current_var,
+        choice_row=ctx.choice_row,
+        repeat_values=ctx.repeat_values,
+        var_to_choice_list=ctx.var_to_choice_list,
+        duration_secs=ctx.duration_secs,
+    )
+
+
+def _push_iter_chain(ctx: EvalContext, base: str, idxs) -> EvalContext:
+    """Like :func:`_push_iter_ctx` but pushes a FULL chain of iteration indices
+    at once. ``idxs`` are the chain levels not already on ``ctx.repeat_stack``;
+    pushing all of them lets a nested-repeat field's predicate resolve via the
+    complete ``base_o_i`` suffix instead of only the innermost ``base_i``. Empty
+    ``idxs`` returns ``ctx`` unchanged."""
+    if not idxs:
+        return ctx
+    return EvalContext(
+        row=ctx.row,
+        choices=ctx.choices,
+        pulldata_lookup=ctx.pulldata_lookup,
+        repeat_stack=ctx.repeat_stack + [(base, i) for i in idxs],
         rng=ctx.rng,
         now=ctx.now,
         current_var=ctx.current_var,

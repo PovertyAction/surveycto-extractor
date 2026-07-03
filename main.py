@@ -9,7 +9,13 @@ from pathlib import Path
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent))
 
-import config
+# config.py is per-project and gitignored; import it gracefully so this module
+# imports without a config present (e.g. tests inject a stub). main() exits
+# with a clear message if it's genuinely missing at run time.
+try:
+    import config
+except ModuleNotFoundError:
+    config = None
 from parsers.survey_parser import SurveyParser
 from extractors.csv_extractor import CSVExtractor
 from extractors.json_extractor import JSONExtractor
@@ -243,6 +249,11 @@ def run_synthetic_phase(
 
 def main():
     """Main entry point with CLI"""
+    if config is None:
+        print("ERROR: config.py not found. Copy config.template.py to config.py "
+              "(or sample/config.example.py for the bundled sample) and fill in "
+              "SURVEYS/DATASETS.")
+        sys.exit(1)
     survey_keys = list(config.SURVEYS.keys())
     valid_phases = ["csv", "json", "sections", "synthetic", "all"]
 

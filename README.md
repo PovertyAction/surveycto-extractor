@@ -24,7 +24,8 @@ python create_variable_dictionaries.py --survey household_survey --xlsx
 
 Outputs land in `sample/output/`. The sample uses the
 [IPA High Frequency Checks](https://github.com/PovertyAction/high-frequency-checks)
-training dataset.
+training dataset — a public training resource; every person name appearing in
+`sample/household_survey.dta` is fictional.
 
 ---
 
@@ -193,9 +194,9 @@ deterministic. See `enrich_with_contract.py`.
 
 ### 2. Use the variable graph
 
-If `networkx` is installed (it's in `requirements.txt`), the variable-
-dictionary step also writes `<survey>_variable_graph.json` — a directed graph
-capturing how variables relate:
+The variable-dictionary step also writes `<survey>_variable_graph.json` — a
+directed graph capturing how variables relate (requires `networkx`, which
+`pip install -r requirements.txt` now includes):
 
 - `calculates_from` — A's calculation references B.
 - `gated_by` — A's relevance references B.
@@ -272,11 +273,11 @@ The skill auto-discovers all surveys under `DOCS` by scanning for
 
 ### MCP server (optional, higher-performance)
 
-The `mcp/` directory contains an optional MCP server that keeps variable
+The `mcp_server/` directory contains an optional MCP server that keeps variable
 dictionaries in memory for instant lookups — the high-performance alternative
 for sessions with heavy query volume (10–50+ lookups per cleaning module).
 
-| | `skill/search_survey.py` | `mcp/survey_server.py` |
+| | `skill/search_survey.py` | `mcp_server/survey_server.py` |
 |---|---|---|
 | Loads JSON | Every call | Once at startup |
 | Dependencies | None (stdlib) | `mcp[cli]` |
@@ -292,23 +293,28 @@ for sessions with heavy query volume (10–50+ lookups per cleaning module).
 pip install "mcp[cli]" networkx
 ```
 
-Add to your project's `.mcp.json`:
+Add to your project's `.mcp.json` (a ready-made `.mcp.json.example` in the
+repo root works out of the box for the sample: `cp .mcp.json.example .mcp.json`):
 
 ```json
 {
   "mcpServers": {
     "survey-expert": {
       "command": "python",
-      "args": ["path/to/surveycto_extractor/mcp/survey_server.py"]
+      "args": ["path/to/surveycto_extractor/mcp_server/survey_server.py"]
     }
   }
 }
 ```
 
+> **Note:** this directory was previously named `mcp/`. If your `.mcp.json`
+> still points at `mcp/survey_server.py`, update the path — a stale path shows
+> up as "failed to connect" in `/mcp`.
+
 The server finds `config.py` in its parent directory automatically (override
 with the `SURVEY_CONFIG` env var). It degrades gracefully — if config or JSON
 files are missing, tools return setup instructions rather than crashing. See
-`mcp/README.md` for full details.
+`mcp_server/README.md` for full details.
 
 ### Coding guidelines for agents
 
@@ -379,6 +385,35 @@ DATASETS = {
 The `questions_json` path is the bridge between the two sides — Phase 4 will
 fail with an actionable error if it doesn't exist yet.
 
+### Sentinel / special-missing codes
+
+Sentinel counts and the Stata `mvdecode` recode assume a **default set of
+special-missing codes** — the IPA convention this toolkit has been used with:
+
+| Code | Meaning | Stata missing |
+|---|---|---|
+| `-99` | Don't know | `.d` |
+| `-88` | Refused to answer | `.r` |
+| `-77` | Not applicable | `.n` |
+| `-66` | Other (specify) | `.o` |
+| `-55` | Not in list | `.m` |
+| `-98` | *(scanned/counted, never recoded)* | — |
+
+This is a **project convention, not a fixed standard**. If your study uses a
+different set — or if any of these are legitimate response values in your data
+— override the table wholesale in `config.py`:
+
+```python
+SENTINEL_MEANINGS = { -99: ("Don't know", ".d"), -88: ("Refused", ".r") }
+SENTINEL_SCAN_ONLY = [-98]   # counted as sentinels but never recoded
+```
+
+The single source of truth is `core/sentinels.py`, read by both
+`create_variable_dictionaries.py` and `generators/load_survey_metadata.py` so
+the two can never disagree. If `core/sentinels.py` is missing (e.g. a partial
+vendor copy of the toolkit), the pipeline falls back to these same defaults with
+a warning rather than failing.
+
 ---
 
 ## Repo layout (for projects that vendor this toolkit)
@@ -393,9 +428,12 @@ my_project/
     ├── config.py                           ← copy from config.template.py, fill in
     ├── main.py                             ← instrument-side entry point
     ├── create_variable_dictionaries.py     ← post-collection vardict + graph
-    ├── xml_contract.py                     ← compiled-XForm parser (optional overlay)
     ├── enrich_with_contract.py             ← overlays the XML contract onto the vardict
     ├── create_summary_stats_dofile.py      ← post-collection summary stats
+    ├── core/                               ← shared support (sentinels table)
+    ├── parsers/                            ← survey + compiled-XForm (xml_contract) parsers
+    ├── generators/                         ← outputs incl. Stata metadata (load_survey_metadata)
+    ├── extractors/  transformers/          ← CSV/JSON extraction, logic conversion
     └── ...
 ```
 

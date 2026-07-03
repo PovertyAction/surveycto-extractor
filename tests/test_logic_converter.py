@@ -132,3 +132,224 @@ class TestRegressionGuards:
 
     def test_selected_select_multiple(self):
         assert convert("selected(${ls}, '2')", {"ls": "select_multiple"}) == "(ls_2 == 1)"
+
+
+class TestStructuralIssues:
+    """#27.7 -- structural_issues must flag every corruption mode a strip or
+    translate bug can leave behind. Inputs are the exact corrupted outputs
+    quoted in issues #22 and #27."""
+
+    issues = staticmethod(LogicConverter.structural_issues)
+
+    def test_leftover_sentinel(self):
+        assert "leftover __STRIP__ sentinel" in self.issues("a == 1 & __STRIP__")
+
+    def test_residual_single_quote(self):
+        # From #22 case 3: contains needle emptied with orphan quote tail.
+        assert "residual single quote" in self.issues("strpos(a, \"\") > 0')")
+
+    def test_orphan_comma(self):
+        # From #27.6: sentinel-as-argument leaves cond( , 2, 3).
+        assert "orphan comma" in self.issues("cond( , 2, 3) > 1")
+
+    def test_unbalanced_parens(self):
+        # From #22 case 2: index(pos(${a})) > 2 -> ') > 2'.
+        assert "unbalanced parentheses" in self.issues(") > 2")
+
+    def test_dangling_bang(self):
+        # From #22 case 1: 'a == 1 & !' -- invalid Stata.
+        assert "dangling !" in self.issues("a == 1 & !")
+
+    def test_leaked_function(self):
+        assert any(i.startswith("leaked function: pulldata")
+                   for i in self.issues("pulldata('x', 'y', 'z', a) == 1"))
+
+    def test_quoted_content_ignored(self):
+        # Parens, commas, quotes inside a double-quoted Stata literal are fine.
+        assert self.issues('regexm(a, "(x,y) \'q\'") & b == 1') == []
+
+    def test_clean_conditions_pass(self):
+        assert self.issues("x > 5 & !missing(x)") == []
+        assert self.issues("cond(missing(a), b, a) == 2") == []
+        assert self.issues("!(a == 1) | inlist(b, 1, 2)") == []
+
+
+class TestLiteralMasking:
+    """#27 Class B -- late-stage operator rewrites must not reach inside the
+    string literals the converter itself emits at step 8."""
+
+    def test_regex_needle_equals_not_doubled(self):
+        # Step 14 (= -> ==) must not touch the '=' inside the emitted needle.
+        result = convert("regex(${id}, '^ab=')", {})
+        assert result == 'regexm(id, "^ab=")'
+
+    def test_contains_needle_and_not_ampersanded(self):
+        # Step 15 (and -> &) must not touch ' and ' inside the needle.
+        result = convert("contains(${occ}, ' and ')", {})
+        assert result == 'strpos(occ, " and ") > 0'
+
+    def test_contains_needle_or_preserved(self):
+        result = convert("contains(${v}, 'x or y')", {})
+        assert result == 'strpos(v, "x or y") > 0'
+
+    def test_regex_needle_no_spurious_missing_guard(self):
+        # A '>' inside the needle must not trigger _add_missing_guards.
+        result = convert("regex(${v}, 'x > 5')", {})
+        assert result == 'regexm(v, "x > 5")'
+        assert "missing" not in result
+
+    def test_needle_multispace_survives_whitespace_collapse(self):
+        # Step 18 collapses whitespace; a masked needle keeps its two spaces.
+        result = convert("regex(${v}, 'a  b')", {})
+        assert result == 'regexm(v, "a  b")'
+
+    def test_needle_div_mod_words_untouched(self):
+        # Steps 14b/14c must not rewrite 'div'/'mod' inside a needle.
+        result = convert("contains(${v}, 'a div b mod c')", {})
+        assert result == 'strpos(v, "a div b mod c") > 0'
+
+
+class TestQuoteAwareStripsAndCleanup:
+    """C7 -- #22 (all) + #27.1,2,4,5,6,8,9. Each asserts the output is also
+    structurally clean, so a fix can't trade one corruption for another."""
+
+    def _clean(self, result):
+        if result is not None:
+            assert LogicConverter.structural_issues(result) == [], result
+
+    def test_string_code_double_quoted_not_bare(self):  # #27.1
+        result = convert("${region} = 'north'", {})
+        assert result == 'region == "north"'
+        self._clean(result)
+
+    def test_numeric_code_stays_unquoted(self):  # #27.1 regression guard
+        assert convert("${x} != '-55'", {}) == "x != -55"
+
+    def test_quoted_arg_not_eaten_by_step3b(self):  # #27.2
+        # 'x=' inside contains() must not be matched as a comparison.
+        result = convert("contains(${a}, 'x=') or contains(${b}, 'y=')", {})
+        assert result == 'strpos(a, "x=") > 0 | strpos(b, "y=") > 0'
+        self._clean(result)
+
+    def test_contains_needle_with_close_paren(self):  # #22.3
+        result = convert("contains(${a}, ')')", {})
+        assert result == 'strpos(a, ")") > 0'
+        self._clean(result)
+
+    def test_regex_needle_with_close_paren(self):  # #22.3
+        result = convert("regex(${a}, '[0-9])')", {})
+        assert result == 'regexm(a, "[0-9])")'
+        self._clean(result)
+
+    def test_index_with_nested_call_no_orphan(self):  # #22.2
+        result = convert("index(pos(${a})) > 2", {})
+        assert result is None
+        self._clean(result)
+
+    def test_position_nested_arg_stripped(self):  # #22.2
+        result = convert("position(${a}, foo(${b})) > 2", {})
+        assert result is None
+        self._clean(result)
+
+    def test_dangling_bang_index_cleaned(self):  # #22.1
+        result = convert("!index(${a})", {})
+        assert result is None
+        self._clean(result)
+
+    def test_bang_index_in_conjunction(self):  # #22.1
+        result = convert("${a} = 1 and !index(${b})", {})
+        assert result == "a == 1"
+        self._clean(result)
+
+    def test_sentinel_arithmetic_adjacency(self):  # #27.6
+        result = convert("${a} + duration() > 5", {})
+        assert result is None
+        self._clean(result)
+
+    def test_sentinel_as_cond_argument(self):  # #27.6
+        result = convert("if(pulldata('f','k','q') = 1, 2, 3) > 1", {})
+        assert result is None
+        self._clean(result)
+
+    def test_coalesce_with_nested_call(self):  # #27.4
+        # coalesce(if(...), d) -- nested call kept intact, expands correctly.
+        result = convert("coalesce(if(${a}, ${b}, ${c}), ${d})", {})
+        assert result == "cond(missing(cond(a, b, c)), d, cond(a, b, c))"
+        self._clean(result)
+
+    def test_not_with_sentinel_body_stripped_whole(self):  # #27.5
+        # not(selected(...) and pulldata(...)) -- selected translates to (x==1),
+        # the pulldata strips; the whole not() must be stripped, not flipped.
+        result = convert(
+            "not(selected(${x}, '1') and pulldata('f','k','q'))",
+            {"x": "select_one"},
+        )
+        assert result is None
+        self._clean(result)
+
+    def test_mod_precedence_left_adjacent_star(self):  # #27.8
+        # 2 * x mod 3 must NOT become 2 * mod(x, 3) (wrong precedence).
+        result = convert("2 * ${x} mod 3", {})
+        assert "mod(" not in result
+
+    def test_indexed_repeat_negative_index_stripped(self):  # #27.9
+        result = convert("indexed-repeat(${a}, ${g}, -1)", {})
+        assert result is None
+        self._clean(result)
+
+    def test_indexed_repeat_positive_index_ok(self):  # #27.9 guard
+        assert convert("indexed-repeat(${a}, ${g}, 2)", {}) == "a_2"
+
+
+class TestStartsEndsWith:
+    """Review HIGH #4 -- starts-with() emitted a Stata-based substr(v, 1, N)
+    that Step 9 re-shifted to substr(v, 2, N-1), so the comparison could never
+    be true. It must finalize to a valid 1-based substr; ends-with is unchanged
+    (its `.` length makes Step 9 a no-op)."""
+
+    def test_starts_with_offsets_correct(self):
+        # first 2 chars == "07" -- was substr(phone, 2, 1) before the fix
+        assert convert("starts-with(${phone}, '07')", {}) == 'substr(phone, 1, 2) == "07"'
+
+    def test_starts_with_longer_needle(self):
+        assert convert("starts-with(${v}, 'abc')", {}) == 'substr(v, 1, 3) == "abc"'
+
+    def test_starts_with_in_compound(self):
+        assert convert("starts-with(${phone}, '07') and ${x} > 5", {}) == \
+            'substr(phone, 1, 2) == "07" & x > 5 & !missing(x)'
+
+    def test_ends_with_unchanged(self):
+        assert convert("ends-with(${v}, 'xy')", {}) == 'substr(v, -2, .) == "xy"'
+
+
+class TestConstraintCorruptionsFromSample:
+    """C7 -- three real corruptions the structural validator surfaced in the
+    sample's own constraint expressions (all `.`-form constraints)."""
+
+    constraint = staticmethod(LogicConverter.convert_constraint_to_stata)
+
+    def test_substr_compared_to_quoted_literal(self):
+        # substr(., 0, 1) = '0' : LHS is a function result, so step 3b's bare
+        # identifier pattern misses it; the single quote must still become a
+        # Stata double-quoted string, not survive as an invalid ' literal.
+        result = self.constraint(
+            ". = -888 or (substr(., 0, 1) = '0' and string-length(.) = 10)",
+            "resp_contact", {}, {})
+        assert result == ('resp_contact == -888 | (substr(resp_contact, 1, 1) '
+                          '== "0" & strlen(resp_contact) == 10)')
+        assert LogicConverter.structural_issues(result) == []
+
+    def test_index_dependent_constraint_dropped_cleanly(self):
+        # A per-iteration constraint gated on index() cannot be evaluated in
+        # the wide-export Stata world -> dropped whole, not left as cond(X, ).
+        result = self.constraint(
+            "if(index() = 1, . >= 18, if(index() = 2, . >= 3, . >= 0))",
+            "age", {}, {})
+        assert result is None
+
+    def test_cond_with_stripped_branch_no_orphan_comma(self):
+        # cond() whose sibling branch has parens and the other was stripped:
+        # the balanced sentinel-collapse must remove the whole call, not leave
+        # cond(a >= 18 & !missing(a), ).
+        result = convert("if(${a} >= 18, once(${b}), ${c})", {})
+        assert LogicConverter.structural_issues(result or "") == []

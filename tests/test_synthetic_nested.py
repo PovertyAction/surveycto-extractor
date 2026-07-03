@@ -65,6 +65,19 @@ def test_nested_two_level_column_contract(tmp_path):
     ]
 
 
+def test_repeat_count_zero_emits_no_member_columns(tmp_path):
+    """A repeat whose count is 0 produces 0 iterations, not a clamped-up 1
+    (#28.6). The count cell reads 0 and no member columns are emitted."""
+    form = [
+        {"type": "repeat_count", "variable_name": "rc",
+         "repeat_group_name": "rpt", "calculation": "0", "group_path": []},
+        {"type": "text", "variable_name": "m", "group_path": ["rpt"]},
+    ]
+    content, rows = _run(tmp_path, form, n_rows=1)
+    assert content == ["rc"]            # count only; no m_* columns
+    assert rows[0]["rc"] == "0"
+
+
 def test_three_level_nesting_grid(tmp_path):
     """2x2x2 leaf gets the full 8-cell grid; counts carry the ancestor suffix."""
     form = [

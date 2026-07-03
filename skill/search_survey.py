@@ -56,6 +56,7 @@ import json
 import math
 import re
 import sys
+import unicodedata
 from pathlib import Path
 
 # Guard against Windows cp1252 encoding errors on non-ASCII output
@@ -63,15 +64,22 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 # ---------------------------------------------------------------------------
-# Lightweight TF-IDF index (shared with mcp/survey_server.py)
+# Lightweight TF-IDF index (shared with mcp_server/survey_server.py)
 # ---------------------------------------------------------------------------
 
-_TOKEN_RE = re.compile(r"[a-z0-9]{2,}")
+# [^\W_] = any Unicode letter/digit but not underscore. ASCII-only [a-z0-9]
+# shredded accented Spanish/French question text so it never matched. (#29.4)
+_TOKEN_RE = re.compile(r"[^\W_]{2,}", re.UNICODE)
 
 
 def _tokenize(text: str) -> list[str]:
-    """Split text into lowercase alpha-numeric tokens (>= 2 chars)."""
-    return _TOKEN_RE.findall(text.lower())
+    """Split text into lowercase tokens (>= 2 chars), accent-insensitive.
+
+    NFKD-normalises and strips combining marks so accented and unaccented
+    forms match both ways, then casefolds; non-Latin scripts are preserved."""
+    norm = unicodedata.normalize("NFKD", text)
+    norm = "".join(c for c in norm if not unicodedata.combining(c))
+    return _TOKEN_RE.findall(norm.casefold())
 
 
 class _TfidfIndex:
@@ -1031,7 +1039,7 @@ def main():
     parser.add_argument("--context", metavar="N", type=int, default=0,
                         help="Show N adjacent questions on each side + resolve relevance gate (default: 0)")
     parser.add_argument("--survey", metavar="KEY", default=None,
-                        help="Filter to surveys whose key contains KEY (e.g. 'endline', 'ltfu', 'c2')")
+                        help="Filter to surveys whose key contains KEY (e.g. 'endline', 'household', 'baseline')")
     args = parser.parse_args()
 
     if args.var:

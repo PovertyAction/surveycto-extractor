@@ -58,7 +58,69 @@ except ImportError:
 
 # Pull DATASETS from this project's config.py (same directory as this script)
 sys.path.insert(0, str(Path(__file__).parent))
-from config import DATASETS
+# config.py is per-project and gitignored; import it gracefully so the module
+# can be imported (e.g. by tests, or on CI) without a config present. main()
+# fails with a clear message if DATASETS is empty when actually run.
+try:
+    import config
+    from config import DATASETS
+except ModuleNotFoundError:
+    config = None
+    DATASETS = {}
+try:
+    from core import sentinels as _sentinels
+except ModuleNotFoundError:
+    # core/sentinels.py is part of the core toolkit, but a partial copy of the
+    # extractor into another project can omit it (this is exactly what broke a
+    # downstream project). Rather than hard-crash on import, prepopulate the
+    # baked-in IPA default table -- "the codes we've been using" -- so the
+    # pipeline still runs. Documented in the README; override wholesale by
+    # defining SENTINEL_MEANINGS / SENTINEL_SCAN_ONLY in config.py. When
+    # sentinels.py IS present (the normal case) it stays the single source of
+    # truth; this shim only fills in for a missing module.
+    import types as _types
+    _DEFAULT_MEANINGS = {
+        -99: ("Don't know", ".d"), -88: ("Refused to answer", ".r"),
+        -77: ("Not applicable", ".n"), -66: ("Other (specify)", ".o"),
+        -55: ("Not in list", ".m"),
+    }
+    _DEFAULT_SCAN_ONLY = [-98]
+
+    def _fb_meanings(config=None):
+        ov = getattr(config, "SENTINEL_MEANINGS", None) if config is not None else None
+        return {int(k): tuple(v) for k, v in ov.items()} if ov else dict(_DEFAULT_MEANINGS)
+
+    def _fb_scan_only(config=None):
+        ov = getattr(config, "SENTINEL_SCAN_ONLY", None) if config is not None else None
+        return [int(c) for c in ov] if ov is not None else list(_DEFAULT_SCAN_ONLY)
+
+    def _fb_codes(meanings=None, scan_only=None):
+        m = meanings if meanings is not None else _DEFAULT_MEANINGS
+        s = scan_only if scan_only is not None else _DEFAULT_SCAN_ONLY
+        return sorted(set(m) | set(s))
+
+    def _fb_strings(meanings=None, scan_only=None):
+        return {str(c) for c in _fb_codes(meanings, scan_only)}
+
+    def _fb_meaning(code, meanings=None):
+        m = meanings if meanings is not None else _DEFAULT_MEANINGS
+        t = str(code).strip()
+        if not t.lstrip("-").isdigit():
+            return None
+        entry = m.get(int(t))
+        return entry[0] if entry else None
+
+    _sentinels = _types.SimpleNamespace(
+        resolve_sentinel_meanings=_fb_meanings,
+        resolve_scan_only=_fb_scan_only,
+        sentinel_scan_codes=_fb_codes,
+        sentinel_scan_strings=_fb_strings,
+        sentinel_meaning=_fb_meaning,
+    )
+    print("[WARN] core/sentinels.py not found -- using built-in IPA default sentinel "
+          "table (-99=.d, -88=.r, -77=.n, -66=.o, -55=.m; scan-only -98). "
+          "Override via config.SENTINEL_MEANINGS. See README.")
+from transformers.logic_converter import LogicConverter
 
 
 def _write_parquet_sidecar(df: pd.DataFrame, dta_path: Path) -> Optional[Path]:
@@ -210,7 +272,11 @@ def _scan_and_clean_extended_missings(
     t0 = time.perf_counter()
     result: Dict[str, Dict[str, int]] = {}
 
-    obj_cols = [c for c in df.columns if df[c].dtype == object]
+    # Object OR string dtype: under pandas 3 a text column can arrive as the
+    # new `str` dtype rather than `object`, and a `== object`-only filter would
+    # silently skip it (so the scan would never run on string columns).
+    obj_cols = [c for c in df.columns
+                if df[c].dtype == object or pd.api.types.is_string_dtype(df[c].dtype)]
     if not obj_cols:
         print(f"  Extended missing scan+clean: 0 object cols, skipped ({time.perf_counter() - t0:.1f}s)")
         return df, result
@@ -218,17 +284,33 @@ def _scan_and_clean_extended_missings(
     for col in obj_cols:
         # Vectorized check: isin is C-level, much faster than .apply(lambda)
         mask = df[col].isin(_EXT_MISSING_LETTERS)
-        n_ext = mask.sum()
-        if n_ext > 0:
-            # Count by letter
-            counts = df[col][mask].value_counts()
-            result[col] = {str(k): int(v) for k, v in counts.items()}
-            # Replace in-place and coerce back to numeric
-            df.loc[mask, col] = np.nan
-            try:
-                df[col] = pd.to_numeric(df[col])
-            except (ValueError, TypeError):
-                pass  # genuine string column — leave as object
+        if not mask.any():
+            continue
+        # Probe on a COPY first: only treat the single-letter values as
+        # extended-missing tags (NaN them, count them) if blanking them lets
+        # the column coerce to numeric. In a genuine STRING column, "n"/"y"/"d"
+        # are real answers -- the old code NaN'd them BEFORE the numeric probe,
+        # destroying real data in the parquet sidecar / _ord.dta and miscounting
+        # them as extended missings. (#26.6)
+        probed = df[col].mask(mask)
+        try:
+            coerced = pd.to_numeric(probed)
+        except (ValueError, TypeError):
+            continue  # genuine string column: leave values AND counts untouched
+        # Require at least one SURVIVING numeric value. If masking the single
+        # letters leaves an all-NaN column, the letters WERE the column's real
+        # content -- sex 'm'/'f', yes/no 'y'/'n', single-letter category codes,
+        # middle initials -- not numeric data with letter-coded missings. Since
+        # Stata extended missings span the whole alphabet (.a-.z), _EXT_MISSING_
+        # LETTERS is a-z, so such a column masks to all-NaN; and pd.to_numeric
+        # coerces an all-NaN series without error. Without this guard the entire
+        # column is blanked into the parquet sidecar / _ord.dta and miscounted as
+        # extended-missing. (#26.6 -- the probe narrowed this but didn't close it.)
+        if not coerced.notna().any():
+            continue  # all-letter categorical/string column, not numeric+sentinels
+        counts = df[col][mask].value_counts()
+        result[col] = {str(k): int(v) for k, v in counts.items()}
+        df[col] = coerced
 
     elapsed = time.perf_counter() - t0
     n_vars = len(result)
@@ -273,11 +355,30 @@ def load_data(dataset_name: str):
         # Scan + clean extended missings in one fused pass (vectorized isin)
         df, ext_missing_counts = _scan_and_clean_extended_missings(df)
     else:
-        df = pd.read_stata(cfg['data'])
+        # convert_categoricals=False keeps value-labeled columns as their
+        # numeric codes, matching the pyreadstat path (which reads codes by
+        # default). The alternative -- reading Categoricals and .astype(object)
+        # -- would surface label STRINGS instead of codes and silently corrupt
+        # the sentinel scan, data_min/data_max, and the parquet stats.
+        df = pd.read_stata(cfg['data'], convert_categoricals=False)
         meta = None
         elapsed = time.perf_counter() - t0
         print(f"  Loaded {len(df)} obs x {len(df.columns)} vars "
               f"from .dta ({elapsed:.1f}s)")
+        print(
+            "  [WARN] pyreadstat not installed -- fell back to pd.read_stata. "
+            "Extended-missing counts (.d, .r, ...) will be 0 and stata_type "
+            "falls back to pandas dtypes. Install pyreadstat for full fidelity.",
+            file=sys.stderr,
+        )
+        cat_cols = [c for c in df.columns
+                    if isinstance(df[c].dtype, pd.CategoricalDtype)]
+        if cat_cols:
+            raise TypeError(
+                f"pd.read_stata fallback returned Categorical columns despite "
+                f"convert_categoricals=False: {cat_cols[:5]} -- the downstream "
+                f"scans cannot handle Categorical dtypes."
+            )
 
     # Write parquet sidecar for fast columnar access downstream
     pq_path = _write_parquet_sidecar(df, dta_path)
@@ -292,8 +393,13 @@ def load_data(dataset_name: str):
     return df, questions, cfg, meta, pq_path, ext_missing_counts, minmax
 
 
-SENTINEL_CODES_LIST = [-99, -88, -98, -77, -66, -55]
-SENTINEL_STRINGS_SET = {"-99", "-88", "-98", "-77", "-66", "-55"}
+# Resolved once from the shared sentinels module + this project's config.py
+# (config may override SENTINEL_MEANINGS / SENTINEL_SCAN_ONLY). Single source
+# of truth shared with load_survey_metadata.py -- see sentinels.py / #26.8.
+_SENTINEL_MEANINGS = _sentinels.resolve_sentinel_meanings(config)
+_SCAN_ONLY = _sentinels.resolve_scan_only(config)
+SENTINEL_CODES_LIST = _sentinels.sentinel_scan_codes(_SENTINEL_MEANINGS, _SCAN_ONLY)
+SENTINEL_STRINGS_SET = _sentinels.sentinel_scan_strings(_SENTINEL_MEANINGS, _SCAN_ONLY)
 
 
 def batch_sentinel_scan(
@@ -433,6 +539,10 @@ class QuestionIndex:
     lower:         Dict[str, List[Dict]]
     trunc32:       Dict[str, List[Dict]]
     lower_trunc32: Dict[str, List[Dict]] = field(default_factory=dict)
+    # Names of repeat groups (from each repeat_count question's
+    # repeat_group_name). Used to gate the suffix matcher so it only stamps
+    # repeat_iteration on a field that actually lives inside a repeat. (#26.2)
+    repeat_group_names: set = field(default_factory=set)
 
 
 def _build_question_index(questions: List[Dict]) -> QuestionIndex:
@@ -480,8 +590,29 @@ def _build_question_index(questions: List[Dict]) -> QuestionIndex:
                   f"variables: {names} - resolver will decline case-insensitive "
                   f"fallback for this name to avoid silent ambiguity")
 
+    repeat_group_names = _repeat_group_names(questions)
+
     return QuestionIndex(exact=exact, lower=lower, trunc32=trunc32,
-                         lower_trunc32=lower_trunc32)
+                         lower_trunc32=lower_trunc32,
+                         repeat_group_names=repeat_group_names)
+
+
+def _repeat_group_names(questions: List[Dict]) -> set:
+    """Names of every repeat group, taken from the repeat_count questions
+    (each declares the group it counts via repeat_group_name)."""
+    names = set()
+    for q in questions:
+        if q.get('type') == 'repeat_count':
+            rg = q.get('repeat_group_name')
+            if rg:
+                names.add(rg)
+    return names
+
+
+def _question_in_repeat(question: Dict, repeat_group_names: set) -> bool:
+    """True if any segment of the question's group_path is a repeat group."""
+    gp = question.get('group_path') or []
+    return any(seg in repeat_group_names for seg in gp)
 
 
 def _resolve_unambiguous(bucket_map: Dict[str, List[Dict]], key: str) -> Optional[Dict]:
@@ -587,9 +718,56 @@ def get_choice_label(question: Dict, choice_code: str) -> Optional[str]:
     return None
 
 
-def adjust_variable_refs(logic_str: str, repeat_group: str, iteration: int,
+class _SuffixFallbackMap(dict):
+    """A dict whose ``.get`` falls back from a suffixed wide-column name to its
+    base: ``get('x_2')`` returns ``self['x']`` when ``x_2`` is absent. Lets the
+    logic converter resolve iteration-suffixed refs (``selected(x_2, '1')``)
+    against the form's base question types/choice codes without copying the
+    whole map per variable."""
+    def get(self, key, default=None):
+        if key in self:
+            return self[key]
+        base = re.sub(r'(?:_\d+)+$', '', key) if key else key
+        if base != key and base in self:
+            return self[base]
+        return default
+
+
+_TYPE_CHOICE_CACHE: Dict[int, tuple] = {}
+
+
+def _base_type_choice_maps(questions: List[Dict]) -> tuple:
+    """(question_types, choice_codes) suffix-fallback maps, built once per
+    questions list (memoised on identity) so repeat-relevance conversion does
+    not rescan the whole form per variable."""
+    key = id(questions)
+    cached = _TYPE_CHOICE_CACHE.get(key)
+    if cached is None:
+        types = _SuffixFallbackMap()
+        codes = _SuffixFallbackMap()
+        for q in questions:
+            name = q.get('variable_name')
+            if not name:
+                continue
+            types[name] = q.get('type', '')
+            codes[name] = [str(c.get('value', '')) for c in (q.get('choices') or [])]
+        cached = (types, codes)
+        _TYPE_CHOICE_CACHE[key] = cached
+    return cached
+
+
+def adjust_variable_refs(logic_str: str, repeat_groups: set, iteration: int,
                          questions: List[Dict], _index: Optional[QuestionIndex] = None) -> str:
-    """Adjust variable references in skip logic for repeat iteration."""
+    """Suffix ``${var}`` references that live inside one of ``repeat_groups``
+    with the current iteration index, keeping the ``${...}`` wrapper so the
+    logic converter can still process the result.
+
+    A referenced var is suffixed iff a repeat group the CURRENT variable is
+    nested in also appears in the REFERENCED var's own group_path segments --
+    replacing the old substring test of the current var's full path against the
+    referenced var's path, which missed a repeat-scoped sibling on a shorter
+    path. (#26.7)
+    """
     if not logic_str:
         return logic_str
 
@@ -597,14 +775,22 @@ def adjust_variable_refs(logic_str: str, repeat_group: str, iteration: int,
     result = logic_str
     for var_ref in var_refs:
         question = find_question_for_variable(var_ref, questions, _index=_index)
-        if question:
-            var_group_path = '/'.join(question.get('group_path', []))
-            if repeat_group in var_group_path:
-                result = result.replace(f'${{{var_ref}}}', f'{var_ref}_{iteration}')
-            else:
-                result = result.replace(f'${{{var_ref}}}', var_ref)
-        else:
-            result = result.replace(f'${{{var_ref}}}', var_ref)
+        if not question:
+            continue
+        ref_segments = question.get('group_path', []) or []
+        if not any(rg in ref_segments for rg in repeat_groups):
+            continue  # not repeat-scoped -> leave ${var_ref} for the converter
+        # A select_multiple ref is NOT iteration-suffixed here: the converter
+        # turns selected(${sm}, C) into the choice indicator sm_C, and the
+        # canonical wide column for an SM-in-repeat is base_<choice>_<repeat>
+        # (choice-first, per the Phase-4 matcher + synthetic generator). Pre-
+        # suffixing the iteration would make the converter emit sm_<repeat>_C
+        # -- the exact transposition PR #21's blocker fixed. So we leave SM refs
+        # to the converter (their per-iteration column is not represented in
+        # this doc field; the XML-contract overlay is the deterministic path).
+        if question.get('type') == 'select_multiple':
+            continue
+        result = result.replace(f'${{{var_ref}}}', f'${{{var_ref}_{iteration}}}')
     return result
 
 
@@ -624,36 +810,44 @@ def adjust_skip_logic_for_repeats(metadata: Dict, var_name: str, questions: List
     iteration = metadata['repeat_iteration']
     group_path = metadata['group_path']
 
+    # The repeat groups the CURRENT variable is nested in (its group_path
+    # segments that are repeat groups). A referenced var is iteration-suffixed
+    # only if it shares one of these. (#26.7)
+    rgs = _index.repeat_group_names if _index is not None else _repeat_group_names(questions)
+    gp_segments = [p for p in group_path.split('/') if p] if group_path else []
+    repeat_groups = {rg for rg in rgs if rg in gp_segments}
+
     metadata['skip_logic_template'] = metadata['stata_skip_logic']
     metadata['group_relevances_template'] = metadata['group_relevances']
 
     if metadata['stata_skip_logic']:
         adjusted_logic = adjust_variable_refs(
-            metadata['stata_skip_logic'], group_path, iteration, questions, _index=_index
+            metadata['stata_skip_logic'], repeat_groups, iteration, questions, _index=_index
         )
         adjusted_logic = replace_index_function(adjusted_logic, iteration)
         metadata['skip_logic_iteration_specific'] = adjusted_logic
 
     if metadata['group_relevances']:
+        # group_relevances are RAW SurveyCTO. Suffix repeat-scoped refs (keeping
+        # ${...}), substitute index(), then run the real converter -- NOT a
+        # naive .replace('=','=='), which corrupted >=/<=/!= into >==/<==/!==
+        # and doubled existing == into ====. (#26.5)
+        types, codes = _base_type_choice_maps(questions)
         adjusted_relevances = []
         for relevance in metadata['group_relevances']:
-            adjusted = adjust_variable_refs(relevance, group_path, iteration, questions, _index=_index)
+            adjusted = adjust_variable_refs(relevance, repeat_groups, iteration, questions, _index=_index)
             adjusted = replace_index_function(adjusted, iteration)
-            adjusted = adjusted.replace('${', '').replace('}', '').replace('=', '==')
-            adjusted_relevances.append(adjusted)
+            converted = LogicConverter.convert_to_stata(adjusted, types, codes, var_name)
+            adjusted_relevances.append(converted)
         metadata['group_relevances_iteration_specific'] = adjusted_relevances
 
     return metadata
 
 
 def get_special_code_meaning(choice_code: str) -> Optional[str]:
-    """Get meaning for special missing value codes."""
-    special_codes = {
-        '-99': 'Refused to answer',
-        '-98': "Don't know",
-        '-97': 'Other (specify)'
-    }
-    return special_codes.get(str(choice_code))
+    """Human label for a special missing/sentinel code, from the resolved
+    (config-overridable) meanings table. Returns None for a non-sentinel code."""
+    return _sentinels.sentinel_meaning(choice_code, _SENTINEL_MEANINGS)
 
 
 def determine_variable_source(var_name: str, questions: List[Dict],
@@ -741,20 +935,49 @@ def determine_variable_source(var_name: str, questions: List[Dict],
     result['references'] = refs if refs else None
 
     base_name = question['variable_name']
+    rgs = _index.repeat_group_names if _index is not None else _repeat_group_names(questions)
+    in_repeat = _question_in_repeat(question, rgs)
+    q_is_sm = question.get('type') == 'select_multiple'
+    choice_values = [str(c.get('value', '')) for c in (question.get('choices') or [])]
+
+    def _mark_select_multiple(code: str) -> None:
+        result['is_select_multiple'] = True
+        result['choice_code'] = code
+        result['choice_label'] = get_choice_label(question, code)
+        result['special_code_meaning'] = get_special_code_meaning(code)
+        result['choice_index'] = (choice_values.index(code)
+                                  if code in choice_values else None)
+
     if var_name != base_name:
+        # 1. Double suffix `base_<a>_<b>`: only a genuine select_multiple-in-
+        #    repeat indicator (type is SM, <a> is a real choice code, and the
+        #    field lives in a repeat). Otherwise it's a plain field with two
+        #    repeat indices -- mark repeat only, never fabricate a choice code
+        #    on a non-SM field. (#26.1)
         double_match = re.match(rf'{re.escape(base_name)}_(\d+)_(\d+)$', var_name)
+        # 2. Negative-code SM indicator `base__<n>` (dash->underscore), optionally
+        #    followed by repeat indices. The (\d+) suffix regexes below can't
+        #    cross the `__`, so this class was silently demoted to a plain
+        #    field before. (#26.3 -- same class as #23)
+        neg_match = re.match(rf'{re.escape(base_name)}__(\d+)((?:_\d+)*)$', var_name)
+
         if double_match:
-            choice_num = double_match.group(1)
-            repeat_num = double_match.group(2)
-            result['is_repeat'] = True
-            result['repeat_iteration'] = int(repeat_num)
-            result['is_select_multiple'] = True
-            result['choice_code'] = choice_num
-            result['choice_label'] = get_choice_label(question, choice_num)
-            result['special_code_meaning'] = get_special_code_meaning(choice_num)
-            # choice_index: position of this choice in the choice list (0-based)
-            choice_values = [str(c.get('value', '')) for c in (question.get('choices') or [])]
-            result['choice_index'] = choice_values.index(choice_num) if choice_num in choice_values else None
+            choice_num, repeat_num = double_match.group(1), double_match.group(2)
+            if q_is_sm and choice_num in choice_values and in_repeat:
+                result['is_repeat'] = True
+                result['repeat_iteration'] = int(repeat_num)
+                _mark_select_multiple(choice_num)
+            elif in_repeat:
+                # Plain field with two repeat indices; iteration = last suffix.
+                result['is_repeat'] = True
+                result['repeat_iteration'] = int(repeat_num)
+            # else: base mapping stands, no fabricated flags.
+        elif neg_match and q_is_sm and f"-{neg_match.group(1)}" in choice_values:
+            _mark_select_multiple(f"-{neg_match.group(1)}")
+            trailing = neg_match.group(2)
+            if trailing and in_repeat:
+                result['is_repeat'] = True
+                result['repeat_iteration'] = int(trailing.strip('_').split('_')[-1])
         else:
             match = re.match(rf'{re.escape(base_name)}_(\d+)$', var_name)
             # Fallback: digit appended directly without underscore (e.g. base "f_hr_fn_r" → "f_hr_fn_r1")
@@ -762,18 +985,13 @@ def determine_variable_source(var_name: str, questions: List[Dict],
             active_match = match or match_direct
             if active_match:
                 suffix_num = active_match.group(1)
-                if question['type'] == 'select_multiple':
-                    choice_values = [str(c.get('value', '')) for c in (question.get('choices') or [])]
-                    if str(suffix_num) in choice_values:
-                        result['is_select_multiple'] = True
-                        result['choice_code'] = suffix_num
-                        result['choice_label'] = get_choice_label(question, suffix_num)
-                        result['special_code_meaning'] = get_special_code_meaning(suffix_num)
-                        result['choice_index'] = choice_values.index(suffix_num) if suffix_num in choice_values else None
-                    else:
-                        result['is_repeat'] = True
-                        result['repeat_iteration'] = int(suffix_num)
-                else:
+                if q_is_sm and str(suffix_num) in choice_values:
+                    _mark_select_multiple(suffix_num)
+                elif in_repeat:
+                    # Only stamp repeat_iteration on a field that actually lives
+                    # in a repeat -- otherwise a post-processing column like
+                    # `income2` off top-level `income` got a fabricated
+                    # iteration and a bogus per-iteration skip-logic rewrite. (#26.2)
                     result['is_repeat'] = True
                     result['repeat_iteration'] = int(suffix_num)
 
@@ -1057,9 +1275,6 @@ def export_dictionary(var_dict: pd.DataFrame, df: pd.DataFrame, cfg: Dict, datas
         for qtype, count in var_dict['question_type'].value_counts().items():
             print(f"    {qtype}: {count}")
 
-    # Save form-ordered dataset
-    save_ord_dta(var_dict, df, cfg, meta, parquet_path=parquet_path)
-
     print(f"\nExporting to JSON: {cfg['output_json']}")
     Path(cfg['output_json']).parent.mkdir(parents=True, exist_ok=True)
 
@@ -1195,6 +1410,19 @@ def export_dictionary(var_dict: pd.DataFrame, df: pd.DataFrame, cfg: Dict, datas
     with open(cfg['output_json'], 'w', encoding='utf-8') as f:
         json.dump(output_structure, f, indent=2, ensure_ascii=False)
 
+    # Save the form-ordered .dta LAST, after the primary dictionary JSON is
+    # safely written, and never let its failure abort the run. pyreadstat's
+    # write_dta chokes on some column dtypes (e.g. date objects -> issue #35),
+    # and previously this ran BEFORE the JSON write, so a _ord.dta failure
+    # destroyed the primary output. Now the dictionary is already on disk and
+    # an _ord.dta failure is a warning, not a crash.
+    try:
+        save_ord_dta(var_dict, df, cfg, meta, parquet_path=parquet_path)
+    except Exception as exc:  # noqa: BLE001 -- _ord.dta is a secondary artifact
+        print(f"[WARN] _ord.dta generation failed for {dataset_name}: {exc}\n"
+              f"       Primary dictionary JSON was written; continuing. "
+              f"Set 'skip_ord_dta': True in config to silence this.")
+
 
 def validate_select_multiple(dict_path, dataset_name: str):
     """Validate select_multiple variable mappings."""
@@ -1212,33 +1440,41 @@ def validate_select_multiple(dict_path, dataset_name: str):
         questions = json.load(f)
 
     questions_dict = {q['variable_name']: q for q in questions}
-    sm_vars = {
-        var_name: var_info
-        for var_name, var_info in variables.items()
-        if (var_info.get('survey', {}).get('type') == 'select_multiple' and
-            isinstance(var_info.get('survey', {}).get('choices'), dict))
-    }
 
-    print(f"\nFound {len(sm_vars)} select_multiple variables")
-    if len(sm_vars) == 0:
-        print("No select_multiple variables to validate.")
-        return True
+    # Scan EVERY variable, not just those already shaped like an SM indicator.
+    # The old pre-filter (type==SM AND choices-is-dict) made the two failure
+    # classes below structurally invisible -- it validated only entries that
+    # already looked correct. (#26.4)
+    _NEG_INDICATOR_RE = re.compile(r".*__\d+(?:_\d+)*$")
+    candidates = []          # (var_name, survey_info) claiming to be SM indicators
+    for var_name, var_info in variables.items():
+        survey_info = var_info.get('survey', {})
+        if isinstance(survey_info.get('choices'), dict):
+            candidates.append((var_name, survey_info))
+
+    print(f"\nFound {len(candidates)} select_multiple indicator column(s)")
 
     mismatches = []
     valid_count = 0
 
-    for var_name, var_info in sm_vars.items():
-        survey_info = var_info['survey']
+    for var_name, survey_info in candidates:
         choice_dict = survey_info.get('choices')
         original_var_name = survey_info.get('original_variable_name')
-
-        if not choice_dict or not isinstance(choice_dict, dict):
-            mismatches.append({'variable': var_name, 'issue': 'No choice dict found', 'original_variable': original_var_name})
-            continue
-
         original_question = questions_dict.get(original_var_name)
+
         if not original_question:
             mismatches.append({'variable': var_name, 'issue': 'Original question not found', 'original_variable': original_var_name})
+            continue
+
+        # (b) Fabricated select_multiple: an indicator-shaped entry whose
+        # original question is NOT actually a select_multiple.
+        if original_question.get('type') != 'select_multiple':
+            mismatches.append({
+                'variable': var_name,
+                'issue': f"fabricated select_multiple (original '{original_var_name}' is "
+                         f"'{original_question.get('type')}', not select_multiple)",
+                'original_variable': original_var_name,
+            })
             continue
 
         original_choices = original_question.get('choices', [])
@@ -1255,6 +1491,28 @@ def validate_select_multiple(dict_path, dataset_name: str):
             })
         else:
             valid_count += 1
+
+    # (c) Demoted negative-code columns: a `base__<n>[...]` column that resolved
+    # to a plain field (no indicator dict) even though its original question is
+    # a select_multiple -- the negative code was silently dropped.
+    for var_name, var_info in variables.items():
+        survey_info = var_info.get('survey', {})
+        if isinstance(survey_info.get('choices'), dict):
+            continue  # already handled as an indicator above
+        if not _NEG_INDICATOR_RE.match(var_name):
+            continue
+        original_var_name = survey_info.get('original_variable_name')
+        original_question = questions_dict.get(original_var_name)
+        if original_question and original_question.get('type') == 'select_multiple':
+            mismatches.append({
+                'variable': var_name,
+                'issue': "negative-code select_multiple column demoted to plain field",
+                'original_variable': original_var_name,
+            })
+
+    if not candidates and not mismatches:
+        print("No select_multiple variables to validate.")
+        return True
 
     print(f"\nValidation Results:")
     print(f"  Valid mappings: {valid_count}")
@@ -1565,8 +1823,12 @@ def main():
     )
     parser.add_argument(
         '--survey', metavar='KEY',
-        help='Process only the named survey (key from config.DATASETS). Default: all.'
+        help='Process only the named survey (key from config.DATASETS).'
     )
+    parser.add_argument('--all', action='store_true',
+                        help='Process every dataset in config.DATASETS. Must be '
+                             'explicit -- a bare invocation refuses to run so it '
+                             'never silently processes large/private datasets.')
     parser.add_argument('--validate', action='store_true',
                         help='Run validation after creation')
     parser.add_argument('--validate-only', action='store_true',
@@ -1592,9 +1854,17 @@ def main():
             sys.exit(1)
         datasets_to_process = [args.survey]
         validate = args.validate
-    else:
+    elif args.all:
         datasets_to_process = list(DATASETS.keys())
         validate = args.validate
+    else:
+        # No target given. Previously this silently processed EVERY dataset in
+        # config.DATASETS, which could pull in a large or private local test
+        # dataset by accident. Require an explicit --survey KEY or --all.
+        print("ERROR: no survey selected. Pass --survey KEY to process one "
+              "dataset, or --all to process every dataset in config.DATASETS.\n"
+              f"  Available keys: {', '.join(DATASETS.keys())}")
+        sys.exit(1)
 
     print("=" * 70)
     print("Create Variable Dictionaries")

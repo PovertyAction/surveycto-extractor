@@ -45,7 +45,7 @@ from pathlib import Path
 
 # Local module (same directory). Pure stdlib parser, no third-party XML dep.
 sys.path.insert(0, str(Path(__file__).parent))
-from xml_contract import parse_contract  # noqa: E402
+from parsers.xml_contract import parse_contract  # noqa: E402
 
 _CSV_CACHE: dict[str, list] = {}
 
@@ -206,6 +206,9 @@ def enrich_contract(
             "data_source": node.data_source,
             "calculate": node.calculate,
         }
+        if m.get("ragged"):
+            # Column carried fewer repeat indices than the node's depth (#23.2).
+            entry["contract"]["ragged"] = True
         if node.preload:
             entry["contract"]["preload"] = {
                 "type": node.preload,

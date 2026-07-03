@@ -222,14 +222,18 @@ synth versus how the same logic evaluates after the SurveyCTO data is imported
 into Stata.
 
 - **In the evaluator** (`transformers/expression_evaluator.py`), a blank /
-  unanswered field **coerces to `0` in numeric context** (arithmetic and
-  comparison) — see `_to_number`, which maps `""` to `0.0`. So with a blank
-  `age`, `${age} < 18` is **True** (`0 < 18`) and `${age} > 18` is **False**.
-  Only an *explicit* `float('nan')` operand — e.g. `decimal-date-time()` of an
-  unparseable value — forces a comparison to **False** on both sides. (Note this
-  already diverges from real SurveyCTO, where an empty numeric field makes the
-  comparison false; the synth's 0-coercion is a generator convenience, not a
-  faithful model of form-engine missing semantics.)
+  unanswered numeric field is **NaN** in numeric context — `_to_number` maps
+  `""` to `float('nan')`, matching XPath `number('')`. A comparison with NaN is
+  **False in both directions** (with a blank `age`, both `${age} < 18` and
+  `${age} > 18` are False), NaN arithmetic yields NaN, and a NaN result
+  serialises to a **blank cell** (`_to_string`). This faithfully models
+  SurveyCTO, where a skipped field neither satisfies a gate nor contributes a
+  `0` to a sum. (Earlier versions coerced blank to `0`, which leaked through
+  `< N` comparisons and `+` arithmetic — see issue #28.)
+- **The one remaining, deliberate divergence** is division by zero: the
+  evaluator returns NaN where XPath 1.0 returns ±Infinity (so `1 div 0 > 5` is
+  False here, True in XPath). NaN is the safer downstream default; this is the
+  only intentional numeric divergence left.
 - **In Stata**, an unanswered numeric field is system missing `.`, which Stata
   treats as **positive infinity**: `. > 18` is **True**, `. < 18` is False. This
   is the exact trap documented in

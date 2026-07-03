@@ -33,19 +33,10 @@ import re
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-# NOTE: these two regexes are string-literal-blind (they stop at the first `)`
-# and split on commas without tracking quotes), so they reliably parse only
-# literal / simple arguments. A quoted value containing `)` or a nested function
-# call (e.g. pulldata('ds', concat('a', f(x)), 'k', n)) can mis-split or be
-# dropped. This is the same class the logic_converter walker handles; here it is
-# an accepted limitation because pulldata/search args are literals in practice.
-# A node value at the group level (e.g. ".specify"-style composite groups) is
-# still a stored column, so we key the model by the leaf token name and keep the
-# full path for disambiguation.
-_PULLDATA_RE = re.compile(
-    r"pulldata\(\s*'([^']+)'\s*,\s*(concat\([^)]*\)|'[^']*'|[^,]+?)\s*,\s*'([^']+)'",
-    re.IGNORECASE,
-)
+# pulldata()/search() args are parsed by the balanced, quote-aware
+# _split_call_args walker below (a node value at the group level is still a
+# stored column, so we key the model by the leaf token name and keep the full
+# path for disambiguation).
 _SELECT_CONTROL = {"select": "select_multiple", "select1": "select_one"}
 
 # Wide columns that are SurveyCTO transport/metadata, not form nodes.
@@ -96,16 +87,65 @@ class Node:
 
 
 # search('dataset','mode','col','val'[,'col2','val2'...]) on a select's appearance.
-_SEARCH_RE = re.compile(r"search\(\s*'([^']+)'(.*?)\)", re.IGNORECASE | re.DOTALL)
+
+
+def _split_call_args(s: str | None, func_name: str) -> list[str] | None:
+    """Top-level argument strings of the first ``func_name(...)`` call in ``s``,
+    respecting nested parens and quoted literals. XPath has no backslash escape,
+    so a literal closes on the next matching quote. Returns None if no balanced
+    call is present. Replaces the old bounded regexes, which mis-split a nested
+    call or a quoted `)` in an argument. (#23.4)"""
+    if not s:
+        return None
+    rx = re.compile(rf"(?<![\w-]){re.escape(func_name)}\s*\(", re.IGNORECASE)
+    m = rx.search(s)
+    if not m:
+        return None
+    i, n = m.end(), len(s)
+    depth = 1
+    in_str: str | None = None
+    args: list[str] = []
+    cur: list[str] = []
+    while i < n:
+        ch = s[i]
+        if in_str:
+            cur.append(ch)
+            if ch == in_str:
+                in_str = None
+        elif ch in ("'", '"'):
+            in_str = ch
+            cur.append(ch)
+        elif ch == "(":
+            depth += 1
+            cur.append(ch)
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                args.append("".join(cur))
+                return [a.strip() for a in args]
+            cur.append(ch)
+        elif ch == "," and depth == 1:
+            args.append("".join(cur))
+            cur = []
+        else:
+            cur.append(ch)
+        i += 1
+    return None  # unbalanced
+
+
+def _unquote(s: str) -> str:
+    s = s.strip()
+    if len(s) >= 2 and s[0] in ("'", '"') and s[-1] == s[0]:
+        return s[1:-1]
+    return s
 
 
 def _parse_pulldata(calc: str | None) -> dict | None:
-    if not calc:
+    args = _split_call_args(calc, "pulldata")
+    if not args or len(args) < 3:
         return None
-    m = _PULLDATA_RE.search(calc)
-    if not m:
-        return None
-    return {"dataset": m.group(1), "value": m.group(2).strip(), "key": m.group(3)}
+    return {"dataset": _unquote(args[0]), "value": args[1].strip(),
+            "key": _unquote(args[2])}
 
 
 def _parse_search(appearance: str | None) -> dict | None:
@@ -113,23 +153,27 @@ def _parse_search(appearance: str | None) -> dict | None:
 
     `search('choices','matches','list_name','treatTarget')` ->
       {kind:"search", dataset:"choices", filter:{"list_name":"treatTarget"}} (+mode).
-    A trailing column whose value is a node-ref (not a quoted literal) maps to None
-    (dynamic filter); the literal pairs are enough to resolve options from the CSV.
+    A column whose value is a node-ref (not a quoted literal) maps to None
+    (dynamic filter); the literal pairs resolve options from the CSV.
     """
     if not appearance or "search(" not in appearance:
         return None
-    m = _SEARCH_RE.search(appearance)
-    if not m:
+    args = _split_call_args(appearance, "search")
+    if not args:
         return None
-    dataset = m.group(1)
-    quoted = re.findall(r"'([^']*)'", m.group(2))
-    mode = quoted[0] if quoted else None
-    pairs = quoted[1:]
+    dataset = _unquote(args[0])
+    rest = args[1:]
+    mode = _unquote(rest[0]) if rest else None
+    pairs = rest[1:]
     filt: dict[str, str | None] = {}
     for i in range(0, len(pairs) - 1, 2):
-        filt[pairs[i]] = pairs[i + 1]
+        col = _unquote(pairs[i])
+        val_raw = pairs[i + 1].strip()
+        # a quoted literal is a static filter value; an unquoted node-ref is
+        # dynamic -> None
+        filt[col] = _unquote(val_raw) if val_raw[:1] in ("'", '"') else None
     if len(pairs) % 2 == 1:  # trailing col with a dynamic (node-ref) value
-        filt[pairs[-1]] = None
+        filt[_unquote(pairs[-1])] = None
     return {"kind": "search", "dataset": dataset, "mode": mode, "filter": filt}
 
 
@@ -182,17 +226,36 @@ class FormContract:
             return {"kind": "system"}
 
         # Peel trailing _<int> groups right-to-left, then reverse to outer->inner.
+        # Track the raw digit strings in parallel so a leading-zero choice code
+        # (`field_01`) can be preserved as a string instead of collapsing to 1.
         idxs: list[int] = []
+        raws: list[str] = []
         base = col
         while True:
             m = re.search(r"_(\d+)$", base)
             if not m:
                 break
+            raws.append(m.group(1))
             idxs.append(int(m.group(1)))
             base = base[: m.start()]
         idxs.reverse()
+        raws.reverse()
 
         candidates = self._by_name.get(base) or self._by_name.get(col)
+
+        # Negative select_multiple choice code: SurveyCTO writes `-66` as a
+        # dash->underscore `field__66`, so the positive peel above leaves a base
+        # ending in `_` (e.g. `field_`) with the code as idxs[0]. Re-interpret
+        # against the real base with a negated leading code. (#23.1)
+        neg_choice = False
+        if not candidates and base.endswith("_") and idxs:
+            real_base = base[:-1]
+            real_cands = self._by_name.get(real_base)
+            if real_cands and any(self.nodes[p].is_select_multiple for p in real_cands):
+                candidates = real_cands
+                base = real_base
+                neg_choice = True
+
         if not candidates:
             # String-keyed runtime columns: `<node>_<studyID>` or a trailing `_`
             # (per-study dynamic calculates). Only attempted after exact + numeric
@@ -223,30 +286,38 @@ class FormContract:
         # suffix}`). A plain repeat field carries only the iteration chain.
         # Prefer the candidate whose repeat depth (+1 for a select_multiple choice
         # binary) consumes exactly the indices we peeled.
+        def _choice_value(i: int) -> int | str:
+            """Choice code at position i: preserve a leading-zero raw string
+            (`01`), else int; negate for the dash->underscore negative form."""
+            raw = raws[i] if i < len(raws) else str(idxs[i])
+            if len(raw) > 1 and raw[0] == "0":
+                return ("-" + raw) if neg_choice else raw
+            return (-idxs[i]) if neg_choice else idxs[i]
+
         chosen = None
         choice = None
         rep_idxs = idxs  # iteration indices left after a leading choice is removed
         for path in candidates:
             node = self.nodes[path]
             depth = node.repeat_depth
-            if len(idxs) == depth:
+            if len(idxs) == depth and not neg_choice:
                 chosen, choice, rep_idxs = node, None, idxs
                 break
             if node.is_select_multiple and len(idxs) == depth + 1:
-                chosen, choice, rep_idxs = node, idxs[0], idxs[1:]
+                chosen, choice, rep_idxs = node, _choice_value(0), idxs[1:]
                 break
         if chosen is None:
             # Fall back to the first candidate; treat a leading surplus index as the
             # choice code if it is select_multiple, else leave iterations partial.
             chosen = self.nodes[candidates[0]]
             if chosen.is_select_multiple and len(idxs) == chosen.repeat_depth + 1:
-                choice, rep_idxs = idxs[0], idxs[1:]
+                choice, rep_idxs = _choice_value(0), idxs[1:]
             else:
-                choice, rep_idxs = None, idxs
+                choice, rep_idxs = (_choice_value(0) if neg_choice else None), idxs
 
         n_iter = chosen.repeat_depth
         iters = list(zip(chosen.repeat_path, rep_idxs[:n_iter]))
-        return {
+        result = {
             "kind": "matched",
             "node_path": chosen.path,
             "name": chosen.name,
@@ -255,6 +326,12 @@ class FormContract:
             "is_select_multiple": chosen.is_select_multiple,
             "ambiguous": len(candidates) > 1,
         }
+        # Ragged: fewer repeat indices than the node's repeat depth. SurveyCTO
+        # normally emits all levels, so flag it instead of silently truncating
+        # the level assignment. (#23.2)
+        if len(rep_idxs) < n_iter:
+            result["ragged"] = True
+        return result
 
     def to_dict(self) -> dict:
         return {

@@ -45,7 +45,7 @@ import math
 import random
 import re
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace as _dc_replace
 from itertools import product
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, Optional, Set, Tuple
@@ -332,7 +332,12 @@ def _extract_search_call(appearance: str) -> Optional[Tuple[str, str]]:
     while i < n and depth > 0:
         ch = appearance[i]
         if in_str:
-            if ch == in_str and appearance[i - 1] != "\\":
+            # XPath has no backslash string-escape (a `\` is a literal char, as
+            # in a path or regex), so a literal closes on the next matching
+            # quote -- full stop. The old `\\`-escape check kept a literal that
+            # ended in `\` open and mis-parsed the arg list. Matches
+            # logic_converter._find_balanced. (#28 nits)
+            if ch == in_str:
                 in_str = None
         elif ch in ("'", '"'):
             in_str = ch
@@ -368,7 +373,8 @@ def _split_top_level(s: str, sep: str) -> List[str]:
         ch = s[i]
         if in_str:
             buf.append(ch)
-            if ch == in_str and (i == 0 or s[i - 1] != "\\"):
+            # XPath has no backslash escape -- close on the next matching quote.
+            if ch == in_str:
                 in_str = None
         elif ch in ("'", '"'):
             buf.append(ch)
@@ -683,8 +689,14 @@ def _resolve_repeat_count(
     1..5 fallback)."""
     if calc:
         s = calc.strip()
+        # An explicit or computed count of 0 is a real answer -- the group has
+        # zero instances -- and must be respected, not clamped up to 1 (which
+        # emitted a phantom iteration of a repeat the form's own logic says is
+        # empty, e.g. count-selected(${followup}) with nothing selected). Only
+        # the sampled fallback below keeps a floor of 1, since a *guessed* 0
+        # would silently hide the whole group. (#28.6)
         if s.lstrip("-").isdigit():
-            return max(1, int(s))
+            return max(0, int(s))
         try:
             v = safe_evaluate(s, ctx, default=None,
                               on_error=lambda e, exc: strip_log.record(
@@ -693,7 +705,7 @@ def _resolve_repeat_count(
                 try:
                     iv = int(float(v))
                     if iv >= 0:
-                        return max(1, iv)
+                        return iv
                 except (TypeError, ValueError):
                     pass
         except Exception:
@@ -1029,6 +1041,10 @@ def _compute_value(
     app = question.get("appearance")
     if app:
         sampler_kwargs["appearance"] = app
+    # Pass the frozen run-context clock so date/datetime sampling is stable
+    # across passes and re-runs at the same seed (a midnight-straddling run
+    # would otherwise shift max_offset between passes). (#28 determinism nit)
+    sampler_kwargs["now"] = runctx.submission_date
     return sample_python_value(q_type, narrowed_choices, constraint, rng, **sampler_kwargs)
 
 
@@ -1042,15 +1058,13 @@ def _narrow_choices(
     """Evaluate ``choice_filter`` against each candidate choice row."""
     out: List[Dict[str, Any]] = []
     for c in choices:
-        ctx = EvalContext(
-            row=parent_ctx.row,
-            choices=parent_ctx.choices,
-            pulldata_lookup=parent_ctx.pulldata_lookup,
-            repeat_stack=list(parent_ctx.repeat_stack),
-            rng=parent_ctx.rng,
-            now=parent_ctx.now,
-            current_var=parent_ctx.current_var,
-            choice_row=c,
+        # Rebuild via dataclasses.replace so EVERY parent field is carried
+        # forward -- the old hand-copy dropped var_to_choice_list and
+        # duration_secs, so a choice_filter using jr:choice-name()/
+        # choice-label()/duration() silently evaluated against "" / 0 and
+        # filtered to the wrong subset. (#28.8)
+        ctx = _dc_replace(
+            parent_ctx, choice_row=c, repeat_stack=list(parent_ctx.repeat_stack)
         )
         v = safe_evaluate(
             cf_expr, ctx, default=True,
@@ -1321,8 +1335,11 @@ def generate_synthetic_csv(
     for i, rs in enumerate(respondent_seeds):
         result = _walk_for_respondent(rs, i, p1_log)
         for k, v in result.repeat_counts.items():
-            if v > max_iter.get(k, 0):
-                max_iter[k] = v
+            # Record with max() (not a `v > current` guard) so a group observed
+            # only with count 0 is stored as an explicit 0 rather than left
+            # absent -- absent defaults to 1 in _grid_combos, which would emit a
+            # phantom column for a repeat that never triggers. (#28.6)
+            max_iter[k] = max(max_iter.get(k, 0), v)
         # row dropped at end of scope
 
     column_order = _build_column_order(questions, repeats, max_iter, pulldata_tables=tables)

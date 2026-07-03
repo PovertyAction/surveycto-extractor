@@ -9,7 +9,11 @@ Contributions are welcome. Please read this before opening a PR.
   and it uses only placeholder values.
 - **No `config.py` commits.** It is blocked by `.gitignore` for good reason.
 - **No survey data.** Do not include `.dta`, instrument `.xlsx`, or generated
-  output files (JSON, CSV, do-files) as examples or test fixtures.
+  output files (JSON, CSV, do-files) as examples or test fixtures. The one
+  exception is the bundled `sample/` directory, which carries the public
+  [IPA High Frequency Checks](https://github.com/PovertyAction/high-frequency-checks)
+  training dataset (all names in it are fictional) and is explicitly
+  whitelisted in `.gitignore`.
 
 ## Workflow
 
@@ -20,6 +24,6 @@ Contributions are welcome. Please read this before opening a PR.
 
 ## Code style
 
-- Python 3.8+ compatible.
+- Python 3.10+ compatible (3.10-3.13 are exercised in CI).
 - No external dependencies beyond those in `requirements.txt`.
 - All new modules must be project-agnostic (no hardcoded paths or survey names).
