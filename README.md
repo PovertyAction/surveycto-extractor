@@ -385,6 +385,35 @@ DATASETS = {
 The `questions_json` path is the bridge between the two sides — Phase 4 will
 fail with an actionable error if it doesn't exist yet.
 
+### Sentinel / special-missing codes
+
+Sentinel counts and the Stata `mvdecode` recode assume a **default set of
+special-missing codes** — the IPA convention this toolkit has been used with:
+
+| Code | Meaning | Stata missing |
+|---|---|---|
+| `-99` | Don't know | `.d` |
+| `-88` | Refused to answer | `.r` |
+| `-77` | Not applicable | `.n` |
+| `-66` | Other (specify) | `.o` |
+| `-55` | Not in list | `.m` |
+| `-98` | *(scanned/counted, never recoded)* | — |
+
+This is a **project convention, not a fixed standard**. If your study uses a
+different set — or if any of these are legitimate response values in your data
+— override the table wholesale in `config.py`:
+
+```python
+SENTINEL_MEANINGS = { -99: ("Don't know", ".d"), -88: ("Refused", ".r") }
+SENTINEL_SCAN_ONLY = [-98]   # counted as sentinels but never recoded
+```
+
+The single source of truth is `sentinels.py`, read by both
+`create_variable_dictionaries.py` and `load_survey_metadata.py` so the two can
+never disagree. If `sentinels.py` is missing (e.g. a partial vendor copy of the
+toolkit), the pipeline falls back to these same defaults with a warning rather
+than failing.
+
 ---
 
 ## Repo layout (for projects that vendor this toolkit)
