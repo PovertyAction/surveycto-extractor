@@ -372,6 +372,26 @@ class JSONExtractor:
             return None
 
         question_text = row.get("label", "")
+        # Fallback for translation-only forms (#36). Multilingual SurveyCTO
+        # forms often define question text ONLY under `label:<lang>` columns
+        # (e.g. `label:english`, `label:shona`) with no bare `label` column, so
+        # `row.get("label")` is empty and question_text would be blank for most
+        # questions. Fall back to a translation label, preferring English, then
+        # the first available language. Purely additive: forms carrying a bare
+        # `label` are unaffected.
+        def _blank(v):
+            return v is None or (isinstance(v, float) and pd.isna(v)) or str(v).strip() == ""
+        if _blank(question_text):
+            label_cols = [c for c in row.index if str(c).lower().startswith("label:")]
+            ordered = [c for c in label_cols if str(c).lower() in ("label:english", "label:en")] + \
+                      [c for c in label_cols if str(c).lower() not in ("label:english", "label:en")]
+            for c in ordered:
+                v = row.get(c, "")
+                if not _blank(v):
+                    question_text = v
+                    break
+        if isinstance(question_text, float) and pd.isna(question_text):
+            question_text = ""
         constraint = row.get("constraint", None) or None
         relevance = row.get("relevance", None) or None
         required = row.get("required", "") == "yes"
