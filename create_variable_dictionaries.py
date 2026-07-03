@@ -67,7 +67,59 @@ try:
 except ModuleNotFoundError:
     config = None
     DATASETS = {}
-import sentinels as _sentinels
+try:
+    import sentinels as _sentinels
+except ModuleNotFoundError:
+    # sentinels.py is part of the core toolkit, but a partial copy of the
+    # extractor into another project can omit it (this is exactly what broke a
+    # downstream project). Rather than hard-crash on import, prepopulate the
+    # baked-in IPA default table -- "the codes we've been using" -- so the
+    # pipeline still runs. Documented in the README; override wholesale by
+    # defining SENTINEL_MEANINGS / SENTINEL_SCAN_ONLY in config.py. When
+    # sentinels.py IS present (the normal case) it stays the single source of
+    # truth; this shim only fills in for a missing module.
+    import types as _types
+    _DEFAULT_MEANINGS = {
+        -99: ("Don't know", ".d"), -88: ("Refused to answer", ".r"),
+        -77: ("Not applicable", ".n"), -66: ("Other (specify)", ".o"),
+        -55: ("Not in list", ".m"),
+    }
+    _DEFAULT_SCAN_ONLY = [-98]
+
+    def _fb_meanings(config=None):
+        ov = getattr(config, "SENTINEL_MEANINGS", None) if config is not None else None
+        return {int(k): tuple(v) for k, v in ov.items()} if ov else dict(_DEFAULT_MEANINGS)
+
+    def _fb_scan_only(config=None):
+        ov = getattr(config, "SENTINEL_SCAN_ONLY", None) if config is not None else None
+        return [int(c) for c in ov] if ov is not None else list(_DEFAULT_SCAN_ONLY)
+
+    def _fb_codes(meanings=None, scan_only=None):
+        m = meanings if meanings is not None else _DEFAULT_MEANINGS
+        s = scan_only if scan_only is not None else _DEFAULT_SCAN_ONLY
+        return sorted(set(m) | set(s))
+
+    def _fb_strings(meanings=None, scan_only=None):
+        return {str(c) for c in _fb_codes(meanings, scan_only)}
+
+    def _fb_meaning(code, meanings=None):
+        m = meanings if meanings is not None else _DEFAULT_MEANINGS
+        t = str(code).strip()
+        if not t.lstrip("-").isdigit():
+            return None
+        entry = m.get(int(t))
+        return entry[0] if entry else None
+
+    _sentinels = _types.SimpleNamespace(
+        resolve_sentinel_meanings=_fb_meanings,
+        resolve_scan_only=_fb_scan_only,
+        sentinel_scan_codes=_fb_codes,
+        sentinel_scan_strings=_fb_strings,
+        sentinel_meaning=_fb_meaning,
+    )
+    print("[WARN] sentinels.py not found -- using built-in IPA default sentinel "
+          "table (-99=.d, -88=.r, -77=.n, -66=.o, -55=.m; scan-only -98). "
+          "Override via config.SENTINEL_MEANINGS. See README.")
 from transformers.logic_converter import LogicConverter
 
 
@@ -1212,9 +1264,6 @@ def export_dictionary(var_dict: pd.DataFrame, df: pd.DataFrame, cfg: Dict, datas
         for qtype, count in var_dict['question_type'].value_counts().items():
             print(f"    {qtype}: {count}")
 
-    # Save form-ordered dataset
-    save_ord_dta(var_dict, df, cfg, meta, parquet_path=parquet_path)
-
     print(f"\nExporting to JSON: {cfg['output_json']}")
     Path(cfg['output_json']).parent.mkdir(parents=True, exist_ok=True)
 
@@ -1349,6 +1398,19 @@ def export_dictionary(var_dict: pd.DataFrame, df: pd.DataFrame, cfg: Dict, datas
 
     with open(cfg['output_json'], 'w', encoding='utf-8') as f:
         json.dump(output_structure, f, indent=2, ensure_ascii=False)
+
+    # Save the form-ordered .dta LAST, after the primary dictionary JSON is
+    # safely written, and never let its failure abort the run. pyreadstat's
+    # write_dta chokes on some column dtypes (e.g. date objects -> issue #35),
+    # and previously this ran BEFORE the JSON write, so a _ord.dta failure
+    # destroyed the primary output. Now the dictionary is already on disk and
+    # an _ord.dta failure is a warning, not a crash.
+    try:
+        save_ord_dta(var_dict, df, cfg, meta, parquet_path=parquet_path)
+    except Exception as exc:  # noqa: BLE001 -- _ord.dta is a secondary artifact
+        print(f"[WARN] _ord.dta generation failed for {dataset_name}: {exc}\n"
+              f"       Primary dictionary JSON was written; continuing. "
+              f"Set 'skip_ord_dta': True in config to silence this.")
 
 
 def validate_select_multiple(dict_path, dataset_name: str):
@@ -1750,8 +1812,12 @@ def main():
     )
     parser.add_argument(
         '--survey', metavar='KEY',
-        help='Process only the named survey (key from config.DATASETS). Default: all.'
+        help='Process only the named survey (key from config.DATASETS).'
     )
+    parser.add_argument('--all', action='store_true',
+                        help='Process every dataset in config.DATASETS. Must be '
+                             'explicit -- a bare invocation refuses to run so it '
+                             'never silently processes large/private datasets.')
     parser.add_argument('--validate', action='store_true',
                         help='Run validation after creation')
     parser.add_argument('--validate-only', action='store_true',
@@ -1777,9 +1843,17 @@ def main():
             sys.exit(1)
         datasets_to_process = [args.survey]
         validate = args.validate
-    else:
+    elif args.all:
         datasets_to_process = list(DATASETS.keys())
         validate = args.validate
+    else:
+        # No target given. Previously this silently processed EVERY dataset in
+        # config.DATASETS, which could pull in a large or private local test
+        # dataset by accident. Require an explicit --survey KEY or --all.
+        print("ERROR: no survey selected. Pass --survey KEY to process one "
+              "dataset, or --all to process every dataset in config.DATASETS.\n"
+              f"  Available keys: {', '.join(DATASETS.keys())}")
+        sys.exit(1)
 
     print("=" * 70)
     print("Create Variable Dictionaries")
