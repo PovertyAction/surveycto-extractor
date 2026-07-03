@@ -47,6 +47,31 @@ class TestShortCircuit:
     def test_and_short_circuits_before_error(self):
         assert evaluate_bool("1 = 2 and regex('x', '[')", ctx()) is False
 
+
+class TestBlankNumericArgsDoNotCrash:
+    """A blank numeric arg coerces to NaN; int(NaN) raises ValueError -- which
+    is NOT an ExpressionError, so it used to escape safe_evaluate and abort the
+    whole pipeline instead of degrading. round()/substr() must handle it."""
+
+    def test_round_blank_precision_defaults_to_zero(self):
+        # Was: ValueError("cannot convert float NaN to integer") escapes.
+        assert evaluate("round(5.5, ${d})", ctx(row={"d": ""})) == 6.0
+
+    def test_substr_blank_start_returns_empty(self):
+        assert evaluate("substr(${s}, ${n})", ctx(row={"s": "hi", "n": ""})) == ""
+
+    def test_substr_blank_end_runs_to_end(self):
+        assert evaluate("substr(${s}, 1, ${n})",
+                        ctx(row={"s": "hello", "n": ""})) == "ello"
+
+    def test_safe_evaluate_no_longer_raises_on_blank_args(self):
+        # The pipeline calls these through safe_evaluate; confirm no ValueError
+        # leaks (it would if the fns raised a non-ExpressionError).
+        assert safe_evaluate("round(5.5, ${d})", ctx(row={"d": ""}),
+                             default="DEFAULT") == 6.0
+        assert safe_evaluate("substr(${s}, ${n})", ctx(row={"s": "hi", "n": ""}),
+                             default="DEFAULT") == ""
+
     def test_basic_truth_tables(self):
         assert evaluate_bool("true() or false()", ctx()) is True
         assert evaluate_bool("true() and false()", ctx()) is False

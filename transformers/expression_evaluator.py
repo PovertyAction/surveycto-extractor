@@ -1086,11 +1086,21 @@ def _fn_substr(args, ctx):
     if len(args) not in (2, 3):
         raise EvaluationError(f"substr() expects 2 or 3 args, got {len(args)}")
     s = _to_string(args[0])
-    start = int(_to_number(args[1]))
+    # A blank/non-numeric index coerces to NaN, and int(NaN) raises ValueError,
+    # which escapes safe_evaluate and aborts the pipeline. Guard both indices
+    # like selected-at/item-at do: a blank start can't be computed (return ""),
+    # a blank end means "to the end of the string".
+    try:
+        start = int(_to_number(args[1]))
+    except (TypeError, ValueError):
+        return ""
     if start < 0:
         start = max(0, len(s) + start)
     if len(args) == 3:
-        end = int(_to_number(args[2]))
+        try:
+            end = int(_to_number(args[2]))
+        except (TypeError, ValueError):
+            return s[start:]
         if end < 0:
             end = max(0, len(s) + end)
         return s[start:end]
@@ -1261,7 +1271,15 @@ def _fn_round(args, ctx):
     if len(args) not in (1, 2):
         raise EvaluationError(f"round() expects 1 or 2 args, got {len(args)}")
     n = _to_number(args[0])
-    digits = int(_to_number(args[1])) if len(args) == 2 else 0
+    # A blank/non-numeric digits arg coerces to NaN, and int(NaN) raises
+    # ValueError -- which is NOT an ExpressionError, so it escapes
+    # safe_evaluate and aborts the whole pipeline. Default a blank precision to
+    # 0 (round to integer), matching the guarded pattern used by selected-at /
+    # item-at / indexed-repeat.
+    try:
+        digits = int(_to_number(args[1])) if len(args) == 2 else 0
+    except (TypeError, ValueError):
+        digits = 0
     if n != n:
         return float("nan")
     # XPath/SurveyCTO round() is round-half-up, not Python's banker's rounding:

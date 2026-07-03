@@ -29,6 +29,34 @@ def test_genuine_string_column_preserved():
     assert "initial" not in counts
 
 
+def test_all_single_letter_column_preserved():
+    # Every value is a single letter (sex m/f, plus a 'd'), so masking them
+    # leaves an all-NaN column that pd.to_numeric coerces without error. This
+    # is a categorical column, NOT numeric-with-letter-missings -- it must
+    # survive untouched and uncounted. (#26.6 -- the case the probe missed.)
+    df = pd.DataFrame({"sex": ["m", "f", "m", "f", "d"]})
+    out, counts = _scan_and_clean_extended_missings(df)
+    assert out["sex"].tolist() == ["m", "f", "m", "f", "d"]
+    assert "sex" not in counts
+
+
+def test_yes_no_single_letter_column_preserved():
+    df = pd.DataFrame({"consent": ["y", "n", "y", "n", "n"]})
+    out, counts = _scan_and_clean_extended_missings(df)
+    assert out["consent"].tolist() == ["y", "n", "y", "n", "n"]
+    assert "consent" not in counts
+
+
+def test_numeric_with_letters_still_cleaned_when_a_value_survives():
+    # Guard must not over-fire: one surviving numeric value means the letters
+    # really are extended-missing tags and should still be cleaned + counted.
+    df = pd.DataFrame({"q": ["m", "f", "5", "d"]})
+    out, counts = _scan_and_clean_extended_missings(df)
+    assert out["q"].tolist()[2] == 5.0
+    assert out["q"].isna().sum() == 3          # m, f, d -> NaN
+    assert counts["q"] == {"m": 1, "f": 1, "d": 1}
+
+
 def test_no_object_columns_is_noop():
     df = pd.DataFrame({"x": [1, 2, 3]})
     out, counts = _scan_and_clean_extended_missings(df)

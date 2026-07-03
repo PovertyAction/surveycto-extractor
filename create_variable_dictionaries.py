@@ -297,6 +297,17 @@ def _scan_and_clean_extended_missings(
             coerced = pd.to_numeric(probed)
         except (ValueError, TypeError):
             continue  # genuine string column: leave values AND counts untouched
+        # Require at least one SURVIVING numeric value. If masking the single
+        # letters leaves an all-NaN column, the letters WERE the column's real
+        # content -- sex 'm'/'f', yes/no 'y'/'n', single-letter category codes,
+        # middle initials -- not numeric data with letter-coded missings. Since
+        # Stata extended missings span the whole alphabet (.a-.z), _EXT_MISSING_
+        # LETTERS is a-z, so such a column masks to all-NaN; and pd.to_numeric
+        # coerces an all-NaN series without error. Without this guard the entire
+        # column is blanked into the parquet sidecar / _ord.dta and miscounted as
+        # extended-missing. (#26.6 -- the probe narrowed this but didn't close it.)
+        if not coerced.notna().any():
+            continue  # all-letter categorical/string column, not numeric+sentinels
         counts = df[col][mask].value_counts()
         result[col] = {str(k): int(v) for k, v in counts.items()}
         df[col] = coerced
