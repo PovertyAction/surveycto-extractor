@@ -7,7 +7,7 @@ It is also config-overridable, since sentinel codes are a project convention.
 """
 import types
 
-import sentinels as s
+from core import sentinels as s
 
 
 class TestDefaults:

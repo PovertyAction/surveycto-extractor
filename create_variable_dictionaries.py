@@ -68,9 +68,9 @@ except ModuleNotFoundError:
     config = None
     DATASETS = {}
 try:
-    import sentinels as _sentinels
+    from core import sentinels as _sentinels
 except ModuleNotFoundError:
-    # sentinels.py is part of the core toolkit, but a partial copy of the
+    # core/sentinels.py is part of the core toolkit, but a partial copy of the
     # extractor into another project can omit it (this is exactly what broke a
     # downstream project). Rather than hard-crash on import, prepopulate the
     # baked-in IPA default table -- "the codes we've been using" -- so the
@@ -117,7 +117,7 @@ except ModuleNotFoundError:
         sentinel_scan_strings=_fb_strings,
         sentinel_meaning=_fb_meaning,
     )
-    print("[WARN] sentinels.py not found -- using built-in IPA default sentinel "
+    print("[WARN] core/sentinels.py not found -- using built-in IPA default sentinel "
           "table (-99=.d, -88=.r, -77=.n, -66=.o, -55=.m; scan-only -98). "
           "Override via config.SENTINEL_MEANINGS. See README.")
 from transformers.logic_converter import LogicConverter

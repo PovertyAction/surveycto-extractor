@@ -46,7 +46,7 @@ import pyreadstat
 # Pull DATASETS from this project's config.py (same directory as this script)
 sys.path.insert(0, str(Path(__file__).parent))
 from config import DATASETS
-from load_survey_metadata import (
+from generators.load_survey_metadata import (
     load_survey_metadata,
     get_numeric_universe,
     filter_truly_numeric,

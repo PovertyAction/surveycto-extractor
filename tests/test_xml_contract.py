@@ -11,7 +11,7 @@ import json
 
 import pytest
 
-from xml_contract import (
+from parsers.xml_contract import (
     FormContract,
     parse_contract,
     build_contract,

@@ -1,17 +1,26 @@
 import json
 import re
+import sys
+from pathlib import Path
 
 import pandas as pd
 
+# This module lives in generators/ but is also runnable standalone; ensure the
+# repo root is importable so `from core import sentinels` and `import config`
+# resolve regardless of the current working directory.
+_ROOT = Path(__file__).resolve().parent.parent
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+
 # Sentinel recode table -- shared with create_variable_dictionaries.py via
-# sentinels.py so the mvdecode mapping and the choice-code labels can't drift
-# (#26.8). config (if importable) may override SENTINEL_MEANINGS.
+# core/sentinels.py so the mvdecode mapping and the choice-code labels can't
+# drift (#26.8). config (if importable) may override SENTINEL_MEANINGS.
 try:
     import config as _config
 except Exception:  # standalone import without config on path
     _config = None
 try:
-    import sentinels as _sentinels
+    from core import sentinels as _sentinels
     _SENTINEL_MEANINGS = _sentinels.resolve_sentinel_meanings(_config)
 except Exception:
     _sentinels = None

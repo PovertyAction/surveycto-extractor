@@ -408,11 +408,11 @@ SENTINEL_MEANINGS = { -99: ("Don't know", ".d"), -88: ("Refused", ".r") }
 SENTINEL_SCAN_ONLY = [-98]   # counted as sentinels but never recoded
 ```
 
-The single source of truth is `sentinels.py`, read by both
-`create_variable_dictionaries.py` and `load_survey_metadata.py` so the two can
-never disagree. If `sentinels.py` is missing (e.g. a partial vendor copy of the
-toolkit), the pipeline falls back to these same defaults with a warning rather
-than failing.
+The single source of truth is `core/sentinels.py`, read by both
+`create_variable_dictionaries.py` and `generators/load_survey_metadata.py` so
+the two can never disagree. If `core/sentinels.py` is missing (e.g. a partial
+vendor copy of the toolkit), the pipeline falls back to these same defaults with
+a warning rather than failing.
 
 ---
 
@@ -428,9 +428,12 @@ my_project/
     ├── config.py                           ← copy from config.template.py, fill in
     ├── main.py                             ← instrument-side entry point
     ├── create_variable_dictionaries.py     ← post-collection vardict + graph
-    ├── xml_contract.py                     ← compiled-XForm parser (optional overlay)
     ├── enrich_with_contract.py             ← overlays the XML contract onto the vardict
     ├── create_summary_stats_dofile.py      ← post-collection summary stats
+    ├── core/                               ← shared support (sentinels table)
+    ├── parsers/                            ← survey + compiled-XForm (xml_contract) parsers
+    ├── generators/                         ← outputs incl. Stata metadata (load_survey_metadata)
+    ├── extractors/  transformers/          ← CSV/JSON extraction, logic conversion
     └── ...
 ```
 
