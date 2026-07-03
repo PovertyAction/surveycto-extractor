@@ -682,14 +682,19 @@ class LogicConverter:
             return f'strpos({v}, "{LogicConverter._unwrap_one_quote(s)}") > 0'
         expr = LogicConverter._sub_function_balanced(expr, r'contains', _contains_replacer)
 
-        # starts-with(var, 'str') → substr(var, 1, len) == "str"
+        # starts-with(var, 'str') → substr(var, 0, len) == "str"
+        # Emit in the SurveyCTO 0-based/exclusive-end convention so Step 9's
+        # _translate_substr performs the single 0->1-based shift for us:
+        # substr(var, 0, N) becomes substr(var, 1, N). Emitting the Stata form
+        # (1, N) directly here was the bug -- Step 9 re-shifted it to
+        # substr(var, 2, N-1), so the comparison could never be true. (#22 / review)
         def _starts_with_replacer(args: str, full_call: str) -> str:
             parts = LogicConverter._split_top_level_args(args)
             if len(parts) != 2:
                 return full_call
             v, s = parts
             s_inner = LogicConverter._unwrap_one_quote(s)
-            return f'substr({v}, 1, {len(s_inner)}) == "{s_inner}"'
+            return f'substr({v}, 0, {len(s_inner)}) == "{s_inner}"'
         expr = LogicConverter._sub_function_balanced(expr, r'starts-with', _starts_with_replacer)
 
         # ends-with(var, 'str') → substr(var, -len, .) == "str"

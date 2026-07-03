@@ -301,6 +301,27 @@ class TestQuoteAwareStripsAndCleanup:
         assert convert("indexed-repeat(${a}, ${g}, 2)", {}) == "a_2"
 
 
+class TestStartsEndsWith:
+    """Review HIGH #4 -- starts-with() emitted a Stata-based substr(v, 1, N)
+    that Step 9 re-shifted to substr(v, 2, N-1), so the comparison could never
+    be true. It must finalize to a valid 1-based substr; ends-with is unchanged
+    (its `.` length makes Step 9 a no-op)."""
+
+    def test_starts_with_offsets_correct(self):
+        # first 2 chars == "07" -- was substr(phone, 2, 1) before the fix
+        assert convert("starts-with(${phone}, '07')", {}) == 'substr(phone, 1, 2) == "07"'
+
+    def test_starts_with_longer_needle(self):
+        assert convert("starts-with(${v}, 'abc')", {}) == 'substr(v, 1, 3) == "abc"'
+
+    def test_starts_with_in_compound(self):
+        assert convert("starts-with(${phone}, '07') and ${x} > 5", {}) == \
+            'substr(phone, 1, 2) == "07" & x > 5 & !missing(x)'
+
+    def test_ends_with_unchanged(self):
+        assert convert("ends-with(${v}, 'xy')", {}) == 'substr(v, -2, .) == "xy"'
+
+
 class TestConstraintCorruptionsFromSample:
     """C7 -- three real corruptions the structural validator surfaced in the
     sample's own constraint expressions (all `.`-form constraints)."""
