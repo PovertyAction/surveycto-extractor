@@ -213,9 +213,12 @@ def _load_answer_files(paths):
 def run_synthetic_phase(
     survey_key: str, n_rows: int = 5, seed: int = 0,
     force_values=None, provider=None, strict: bool = True,
-    repeat_count_overrides=None,
+    repeat_count_overrides=None, coverage_trace=None,
 ):
-    """Generate a SurveyCTO-shaped synthetic export CSV from questions.json."""
+    """Generate a SurveyCTO-shaped synthetic export CSV from questions.json.
+
+    ``coverage_trace``: ``None`` = off; ``""`` = default sidecar path
+    (``<csv>.coverage.json``); a string path = write there."""
     survey_cfg = config.SURVEYS[survey_key]
     dataset_cfg = config.DATASETS.get(survey_key)
     if dataset_cfg is None:
@@ -229,6 +232,12 @@ def run_synthetic_phase(
         return
 
     output_csv = survey_cfg["output_dir"] / f"{survey_key}_synthetic.csv"
+    coverage_trace_path = None
+    if coverage_trace is not None:
+        coverage_trace_path = (
+            Path(coverage_trace) if coverage_trace
+            else output_csv.with_suffix(".coverage.json")
+        )
     # Search for pulldata CSVs in the configured dirs (default: dir of input_file)
     search_dirs = survey_cfg.get("pulldata_search_dirs")
     if not search_dirs:
@@ -277,6 +286,7 @@ def run_synthetic_phase(
         provider=provider,
         strict=strict,
         repeat_count_overrides=repeat_count_overrides,
+        coverage_trace_path=coverage_trace_path,
     )
     print()
 
@@ -355,6 +365,17 @@ def main():
              "question (fail open) instead of hiding it. Default is strict "
              "(fail closed + recorded)."
     )
+    parser.add_argument(
+        "--coverage-trace",
+        nargs="?",
+        const="",
+        default=None,
+        metavar="PATH",
+        help="For --phases synthetic: write a machine-readable coverage-trace "
+             "sidecar (which cells were asked vs gated and why, and where each "
+             "answer came from). Default path <csv>.coverage.json; pass a PATH to "
+             "override. Consumed by the bench-test skill."
+    )
 
     args = parser.parse_args()
 
@@ -386,6 +407,7 @@ def main():
                     force_values=force_values, provider=synthetic_provider,
                     strict=synthetic_strict,
                     repeat_count_overrides=repeat_count_overrides,
+                    coverage_trace=args.coverage_trace,
                 )
                 continue
 
@@ -402,6 +424,7 @@ def main():
                     force_values=force_values, provider=synthetic_provider,
                     strict=synthetic_strict,
                     repeat_count_overrides=repeat_count_overrides,
+                    coverage_trace=args.coverage_trace,
                 )
 
         except Exception as e:

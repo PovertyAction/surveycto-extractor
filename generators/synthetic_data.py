@@ -154,6 +154,48 @@ class StripLog:
                 f.write(f"[{var}] {kind}: {expr!r}\n  -> {msg}\n")
 
 
+@dataclass
+class CoverageTrace:
+    """Optional, write-only per-row record of what the gate authority decided
+    and where each answer came from. Consumed by the bench-test skill to verify
+    a scripted case reached its intended sections; never fed back into any
+    sampling/gating decision (so it can't perturb the pass1/pass2 lockstep).
+
+    Each row entry: ``{key, cells: {col: {var, asked, source, note, gate}},
+    unevaluable_gates: [...], fixpoint_passes: int, converged: bool}``."""
+
+    rows: List[Dict[str, Any]] = field(default_factory=list)
+
+    def add_row(self, entry: Dict[str, Any]) -> None:
+        self.rows.append(entry)
+
+    def to_json(self) -> Dict[str, Any]:
+        asked: Dict[str, int] = {}
+        gated: Dict[str, int] = {}
+        for r in self.rows:
+            for cell in r.get("cells", {}).values():
+                v = cell.get("var", "")
+                if cell.get("asked"):
+                    asked[v] = asked.get(v, 0) + 1
+                else:
+                    gated[v] = gated.get(v, 0) + 1
+        never_asked = sorted(v for v in set(asked) | set(gated) if asked.get(v, 0) == 0)
+        return {
+            "n_rows": len(self.rows),
+            "aggregate": {
+                "asked_count": asked,
+                "gated_count": gated,
+                "never_asked": never_asked,
+            },
+            "rows": self.rows,
+        }
+
+    def write(self, path: Path) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w", encoding="utf-8") as f:
+            json.dump(self.to_json(), f, indent=2, default=str)
+
+
 # ── Answer-provider seam ──────────────────────────────────────────────────────
 # The walker decides GATING deterministically; where a value comes from for a
 # question the gate has already opened is injectable. The default (provider is
@@ -986,6 +1028,7 @@ def _walk_one(
     provider: Optional[AnswerProvider] = None,
     strict: bool = True,
     repeat_count_overrides: Optional[Dict[str, int]] = None,
+    trace: Optional[CoverageTrace] = None,
 ) -> WalkResult:
     """Generate one respondent's row.
 
@@ -1070,6 +1113,47 @@ def _walk_one(
     _VOLATILE_CALC_RE = re.compile(r"\b(?:random|uuid|once|duration)\s*\(")
     computed: Dict[str, Any] = {}   # memoized cell values (samples + volatile calcs)
 
+    # ── Coverage trace (write-only; never feeds a sampling/gating decision) ──
+    _tracing = trace is not None
+    answer_sources: Dict[str, Tuple[str, Optional[str]]] = {}
+    cell_trace: Dict[str, Dict[str, Any]] = {}
+
+    def _note_gate(key: str, var: str, decision: "GateDecision") -> None:
+        if not _tracing:
+            return
+        rec: Dict[str, Any] = {"var": var, "asked": decision.relevant,
+                               "source": None, "note": None}
+        if (not decision.relevant) or decision.unevaluable:
+            rec["gate"] = {
+                "kind": decision.failing_kind,
+                "unevaluable": decision.unevaluable,
+                "failing_expr": decision.failing_expr,
+                "failing_operands": decision.failing_operands,
+                "error": decision.error,
+            }
+        cell_trace[key] = rec
+
+    def _note_forced(key: str, var: str) -> None:
+        if _tracing:
+            cell_trace[key] = {"var": var, "asked": True,
+                               "source": "forced", "note": None}
+
+    def _note_source(key: str, q: Dict[str, Any]) -> None:
+        if not _tracing:
+            return
+        rec = cell_trace.get(key)
+        if rec is None or not rec.get("asked") or rec.get("source") == "forced":
+            return
+        qt = q.get("type", "")
+        if qt in ("calculate", "calculate_here"):
+            rec["source"] = "calculated"
+        elif _metadata_kind(q) is not None:
+            rec["source"] = "metadata"
+        elif key in answer_sources:
+            rec["source"], rec["note"] = answer_sources[key]
+        else:
+            rec["source"] = "stochastic"
+
     def _value_for(q, q_type, key, choices, constraint, ctx):
         calc = q.get("calculation") if q_type in ("calculate", "calculate_here") else None
         volatile = bool(calc) and bool(_VOLATILE_CALC_RE.search(calc))
@@ -1078,13 +1162,13 @@ def _walk_one(
             # forward input propagates through the fixpoint.
             return _compute_value(
                 q, q_type, choices, constraint, ctx, rng, runctx,
-                strip_log, key, geo_bbox, provider,
+                strip_log, key, geo_bbox, provider, answer_sources,
             )
         if key in computed:
             return computed[key]
         val = _compute_value(
             q, q_type, choices, constraint, ctx, rng, runctx,
-            strip_log, key, geo_bbox, provider,
+            strip_log, key, geo_bbox, provider, answer_sources,
         )
         computed[key] = val
         return val
@@ -1127,7 +1211,9 @@ def _walk_one(
                 for combo in _enumerate_combos(ancestors, counts):
                     col = f"{var_name}{_suffix(combo)}"
                     ctx = _make_ctx(col, list(zip(ancestors, combo)))
-                    if not _is_relevant(q, ctx, strip_log, col, strict).relevant:
+                    decision = _is_relevant(q, ctx, strip_log, col, strict)
+                    _note_gate(col, var_name, decision)
+                    if not decision.relevant:
                         slot[combo] = 0
                         row[col] = ""
                         continue
@@ -1161,19 +1247,24 @@ def _walk_one(
                     # as relevant and write the forced value. This is the only
                     # way to make a gated-cascade actually populate when the
                     # gating ancestor would have randomly evaluated false.
-                    if forced is None and not _is_relevant(q, ctx, strip_log, key, strict).relevant:
-                        row[key] = ""
-                        if q_type == "select_multiple":
-                            for c in choices:
-                                cv = str(c.get("value", "")).strip()
-                                if not cv:
-                                    continue
-                                row[f"{var_name}_{_choice_suffix(cv)}{suffix}"] = ""
-                        continue
+                    if forced is None:
+                        decision = _is_relevant(q, ctx, strip_log, key, strict)
+                        _note_gate(key, var_name, decision)
+                        if not decision.relevant:
+                            row[key] = ""
+                            if q_type == "select_multiple":
+                                for c in choices:
+                                    cv = str(c.get("value", "")).strip()
+                                    if not cv:
+                                        continue
+                                    row[f"{var_name}_{_choice_suffix(cv)}{suffix}"] = ""
+                            continue
                     if forced is not None:
+                        _note_forced(key, var_name)
                         value = forced
                     else:
                         value = _value_for(q, q_type, key, choices, constraint, ctx)
+                        _note_source(key, q)
                     if q_type == "select_multiple":
                         # Store the formatted space-separated string in the row
                         # so downstream `selected(${var}, X)` inside the same
@@ -1198,19 +1289,24 @@ def _walk_one(
             ctx = _make_ctx(var_name, [])
             forced = force_values.get(var_name)
             # --force-value bypasses relevance (see in-repeat branch above).
-            if forced is None and not _is_relevant(q, ctx, strip_log, var_name, strict).relevant:
-                row[var_name] = ""
-                if q_type == "select_multiple":
-                    for c in choices:
-                        cv = str(c.get("value", "")).strip()
-                        if not cv:
-                            continue
-                        row[f"{var_name}_{_choice_suffix(cv)}"] = ""
-                continue
+            if forced is None:
+                decision = _is_relevant(q, ctx, strip_log, var_name, strict)
+                _note_gate(var_name, var_name, decision)
+                if not decision.relevant:
+                    row[var_name] = ""
+                    if q_type == "select_multiple":
+                        for c in choices:
+                            cv = str(c.get("value", "")).strip()
+                            if not cv:
+                                continue
+                            row[f"{var_name}_{_choice_suffix(cv)}"] = ""
+                    continue
             if forced is not None:
+                _note_forced(var_name, var_name)
                 value = forced
             else:
                 value = _value_for(q, q_type, var_name, choices, constraint, ctx)
+                _note_source(var_name, q)
             if q_type == "select_multiple":
                 # Store the formatted space-separated string (not the raw list)
                 # so downstream `selected(${var}, X)` calls tokenise correctly
@@ -1231,12 +1327,31 @@ def _walk_one(
     process(detect=True)
     # Phase B: only when a gate/calc referenced a forward variable. Re-gate to a
     # fixpoint; memoization keeps the RNG stream and duration counter stable.
+    fixpoint_passes = 0
+    converged = True
     if forward_suspect:
+        converged = False
         for _ in range(len(questions) + 1):
             before = dict(row)
             process(detect=False)
+            fixpoint_passes += 1
             if row == before:
+                converged = True
                 break
+
+    if _tracing:
+        unevaluable = [
+            {"key": k, "expr": c["gate"].get("failing_expr"), "error": c["gate"].get("error")}
+            for k, c in cell_trace.items()
+            if c.get("gate", {}).get("unevaluable")
+        ]
+        trace.add_row({
+            "key": runctx.key,
+            "cells": cell_trace,
+            "unevaluable_gates": unevaluable,
+            "fixpoint_passes": fixpoint_passes,
+            "converged": converged,
+        })
 
     # Collapse the ragged per-ancestor counts to the max iterations seen for
     # each repeat in this respondent. Pass 1 aggregates these into the global
@@ -1265,8 +1380,13 @@ def _compute_value(
     var_label: str,
     geo_bbox: Optional[Tuple[float, float, float, float]] = None,
     provider: Optional[AnswerProvider] = None,
+    answer_sources: Optional[Dict[str, Tuple[str, Optional[str]]]] = None,
 ) -> Any:
-    """Compute a Python value for one (relevance-true) question."""
+    """Compute a Python value for one (relevance-true) question.
+
+    ``answer_sources`` (optional) is a write-only sink for the coverage trace:
+    when a provider decides the value, its ``(source, note)`` is recorded there
+    keyed by ``var_label``."""
 
     # Calculate / calculate_here: evaluate the expression. calculate_here
     # is SurveyCTO-specific (fixed-location calculate). Two practical
@@ -1342,7 +1462,10 @@ def _compute_value(
         sampler_kwargs=sampler_kwargs,
         combo=tuple(idx for _, idx in ctx.repeat_stack),
     )
-    return provider.provide(req).value
+    res = provider.provide(req)
+    if answer_sources is not None:
+        answer_sources[var_label] = (res.source, res.note)
+    return res.value
 
 
 def _narrow_choices(
@@ -1531,6 +1654,7 @@ def generate_synthetic_csv(
     provider: Optional[AnswerProvider] = None,
     strict: bool = True,
     repeat_count_overrides: Optional[Dict[str, int]] = None,
+    coverage_trace_path: Optional[Path] = None,
 ) -> Path:
     """Walk the form and write ``n_rows`` synthetic respondents to a wide CSV.
 
@@ -1648,6 +1772,7 @@ def generate_synthetic_csv(
     # ── Pass 2: walk and write streaming. Each row is materialised once,
     # written to disk, then released.
     strip_log = StripLog()
+    cov_trace = CoverageTrace() if coverage_trace_path else None
     output_csv_path.parent.mkdir(parents=True, exist_ok=True)
     with output_csv_path.open("w", encoding="utf-8", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=column_order, extrasaction="ignore")
@@ -1661,9 +1786,14 @@ def generate_synthetic_csv(
                 choices_lookup, var_to_choice_list, strip_log,
                 force_values=force_values, geo_bbox=geo_bbox,
                 pulldata_tables=tables, provider=provider, strict=strict,
-                repeat_count_overrides=repeat_count_overrides,
+                repeat_count_overrides=repeat_count_overrides, trace=cov_trace,
             )
             writer.writerow(_row_to_csv_dict(result.row, rctx, column_order))
+
+    # Coverage trace: optional QA sidecar consumed by the bench-test skill.
+    if cov_trace is not None:
+        cov_trace.write(coverage_trace_path)
+        print(f"[OK] Coverage trace written: {Path(coverage_trace_path).name}")
 
     # Strip-log: write fresh, or remove a stale one from a previous run that
     # had unsupported functions which are now supported.
