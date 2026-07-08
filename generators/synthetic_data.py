@@ -941,137 +941,197 @@ def _walk_one(
             duration_secs=runctx.duration,
         )
 
-    for q in questions:
-        q_type = q.get("type", "")
-        var_name = q.get("variable_name", "")
-        if not var_name:
-            continue
-        if q_type in _BLANK_TYPES:
-            row[var_name] = ""
-            continue
-        group_path = q.get("group_path") or []
-        choices = q.get("choices") or []
-        constraint = q.get("constraint")
-        # Expand search()-appearance choice lists from pulldata. Done per
-        # respondent so the matches-clause filter sees the current row.
-        # Falls back to the static list when no search() applies or the
-        # named CSV isn't loaded.
-        if q_type in ("select_one", "select_multiple") and pulldata_tables and q.get("appearance"):
-            dynamic = _resolve_search_choices(q, pulldata_tables, row=row, apply_matches=True)
-            if dynamic:
-                choices = dynamic
+    # Forward-reference support. A gate/calc may reference a variable defined
+    # LATER in form order, which a single forward pass would see as blank (and
+    # wrongly gate out). We run the walk once (Phase A, byte-identical to the
+    # historical single pass) and, ONLY if some gate/calc references a forward
+    # variable, iterate the gating to a fixpoint (Phase B): re-evaluate gates
+    # against the now-complete row, sample any cell that flips hidden->shown
+    # exactly once (memoized), and blank any that flips shown->hidden. Sampled
+    # values and volatile calcs (random/uuid/once/duration) are memoized so the
+    # RNG stream and the duration counter never advance twice; deterministic
+    # calcs recompute each pass so a resolved input propagates. Repeat counts
+    # are frozen after Phase A (Tier 1). (plan A3)
+    var_pos: Dict[str, int] = {}
+    for _i, _q in enumerate(questions):
+        _vn = _q.get("variable_name", "")
+        if _vn and _vn not in var_pos:
+            var_pos[_vn] = _i
 
-        # ── repeat_count: resolve N once per ancestor iteration. A top-level
-        # repeat resolves a single count (key ``()``); an inner repeat nested
-        # under outer repeats resolves one count per outer-iteration tuple, so
-        # the count column is wide-suffixed by the ancestors (``inner_count_o``).
-        # If a repeat is gated by a relevance that evaluated false for some
-        # combination, that count is 0 and the block contributes nothing there.
-        if q_type == "repeat_count":
-            repeat_name = q.get("repeat_group_name") or ""
-            ancestors = _repeat_chain(group_path, repeats)
-            slot = counts.setdefault(repeat_name, {})
-            for combo in _enumerate_combos(ancestors, counts):
-                col = f"{var_name}{_suffix(combo)}"
-                ctx = _make_ctx(col, list(zip(ancestors, combo)))
-                if not _is_relevant(q, ctx, strip_log, col, strict).relevant:
-                    slot[combo] = 0
-                    row[col] = ""
+    def _refs_forward(q: Dict[str, Any], idx: int) -> bool:
+        exprs: List[str] = list(q.get("group_relevances") or [])
+        for _key in ("relevance", "calculation"):
+            if q.get(_key):
+                exprs.append(q[_key])
+        for e in exprs:
+            for ref in _GATE_REF_RE.findall(e or ""):
+                if var_pos.get(ref, -1) > idx:
+                    return True
+        return False
+
+    _VOLATILE_CALC_RE = re.compile(r"\b(?:random|uuid|once|duration)\s*\(")
+    computed: Dict[str, Any] = {}   # memoized cell values (samples + volatile calcs)
+
+    def _value_for(q, q_type, key, choices, constraint, ctx):
+        calc = q.get("calculation") if q_type in ("calculate", "calculate_here") else None
+        volatile = bool(calc) and bool(_VOLATILE_CALC_RE.search(calc))
+        if q_type in ("calculate", "calculate_here") and not volatile:
+            # Deterministic calc: recompute each pass (no RNG) so a resolved
+            # forward input propagates through the fixpoint.
+            return _compute_value(
+                q, q_type, choices, constraint, ctx, rng, runctx,
+                strip_log, key, geo_bbox, provider,
+            )
+        if key in computed:
+            return computed[key]
+        val = _compute_value(
+            q, q_type, choices, constraint, ctx, rng, runctx,
+            strip_log, key, geo_bbox, provider,
+        )
+        computed[key] = val
+        return val
+
+    forward_suspect = False
+
+    def process(detect: bool) -> None:
+        nonlocal forward_suspect
+        for idx, q in enumerate(questions):
+            q_type = q.get("type", "")
+            var_name = q.get("variable_name", "")
+            if not var_name:
+                continue
+            if detect and _refs_forward(q, idx):
+                forward_suspect = True
+            if q_type in _BLANK_TYPES:
+                row[var_name] = ""
+                continue
+            group_path = q.get("group_path") or []
+            choices = q.get("choices") or []
+            constraint = q.get("constraint")
+            # Expand search()-appearance choice lists from pulldata. Done per
+            # respondent so the matches-clause filter sees the current row.
+            # Falls back to the static list when no search() applies or the
+            # named CSV isn't loaded.
+            if q_type in ("select_one", "select_multiple") and pulldata_tables and q.get("appearance"):
+                dynamic = _resolve_search_choices(q, pulldata_tables, row=row, apply_matches=True)
+                if dynamic:
+                    choices = dynamic
+
+            # ── repeat_count: resolve N once per ancestor iteration. Counts are
+            # resolved in Phase A only (detect=True) and frozen thereafter, so
+            # the column grid stays stable across the fixpoint (Tier 1).
+            if q_type == "repeat_count":
+                if not detect:
                     continue
-                n = _resolve_repeat_count(
-                    q.get("calculation"), ctx, strip_log, col, rng, constraint,
-                )
-                slot[combo] = n
-                row[col] = n
-            continue
+                repeat_name = q.get("repeat_group_name") or ""
+                ancestors = _repeat_chain(group_path, repeats)
+                slot = counts.setdefault(repeat_name, {})
+                for combo in _enumerate_combos(ancestors, counts):
+                    col = f"{var_name}{_suffix(combo)}"
+                    ctx = _make_ctx(col, list(zip(ancestors, combo)))
+                    if not _is_relevant(q, ctx, strip_log, col, strict).relevant:
+                        slot[combo] = 0
+                        row[col] = ""
+                        continue
+                    n = _resolve_repeat_count(
+                        q.get("calculation"), ctx, strip_log, col, rng, constraint,
+                    )
+                    slot[combo] = n
+                    row[col] = n
+                continue
 
-        # ── Variables inside one or more repeats: expand over the full chain
-        # of enclosing repeats. A field in [outer, inner] gets a column per
-        # (outer, inner) iteration pair, keyed ``var_o_i``; a singly-nested
-        # field keeps the original ``var_i`` shape.
-        chain = _repeat_chain(group_path, repeats)
-        if chain:
-            forced = force_values.get(var_name)
-            for combo in _enumerate_combos(chain, counts):
-                suffix = _suffix(combo)
-                key = f"{var_name}{suffix}"
-                ctx = _make_ctx(key, list(zip(chain, combo)))
-                # --force-value bypasses relevance: the user is explicitly
-                # asking for the variable to be populated, so we treat it
-                # as relevant and write the forced value. This is the only
-                # way to make a gated-cascade actually populate when the
-                # gating ancestor would have randomly evaluated false.
-                if forced is None and not _is_relevant(q, ctx, strip_log, key, strict).relevant:
-                    row[key] = ""
+            # ── Variables inside one or more repeats: expand over the full chain
+            # of enclosing repeats. A field in [outer, inner] gets a column per
+            # (outer, inner) iteration pair, keyed ``var_o_i``; a singly-nested
+            # field keeps the original ``var_i`` shape.
+            chain = _repeat_chain(group_path, repeats)
+            if chain:
+                forced = force_values.get(var_name)
+                for combo in _enumerate_combos(chain, counts):
+                    suffix = _suffix(combo)
+                    key = f"{var_name}{suffix}"
+                    ctx = _make_ctx(key, list(zip(chain, combo)))
+                    # --force-value bypasses relevance: the user is explicitly
+                    # asking for the variable to be populated, so we treat it
+                    # as relevant and write the forced value. This is the only
+                    # way to make a gated-cascade actually populate when the
+                    # gating ancestor would have randomly evaluated false.
+                    if forced is None and not _is_relevant(q, ctx, strip_log, key, strict).relevant:
+                        row[key] = ""
+                        if q_type == "select_multiple":
+                            for c in choices:
+                                cv = str(c.get("value", "")).strip()
+                                if not cv:
+                                    continue
+                                row[f"{var_name}_{_choice_suffix(cv)}{suffix}"] = ""
+                        continue
+                    if forced is not None:
+                        value = forced
+                    else:
+                        value = _value_for(q, q_type, key, choices, constraint, ctx)
                     if q_type == "select_multiple":
+                        # Store the formatted space-separated string in the row
+                        # so downstream `selected(${var}, X)` inside the same
+                        # repeat (which resolves `${var}` -> the suffixed key via
+                        # the repeat stack) can tokenise it correctly. The column
+                        # builder omits this parent cell from CSV; it's
+                        # internal-only.
+                        csv_str = _format_for_csv(value)
+                        row[key] = csv_str
+                        selected_tokens = set(csv_str.split())
                         for c in choices:
                             cv = str(c.get("value", "")).strip()
                             if not cv:
                                 continue
-                            row[f"{var_name}_{_choice_suffix(cv)}{suffix}"] = ""
-                    continue
-                if var_name in force_values:
-                    value = force_values[var_name]
-                else:
-                    value = _compute_value(
-                        q, q_type, choices, constraint, ctx, rng, runctx,
-                        strip_log, key, geo_bbox, provider,
-                    )
+                            bin_key = f"{var_name}_{_choice_suffix(cv)}{suffix}"
+                            row[bin_key] = 1 if cv in selected_tokens else 0
+                    else:
+                        row[key] = value
+                continue
+
+            # ── Top-level variables (no repeat)
+            ctx = _make_ctx(var_name, [])
+            forced = force_values.get(var_name)
+            # --force-value bypasses relevance (see in-repeat branch above).
+            if forced is None and not _is_relevant(q, ctx, strip_log, var_name, strict).relevant:
+                row[var_name] = ""
                 if q_type == "select_multiple":
-                    # Store the formatted space-separated string in the row
-                    # so downstream `selected(${var}, X)` inside the same
-                    # repeat (which resolves `${var}` -> the suffixed key via
-                    # the repeat stack) can tokenise it correctly. The column
-                    # builder omits this parent cell from CSV; it's
-                    # internal-only.
-                    csv_str = _format_for_csv(value)
-                    row[key] = csv_str
-                    selected_tokens = set(csv_str.split())
                     for c in choices:
                         cv = str(c.get("value", "")).strip()
                         if not cv:
                             continue
-                        bin_key = f"{var_name}_{_choice_suffix(cv)}{suffix}"
-                        row[bin_key] = 1 if cv in selected_tokens else 0
-                else:
-                    row[key] = value
-            continue
-
-        # ── Top-level variables (no repeat)
-        ctx = _make_ctx(var_name, [])
-        forced = force_values.get(var_name)
-        # --force-value bypasses relevance (see in-repeat branch above).
-        if forced is None and not _is_relevant(q, ctx, strip_log, var_name, strict).relevant:
-            row[var_name] = ""
+                        row[f"{var_name}_{_choice_suffix(cv)}"] = ""
+                continue
+            if forced is not None:
+                value = forced
+            else:
+                value = _value_for(q, q_type, var_name, choices, constraint, ctx)
             if q_type == "select_multiple":
+                # Store the formatted space-separated string (not the raw list)
+                # so downstream `selected(${var}, X)` calls tokenise correctly
+                # via `_to_string(...) .split()`.
+                csv_str = _format_for_csv(value)
+                row[var_name] = csv_str
+                selected_tokens = set(csv_str.split())
                 for c in choices:
                     cv = str(c.get("value", "")).strip()
                     if not cv:
                         continue
-                    row[f"{var_name}_{_choice_suffix(cv)}"] = ""
-            continue
-        if forced is not None:
-            value = forced
-        else:
-            value = _compute_value(
-                q, q_type, choices, constraint, ctx, rng, runctx,
-                strip_log, var_name, geo_bbox, provider,
-            )
-        if q_type == "select_multiple":
-            # Store the formatted space-separated string (not the raw list)
-            # so downstream `selected(${var}, X)` calls tokenise correctly
-            # via `_to_string(...) .split()`.
-            csv_str = _format_for_csv(value)
-            row[var_name] = csv_str
-            selected_tokens = set(csv_str.split())
-            for c in choices:
-                cv = str(c.get("value", "")).strip()
-                if not cv:
-                    continue
-                bin_key = f"{var_name}_{_choice_suffix(cv)}"
-                row[bin_key] = 1 if cv in selected_tokens else 0
-        else:
-            row[var_name] = value
+                    bin_key = f"{var_name}_{_choice_suffix(cv)}"
+                    row[bin_key] = 1 if cv in selected_tokens else 0
+            else:
+                row[var_name] = value
+
+    # Phase A: the historical single forward pass (byte-identical).
+    process(detect=True)
+    # Phase B: only when a gate/calc referenced a forward variable. Re-gate to a
+    # fixpoint; memoization keeps the RNG stream and duration counter stable.
+    if forward_suspect:
+        for _ in range(len(questions) + 1):
+            before = dict(row)
+            process(detect=False)
+            if row == before:
+                break
 
     # Collapse the ragged per-ancestor counts to the max iterations seen for
     # each repeat in this respondent. Pass 1 aggregates these into the global

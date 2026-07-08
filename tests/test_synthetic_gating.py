@@ -86,6 +86,46 @@ def test_gate_decision_unevaluable_strict_vs_legacy():
     assert legacy.relevant is True and legacy.unevaluable is True
 
 
+def test_forward_referenced_gate_resolves(tmp_path):
+    """A gate referencing a variable defined LATER resolves via the fixpoint:
+    ``early`` is gated on ``${late}=1``; ``late`` (a calc = 1) is defined after
+    it, so a single pass would blank ``early``. Phase B re-gates and shows it."""
+    form = [
+        {"type": "text", "variable_name": "early",
+         "relevance": "${late} = 1", "group_path": []},
+        {"type": "calculate", "variable_name": "late",
+         "calculation": "1", "group_path": []},
+    ]
+    _, rows = _run(tmp_path / "fwd", form)
+    assert rows[0]["late"] == "1"
+    assert rows[0]["early"] != ""
+
+
+def test_forward_referenced_gate_stays_closed_when_false(tmp_path):
+    form = [
+        {"type": "text", "variable_name": "early",
+         "relevance": "${late} = 1", "group_path": []},
+        {"type": "calculate", "variable_name": "late",
+         "calculation": "0", "group_path": []},
+    ]
+    _, rows = _run(tmp_path / "fwd0", form)
+    assert rows[0]["early"] == ""       # gate genuinely false after resolution
+
+
+def test_forward_ref_run_is_deterministic(tmp_path):
+    form = [
+        {"type": "text", "variable_name": "early",
+         "relevance": "${late} = 1", "group_path": []},
+        {"type": "integer", "variable_name": "n", "constraint": ". >= 0 and . <= 50",
+         "relevance": "${late} = 1", "group_path": []},
+        {"type": "calculate", "variable_name": "late",
+         "calculation": "1", "group_path": []},
+    ]
+    _, r1 = _run(tmp_path / "d1", form, n_rows=5, seed=9)
+    _, r2 = _run(tmp_path / "d2", form, n_rows=5, seed=9)
+    assert r1 == r2
+
+
 def test_gate_decision_group_relevance_short_circuits():
     q = {"group_relevances": ["1 = 2"], "relevance": "1 = 1"}
     d = _is_relevant(q, EvalContext(row={}), StripLog(), "q", strict=True)
