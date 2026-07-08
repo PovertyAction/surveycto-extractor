@@ -437,11 +437,20 @@ _CASEID_PULLDATA_RX = re.compile(
 def _build_caseid_pool(
     questions: List[Dict[str, Any]],
     tables: Dict[str, Any],
+    case_id_filter: Optional[Dict[str, Any]] = None,
 ) -> List[str]:
     """Collect caseid candidates from the pulldata table the form looks up
     with ``${caseid}`` as the key. Returns unique stringified key values,
     or ``[]`` if no caseid-keyed pulldata reference exists or the table
     didn't load.
+
+    ``case_id_filter`` restricts the pool to a subset of cases so a simulation
+    can run on a specific case-management context (e.g. the bench-test cases,
+    whose preload ``wave``/``total_phones`` drive the caller-ID gates). Shape:
+    ``{"prefix": "BT"}`` (ids starting with a prefix, case-insensitive) and/or
+    ``{"ids": [...]}`` (explicit id list). Matching is against the pulldata key
+    values, so only real, resolvable caseids are kept; an empty result after
+    filtering raises (the requested case pool matched nothing).
 
     If the form references multiple ``(table, key_col)`` pairs (rare but
     possible — e.g. a form that pulls from both ``cases.csv`` and
@@ -489,6 +498,27 @@ def _build_caseid_pool(
             continue
         seen.add(s)
         pool.append(s)
+
+    if case_id_filter:
+        prefix = (case_id_filter.get("prefix") or "").strip()
+        ids = case_id_filter.get("ids")
+        id_set = {str(i).strip() for i in ids} if ids else None
+        filtered = [
+            s for s in pool
+            if (not prefix or s.upper().startswith(prefix.upper()))
+            and (id_set is None or s in id_set)
+        ]
+        if not filtered:
+            raise SystemExit(
+                f"[synthetic] case pool filter {case_id_filter!r} matched none of "
+                f"the {len(pool)} caseids in {chosen_tbl!r}. Check the prefix/ids "
+                f"against the '{chosen_col}' column."
+            )
+        print(
+            f"  [caseid] pool filtered to {len(filtered)}/{len(pool)} cases "
+            f"via {case_id_filter}"
+        )
+        pool = filtered
     return pool
 
 
@@ -1657,6 +1687,7 @@ def generate_synthetic_csv(
     strict: bool = True,
     repeat_count_overrides: Optional[Dict[str, int]] = None,
     coverage_trace_path: Optional[Path] = None,
+    case_id_filter: Optional[Dict[str, Any]] = None,
 ) -> Path:
     """Walk the form and write ``n_rows`` synthetic respondents to a wide CSV.
 
@@ -1729,7 +1760,7 @@ def generate_synthetic_csv(
     # synthetic ``case-NNNN`` form. Picked once, deterministically, off
     # the master seed -- so re-running with the same seed selects the
     # same caseids in the same order.
-    caseid_pool = _build_caseid_pool(questions, tables or {})
+    caseid_pool = _build_caseid_pool(questions, tables or {}, case_id_filter=case_id_filter)
     if caseid_pool:
         pool_rng = random.Random(f"{seed}::caseid_pool")
         shuffled = list(caseid_pool)

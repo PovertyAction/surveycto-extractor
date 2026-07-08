@@ -88,12 +88,34 @@ If your form has no `pulldata()` calls, this section doesn't apply — the
 generator runs fine with zero CSVs configured.
 
 If your form references `pulldata('foo', ...)` (in calculation,
-relevance, constraint, or choice_filter), the generator **must** find
-`foo.csv` in one of the configured `pulldata_search_dirs`. Missing CSVs
-raise `MissingPullDataError` with the list of search directories. There's
-no override flag — the synthetic CSV is essentially useless without
-pulldata (gated cascades won't populate, `search()` choice expansion
-can't resolve, and pulldata-derived columns stay blank).
+relevance, constraint, or choice_filter) **or** a select uses a
+`search('foo', ...)` appearance to pull its choices from a CSV, the
+generator **must** find `foo.csv` in one of the configured
+`pulldata_search_dirs`. Both are mandatory: missing CSVs raise
+`MissingPullDataError` with the list of search directories. There's no
+override flag — the simulation is essentially useless without the preload
+(gated cascades won't populate, `search()` choice expansion can't resolve,
+and pulldata-derived columns stay blank). A caller-ID / case-managed form
+is the clearest case: the screening gates read `pulldata('cases', 'wave', …)`
+etc., so **without `cases.csv` the survey body never opens**.
+
+### Running on a specific case context (`--case-prefix` / `--case-ids-file`)
+
+When the form is keyed on `${caseid}` (a `pulldata('cases', …, 'id', ${caseid})`
+lookup), the generator draws caseids from that table. Restrict the pool to run
+the simulation on a chosen case-management context:
+
+```bash
+# bench-test cases only -- their preload (wave, total_phones) drives the gates
+python main.py --survey s --phases synthetic --case-prefix BT
+# or an explicit id list (one per line) -- e.g. the exact cases a tester used
+python main.py --survey s --phases synthetic --case-ids-file bt_ids.txt
+```
+
+Equivalently, an answer sheet may carry `"directives": {"case_pool": {"prefix": "BT"}}`
+(or `{"ids": [...]}`) so the bench-test skill sets the case profile per scenario.
+A filter that matches no caseid is a hard error (you asked for a context that
+isn't in the table).
 
 Configure search dirs per-survey in `config.py`:
 

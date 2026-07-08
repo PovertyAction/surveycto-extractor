@@ -34,6 +34,12 @@ _STATIC_RX = re.compile(r"pulldata\(\s*'([^']+)'\s*,", re.IGNORECASE)
 # Dynamic-source pulldata call: pulldata(${var}, ...)
 _DYNAMIC_RX = re.compile(r"pulldata\(\s*\$\{([^}]+)\}\s*,", re.IGNORECASE)
 
+# search()-appearance choice source: search('csv', 'matches', ...). The choice
+# list is populated from this CSV at runtime, so it is just as mandatory for a
+# faithful simulation as a pulldata() call -- without it the select's real
+# options don't exist and the simulated column is wrong.
+_SEARCH_RX = re.compile(r"search\(\s*'([^']+)'", re.IGNORECASE)
+
 
 class MissingPullDataError(RuntimeError):
     """Raised when a referenced pulldata CSV cannot be found in any search dir."""
@@ -110,6 +116,10 @@ def scan_pulldata_refs(questions: Iterable[Dict[str, Any]]) -> Dict[str, Set[str
     Dynamic source names are the variable names appearing inside ``${...}``
     in the first arg position; resolution happens at row-generation time
     when those variables hold actual CSV-name values.
+
+    ``search('csv', ...)`` appearances are folded into ``static``: the choice
+    list of that select is populated from ``csv.csv``, so it is mandatory for a
+    faithful simulation exactly like a ``pulldata()`` source.
     """
     static: Set[str] = set()
     dynamic: Set[str] = set()
@@ -128,6 +138,11 @@ def scan_pulldata_refs(questions: Iterable[Dict[str, Any]]) -> Dict[str, Set[str
                 static.add(m.group(1))
             for m in _DYNAMIC_RX.finditer(expr):
                 dynamic.add(m.group(1))
+        # search()-appearance choice sources are mandatory too
+        appearance = q.get("appearance")
+        if appearance:
+            for m in _SEARCH_RX.finditer(appearance):
+                static.add(m.group(1))
     return {"static": static, "dynamic": dynamic}
 
 

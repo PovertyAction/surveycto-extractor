@@ -184,15 +184,19 @@ def _load_answer_files(paths):
     """Load one or more ``--answers-file`` JSON sheets for the scripted provider.
 
     Each file: ``{"answers": {var-or-suffixed-key: value, ...},
-    "directives": {"repeat_counts": {repeat_name: N, ...}}}``. Multiple files
-    merge in order (later wins). Returns ``(answers, repeat_counts)``. Scripted
+    "directives": {"repeat_counts": {repeat_name: N, ...},
+    "case_pool": {"prefix": "BT"} | {"ids": [...]}}}``. Multiple files merge in
+    order (later wins). Returns ``(answers, repeat_counts, case_pool)``. Scripted
     answers are inputs to gating -- an answer for a question the deterministic
     evaluator gates out is ignored, never forced (that is the separate
-    ``--force-value`` path)."""
+    ``--force-value`` path). ``case_pool`` restricts the caseid pool so the
+    simulation runs on a chosen case-management context (e.g. the bench-test
+    cases whose preload drives the caller-ID gates)."""
     answers = {}
     repeat_counts = {}
+    case_pool = {}
     if not paths:
-        return answers, repeat_counts
+        return answers, repeat_counts, case_pool
     for p in paths:
         path = Path(p)
         with path.open("r", encoding="utf-8") as f:
@@ -207,13 +211,16 @@ def _load_answer_files(paths):
         rc = (directives.get("repeat_counts") if isinstance(directives, dict) else {}) or {}
         if isinstance(rc, dict):
             repeat_counts.update({str(k): int(v) for k, v in rc.items()})
-    return answers, repeat_counts
+        cp = (directives.get("case_pool") if isinstance(directives, dict) else None)
+        if isinstance(cp, dict):
+            case_pool.update(cp)
+    return answers, repeat_counts, case_pool
 
 
 def run_synthetic_phase(
     survey_key: str, n_rows: int = 5, seed: int = 0,
     force_values=None, provider=None, strict: bool = True,
-    repeat_count_overrides=None, coverage_trace=None,
+    repeat_count_overrides=None, coverage_trace=None, case_id_filter=None,
 ):
     """Generate a SurveyCTO-shaped synthetic export CSV from questions.json.
 
@@ -287,6 +294,7 @@ def run_synthetic_phase(
         strict=strict,
         repeat_count_overrides=repeat_count_overrides,
         coverage_trace_path=coverage_trace_path,
+        case_id_filter=case_id_filter,
     )
     print()
 
@@ -376,6 +384,23 @@ def main():
              "answer came from). Default path <csv>.coverage.json; pass a PATH to "
              "override. Consumed by the bench-test skill."
     )
+    parser.add_argument(
+        "--case-prefix",
+        default=None,
+        metavar="PREFIX",
+        help="For --phases synthetic: draw caseids only from cases whose id "
+             "starts with PREFIX (case-insensitive), e.g. --case-prefix BT to run "
+             "on bench-test cases. Those cases' preload (wave, total_phones, ...) "
+             "then drives the caller-ID/screening gates, reproducing the case "
+             "context a tester used."
+    )
+    parser.add_argument(
+        "--case-ids-file",
+        default=None,
+        metavar="PATH",
+        help="For --phases synthetic: draw caseids only from the ids listed in "
+             "PATH (one per line). Combines with --case-prefix."
+    )
 
     args = parser.parse_args()
 
@@ -389,9 +414,18 @@ def main():
 
     synthetic_rows = args.rows if args.rows is not None else 5
     force_values = _parse_force_values(args.force_value)
-    scripted_answers, repeat_count_overrides = _load_answer_files(args.answers_file)
+    scripted_answers, repeat_count_overrides, case_pool = _load_answer_files(args.answers_file)
     synthetic_provider = ScriptedProvider(scripted_answers) if scripted_answers else None
     synthetic_strict = not args.legacy_fail_open_relevance
+    # caseid-pool filter: CLI --case-prefix / --case-ids-file merged over a
+    # directives.case_pool from the answer sheet.
+    case_id_filter = dict(case_pool)
+    if args.case_prefix:
+        case_id_filter["prefix"] = args.case_prefix
+    if args.case_ids_file:
+        with open(args.case_ids_file, encoding="utf-8") as f:
+            case_id_filter["ids"] = [ln.strip() for ln in f if ln.strip()]
+    case_id_filter = case_id_filter or None
 
     errors = []
     for survey_key in surveys:
@@ -408,6 +442,7 @@ def main():
                     strict=synthetic_strict,
                     repeat_count_overrides=repeat_count_overrides,
                     coverage_trace=args.coverage_trace,
+                    case_id_filter=case_id_filter,
                 )
                 continue
 
@@ -425,6 +460,7 @@ def main():
                     strict=synthetic_strict,
                     repeat_count_overrides=repeat_count_overrides,
                     coverage_trace=args.coverage_trace,
+                    case_id_filter=case_id_filter,
                 )
 
         except Exception as e:
