@@ -62,7 +62,12 @@ from generators.sampling import (
     numeric_bounds,
     sample_python_value,
 )
-from transformers.expression_evaluator import EvalContext, safe_evaluate
+from transformers.expression_evaluator import (
+    EvalContext,
+    ExpressionError,
+    evaluate,
+    safe_evaluate,
+)
 
 
 # ── SurveyCTO export metadata columns ─────────────────────────────────────────
@@ -656,32 +661,87 @@ def _grid_combos(
     yield from product(*ranges)
 
 
+_GATE_REF_RE = re.compile(r"\$\{([^}]+)\}")
+
+
+@dataclass
+class GateDecision:
+    """The outcome of the deterministic gate authority for one question.
+
+    ``relevant`` is the only field the walker acts on; the rest are diagnostics
+    the coverage trace surfaces (which clause closed the gate, the resolved
+    operand values, and whether the clause was un-evaluable)."""
+
+    relevant: bool
+    failing_kind: Optional[str] = None        # "group_relevance" | "relevance"
+    failing_expr: Optional[str] = None
+    failing_operands: Optional[Dict[str, Any]] = None   # resolved ${ref} -> value
+    unevaluable: bool = False
+    error: Optional[str] = None
+
+
 def _is_relevant(
     question: Dict[str, Any],
     ctx: EvalContext,
     strip_log: StripLog,
     var_label: str,
-) -> bool:
+    strict: bool = True,
+) -> GateDecision:
     """Effective relevance = all group_relevances ∧ own relevance.
 
-    Errors / unsupported functions default to True (show the question),
-    matching the "structurally include rather than silently hide" principle.
+    Distinguishes two failure shapes that the old ``safe_evaluate(default=True)``
+    collapsed:
+
+    * *validly false* -- the clause evaluated to a defined falsy value (e.g.
+      ``${age} < 18`` with age=25, or a comparison against a blank field which
+      is NaN). Legitimate gating; the cell is blanked.
+    * *un-evaluable* -- ``evaluate`` raised ``ExpressionError`` (parse error /
+      unsupported function). In ``strict`` mode (default) this fails CLOSED: we
+      do not fabricate a cell we cannot prove SurveyCTO would show, and we
+      record it loudly (strip.log + coverage trace). ``strict=False`` restores
+      the historical fail-open behaviour (show the question).
     """
 
-    def _on_err(expr: str, exc: Exception) -> None:
-        strip_log.record(var_label, "relevance", expr, exc)
+    def _operands(expr: str) -> Dict[str, Any]:
+        ops: Dict[str, Any] = {}
+        for ref in _GATE_REF_RE.findall(expr or ""):
+            try:
+                ops[ref] = ctx.get_var(ref)
+            except Exception:  # pragma: no cover -- get_var is defensive itself
+                ops[ref] = None
+        return ops
+
+    def _check(expr: str, kind: str) -> Optional[GateDecision]:
+        try:
+            v = evaluate(expr, ctx)
+        except ExpressionError as exc:
+            strip_log.record(var_label, "relevance", expr, exc)
+            return GateDecision(
+                relevant=(not strict),
+                failing_kind=kind, failing_expr=expr,
+                failing_operands=_operands(expr),
+                unevaluable=True, error=str(exc),
+            )
+        if not _truthy(v):
+            return GateDecision(
+                relevant=False, failing_kind=kind, failing_expr=expr,
+                failing_operands=_operands(expr),
+            )
+        return None  # this clause passed
 
     for gr in question.get("group_relevances") or []:
         if gr is None or str(gr).strip() == "":
             continue
-        v = safe_evaluate(gr, ctx, default=True, on_error=_on_err)
-        if not _truthy(v):
-            return False
+        d = _check(gr, "group_relevance")
+        if d is not None:
+            return d
     rel = question.get("relevance")
     if rel is None or str(rel).strip() == "":
-        return True
-    v = safe_evaluate(rel, ctx, default=True, on_error=_on_err)
-    return _truthy(v)
+        return GateDecision(relevant=True)
+    d = _check(rel, "relevance")
+    if d is not None:
+        return d
+    return GateDecision(relevant=True)
 
 
 def _truthy(v: Any) -> bool:
@@ -827,6 +887,7 @@ def _walk_one(
     geo_bbox: Optional[Tuple[float, float, float, float]] = None,
     pulldata_tables: Optional[Dict[str, Any]] = None,
     provider: Optional[AnswerProvider] = None,
+    strict: bool = True,
 ) -> WalkResult:
     """Generate one respondent's row.
 
@@ -913,7 +974,7 @@ def _walk_one(
             for combo in _enumerate_combos(ancestors, counts):
                 col = f"{var_name}{_suffix(combo)}"
                 ctx = _make_ctx(col, list(zip(ancestors, combo)))
-                if not _is_relevant(q, ctx, strip_log, col):
+                if not _is_relevant(q, ctx, strip_log, col, strict).relevant:
                     slot[combo] = 0
                     row[col] = ""
                     continue
@@ -940,7 +1001,7 @@ def _walk_one(
                 # as relevant and write the forced value. This is the only
                 # way to make a gated-cascade actually populate when the
                 # gating ancestor would have randomly evaluated false.
-                if forced is None and not _is_relevant(q, ctx, strip_log, key):
+                if forced is None and not _is_relevant(q, ctx, strip_log, key, strict).relevant:
                     row[key] = ""
                     if q_type == "select_multiple":
                         for c in choices:
@@ -980,7 +1041,7 @@ def _walk_one(
         ctx = _make_ctx(var_name, [])
         forced = force_values.get(var_name)
         # --force-value bypasses relevance (see in-repeat branch above).
-        if forced is None and not _is_relevant(q, ctx, strip_log, var_name):
+        if forced is None and not _is_relevant(q, ctx, strip_log, var_name, strict).relevant:
             row[var_name] = ""
             if q_type == "select_multiple":
                 for c in choices:
@@ -1303,6 +1364,7 @@ def generate_synthetic_csv(
     geo_bbox: Optional[Tuple[float, float, float, float]] = None,
     form_settings: Optional[Dict[str, Any]] = None,
     provider: Optional[AnswerProvider] = None,
+    strict: bool = True,
 ) -> Path:
     """Walk the form and write ``n_rows`` synthetic respondents to a wide CSV.
 
@@ -1398,7 +1460,7 @@ def generate_synthetic_csv(
             questions, repeats, sample_rng, rctx, pulldata_lookup,
             choices_lookup, var_to_choice_list, log,
             force_values=force_values, geo_bbox=geo_bbox,
-            pulldata_tables=tables, provider=provider,
+            pulldata_tables=tables, provider=provider, strict=strict,
         )
 
     # ── Pass 1: collect repeat_counts per respondent; drop rows.
@@ -1431,7 +1493,7 @@ def generate_synthetic_csv(
                 questions, repeats, sample_rng, rctx, pulldata_lookup,
                 choices_lookup, var_to_choice_list, strip_log,
                 force_values=force_values, geo_bbox=geo_bbox,
-                pulldata_tables=tables, provider=provider,
+                pulldata_tables=tables, provider=provider, strict=strict,
             )
             writer.writerow(_row_to_csv_dict(result.row, rctx, column_order))
 
