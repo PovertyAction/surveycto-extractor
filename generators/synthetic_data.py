@@ -1229,6 +1229,8 @@ def _walk_one(
                         )
                     slot[combo] = n
                     row[col] = n
+                    if _tracing and col in cell_trace and cell_trace[col].get("asked"):
+                        cell_trace[col]["source"] = "directive" if override is not None else "count"
                 continue
 
             # ── Variables inside one or more repeats: expand over the full chain

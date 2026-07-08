@@ -89,6 +89,20 @@ def test_trace_records_fixpoint_passes_on_forward_ref(tmp_path):
     assert row["cells"]["early"]["asked"] is True
 
 
+def test_trace_labels_repeat_count_source(tmp_path):
+    """A repeat_count cell is labelled 'directive' when pinned, 'count' otherwise
+    (regression: it used to record source=None)."""
+    form = [
+        {"type": "repeat_count", "variable_name": "m_count",
+         "repeat_group_name": "m", "group_path": []},
+        {"type": "text", "variable_name": "mname", "group_path": ["m"]},
+    ]
+    _, pinned = _run_trace(tmp_path / "pin", form, repeat_count_overrides={"m": 2})
+    _, sampled = _run_trace(tmp_path / "smp", form)
+    assert pinned["rows"][0]["cells"]["m_count"]["source"] == "directive"
+    assert sampled["rows"][0]["cells"]["m_count"]["source"] == "count"
+
+
 def test_trace_is_write_only_csv_unchanged(tmp_path):
     form = [
         {"type": "text", "variable_name": "name", "group_path": []},

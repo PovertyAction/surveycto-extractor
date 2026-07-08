@@ -69,8 +69,22 @@ def test_expand_writes_sheets_and_manifest_deterministically(tmp_path):
     assert seeds == [bs._variation_seed(10, "alpha", v) for v in (1, 2, 3)]
 
 
-def _trace(cells):
-    return {"n_rows": 1, "aggregate": {}, "rows": [{"key": "uuid:1", "cells": cells}]}
+def _trace(cells, **row_extra):
+    row = {"key": "uuid:1", "cells": cells}
+    row.update(row_extra)
+    return {"n_rows": 1, "aggregate": {}, "rows": [row]}
+
+
+def test_rejections_flags_invalid_and_unevaluable(tmp_path):
+    dirty = _write(tmp_path / "dirty.json", _trace(
+        {"rel_2": {"var": "rel", "asked": True,
+                   "source": "scripted_invalid_fallback", "note": "'3' not in choices"}},
+        unevaluable_gates=[{"key": "q9", "expr": "bad-fn()", "error": "unsupported function"}],
+    ))
+    clean = _write(tmp_path / "clean.json", _trace(
+        {"rel_2": {"var": "rel", "asked": True, "source": "scripted"}}))
+    assert bs.main(["rejections", "--trace", str(dirty)]) == 1
+    assert bs.main(["rejections", "--trace", str(clean)]) == 0
 
 
 def test_report_pass_and_fail(tmp_path):

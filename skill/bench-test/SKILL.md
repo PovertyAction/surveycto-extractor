@@ -73,8 +73,8 @@ hit or skip. One situation becomes one scenario (fill subagents run per
 scenario/variation in step 4).
 
 **(b) Auto-derived (fallback / augmentation).** If the user gives no scenarios
-(or wants more coverage), propose ~6-10 yourself, spanning what an HFC needs to
-exercise:
+(or wants more coverage), propose the number they asked for in step 3 (default
+~6-8), spanning what an HFC needs to exercise:
 - **realistic-normal** coherent households (baseline distributions, real correlations),
 - **plausible edge/outlier** respondents (boundary ages, large rosters, rare-but-valid combos),
 - **should-trip-a-check** cases (internally inconsistent, straightlining, speeding, duplicate-like).
@@ -83,12 +83,18 @@ Each scenario: `{id, title, persona, must_hit:{var:value}, expect:{reach:[...], 
 Write them to `<output_dir>/<survey>_cases.json` (the source of truth + a
 reproducibility artifact the user can edit).
 
-### 3. Confirm with the user
-Present the scenarios with `AskUserQuestion` (multiSelect: which to run) and a
-second question for variations-per-scenario and how many stochastic **bulk** rows
-to add. Then run:
-`python bench_scenarios.py validate --cases <cases.json> --questions <questions.json>`
-and fix any FAIL before generating.
+### 3. Confirm scope with the user (ask -- do not assume)
+BEFORE deriving or generating, ask with `AskUserQuestion`:
+1. **How many scenarios / interesting cases, and how much coverage** -- e.g.
+   "a few (3-4, just the key paths)" / "moderate (6-8, main branches + common edges)" /
+   "thorough (10+, exhaustive branch + sentinel coverage)". Use the answer to size how many
+   scenarios you derive in step 2b (or which of a user-supplied set to run).
+2. **Variations per scenario** (rows each) and how many stochastic **bulk** rows to add.
+
+Then present the concrete scenarios (`AskUserQuestion` multiSelect: which to run), write the
+accepted set to `<survey>_cases.json`, and run
+`python bench_scenarios.py validate --cases <cases.json> --questions <questions.json>`,
+fixing any FAIL before generating.
 
 ### 4. Generate (coherent cases + stochastic bulk -> one dataset)
 `python bench_scenarios.py expand --cases <cases.json> --variations N --seed S --out <run_dir>`
@@ -105,6 +111,17 @@ python main.py --survey <key> --phases synthetic --rows 1 \
     --seed <run.seed> --answers-file <run.answers_file> \
     --coverage-trace <run_dir>/<scenario>_v<NN>.coverage.json
 ```
+
+**Repair rejected answers (do this after every fill).** Run
+`python bench_scenarios.py rejections --trace <run_dir>/<scenario>_v<NN>.coverage.json`.
+It lists any scripted answer the engine *refused* (value out of the question's choices/
+constraint -- frequently a **dynamic choice_filter** that narrows the list per row, so a value
+legal in the abstract is illegal for this respondent) and any un-evaluable gate. For each
+rejection, fix the answer sheet -- pick a value valid under the filter, or set the filter's
+input variables so the intended value becomes valid -- and re-run that variation. Repeat until
+the trace is clean, or **accept-and-note** a residual: a value the form genuinely disallows for
+that respondent is itself a finding, not something to force. (The engine never wrote the
+illegal value; it fell back to a sampled one, so the CSV is always legal.)
 
 Add the stochastic **bulk** (no answers file) as one more run, then concatenate
 all per-run CSVs into the final `<survey>_synthetic.csv` (headers align because

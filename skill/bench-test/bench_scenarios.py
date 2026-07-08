@@ -271,6 +271,33 @@ def _fmt_reason(reasons):
     return "gate closed"
 
 
+def cmd_rejections(args) -> int:
+    """Surface everything in a coverage trace that a fill subagent should repair:
+    scripted answers that were refused (invalid -> sampled fallback) and gates
+    that could not be evaluated. Exit code 1 if anything was found, so a repair
+    loop can gate on it."""
+    trace = json.loads(Path(args.trace).read_text(encoding="utf-8"))
+    rejected, unevaluable = [], []
+    for row in trace.get("rows", []):
+        rk = row.get("key")
+        for key, cell in row.get("cells", {}).items():
+            if cell.get("source") == "scripted_invalid_fallback":
+                rejected.append((rk, key, cell.get("var"), cell.get("note")))
+        for u in row.get("unevaluable_gates", []):
+            unevaluable.append((rk, u.get("key"), u.get("expr"), u.get("error")))
+    if rejected:
+        print(f"REJECTED scripted answers ({len(rejected)}) -- value refused, sampled instead:")
+        for rk, key, var, note in rejected:
+            print(f"  [{rk}] {key} ({var}): {note}")
+    if unevaluable:
+        print(f"UN-EVALUABLE gates ({len(unevaluable)}) -- relevance could not be evaluated:")
+        for rk, key, expr, err in unevaluable:
+            print(f"  [{rk}] {key}: {expr}  -> {err}")
+    if not rejected and not unevaluable:
+        print("clean: no rejected answers, no un-evaluable gates.")
+    return 1 if (rejected or unevaluable) else 0
+
+
 def _find_trace(run: dict, trace_dir: str):
     """Locate the coverage trace for a run. Convention: the fill writes
     <scenario>_v<NN>.coverage.json into trace_dir."""
@@ -303,6 +330,11 @@ def main(argv=None) -> int:
     pr.add_argument("--trace-dir", required=True)
     pr.add_argument("--out", required=True)
     pr.set_defaults(func=cmd_report)
+
+    pj = sub.add_parser("rejections",
+                        help="List refused scripted answers + un-evaluable gates in a trace")
+    pj.add_argument("--trace", required=True)
+    pj.set_defaults(func=cmd_rejections)
 
     args = p.parse_args(argv)
     return args.func(args)
