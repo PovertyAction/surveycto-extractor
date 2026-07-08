@@ -48,7 +48,7 @@ import uuid
 from dataclasses import dataclass, field, replace as _dc_replace
 from itertools import product
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterator, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Optional, Protocol, Set, Tuple
 
 from extractors.pulldata_loader import (
     MissingPullDataError,
@@ -146,6 +146,56 @@ class StripLog:
             f.write(f"# {len(self.entries)} expressions could not be evaluated.\n\n")
             for var, kind, expr, msg in self.entries:
                 f.write(f"[{var}] {kind}: {expr!r}\n  -> {msg}\n")
+
+
+# ── Answer-provider seam ──────────────────────────────────────────────────────
+# The walker decides GATING deterministically; where a value comes from for a
+# question the gate has already opened is injectable. The default (provider is
+# None) is the historical stochastic sampler and is byte-identical. A supplied
+# provider (e.g. a scripted answer sheet from the bench-test skill) can only
+# ever be consulted for a cell the gate authority already marked as asked, so
+# no answer source can populate a gated-out cell -- skip logic stays ironclad.
+
+@dataclass
+class AnswerRequest:
+    """Everything a provider needs to decide one (already-relevant) answer."""
+
+    var_name: str                       # base, unsuffixed form name
+    key: str                            # suffixed column key (e.g. "mem_1_2")
+    q_type: str
+    question: Dict[str, Any]
+    choices: List[Dict[str, Any]]       # ALREADY narrowed by choice_filter
+    constraint: Optional[str]
+    rng: random.Random                  # the per-respondent sample_rng
+    ctx: EvalContext                    # for constraint validation via `.`
+    sampler_kwargs: Dict[str, Any]      # geo_bbox / appearance / now
+    combo: Tuple[int, ...]              # repeat iteration indices ( () at top level )
+
+
+@dataclass
+class AnswerResult:
+    value: Any
+    source: str                         # "stochastic" | "scripted" | "scripted_invalid_fallback"
+    note: Optional[str] = None
+
+
+class AnswerProvider(Protocol):
+    def provide(self, req: AnswerRequest) -> AnswerResult: ...
+
+
+class DefaultStochasticProvider:
+    """The historical behaviour, wrapped as a provider. Only used when a caller
+    explicitly wants stochastic fills alongside a scripted provider; the
+    ``provider is None`` fast path in ``_compute_value`` is what keeps the plain
+    stochastic run byte-identical."""
+
+    def provide(self, req: AnswerRequest) -> AnswerResult:
+        return AnswerResult(
+            sample_python_value(
+                req.q_type, req.choices, req.constraint, req.rng, **req.sampler_kwargs
+            ),
+            "stochastic",
+        )
 
 
 # ── Run-context for metadata + ids ────────────────────────────────────────────
@@ -776,6 +826,7 @@ def _walk_one(
     force_values: Optional[Dict[str, str]] = None,
     geo_bbox: Optional[Tuple[float, float, float, float]] = None,
     pulldata_tables: Optional[Dict[str, Any]] = None,
+    provider: Optional[AnswerProvider] = None,
 ) -> WalkResult:
     """Generate one respondent's row.
 
@@ -903,7 +954,7 @@ def _walk_one(
                 else:
                     value = _compute_value(
                         q, q_type, choices, constraint, ctx, rng, runctx,
-                        strip_log, key, geo_bbox,
+                        strip_log, key, geo_bbox, provider,
                     )
                 if q_type == "select_multiple":
                     # Store the formatted space-separated string in the row
@@ -943,7 +994,7 @@ def _walk_one(
         else:
             value = _compute_value(
                 q, q_type, choices, constraint, ctx, rng, runctx,
-                strip_log, var_name, geo_bbox,
+                strip_log, var_name, geo_bbox, provider,
             )
         if q_type == "select_multiple":
             # Store the formatted space-separated string (not the raw list)
@@ -987,6 +1038,7 @@ def _compute_value(
     strip_log: StripLog,
     var_label: str,
     geo_bbox: Optional[Tuple[float, float, float, float]] = None,
+    provider: Optional[AnswerProvider] = None,
 ) -> Any:
     """Compute a Python value for one (relevance-true) question."""
 
@@ -1045,7 +1097,26 @@ def _compute_value(
     # across passes and re-runs at the same seed (a midnight-straddling run
     # would otherwise shift max_offset between passes). (#28 determinism nit)
     sampler_kwargs["now"] = runctx.submission_date
-    return sample_python_value(q_type, narrowed_choices, constraint, rng, **sampler_kwargs)
+
+    # Value-selection seam. The default path (no provider) is the historical
+    # sampler call, byte-for-byte. A provider is reached only here -- i.e. only
+    # for a question the gate authority already decided is asked -- so a
+    # scripted/LLM value can never populate a gated-out cell.
+    if provider is None:
+        return sample_python_value(q_type, narrowed_choices, constraint, rng, **sampler_kwargs)
+    req = AnswerRequest(
+        var_name=question.get("variable_name", "") or var_label,
+        key=var_label,
+        q_type=q_type,
+        question=question,
+        choices=narrowed_choices,
+        constraint=constraint,
+        rng=rng,
+        ctx=ctx,
+        sampler_kwargs=sampler_kwargs,
+        combo=tuple(idx for _, idx in ctx.repeat_stack),
+    )
+    return provider.provide(req).value
 
 
 def _narrow_choices(
@@ -1231,6 +1302,7 @@ def generate_synthetic_csv(
     force_values: Optional[Dict[str, str]] = None,
     geo_bbox: Optional[Tuple[float, float, float, float]] = None,
     form_settings: Optional[Dict[str, Any]] = None,
+    provider: Optional[AnswerProvider] = None,
 ) -> Path:
     """Walk the form and write ``n_rows`` synthetic respondents to a wide CSV.
 
@@ -1326,7 +1398,7 @@ def generate_synthetic_csv(
             questions, repeats, sample_rng, rctx, pulldata_lookup,
             choices_lookup, var_to_choice_list, log,
             force_values=force_values, geo_bbox=geo_bbox,
-            pulldata_tables=tables,
+            pulldata_tables=tables, provider=provider,
         )
 
     # ── Pass 1: collect repeat_counts per respondent; drop rows.
@@ -1359,7 +1431,7 @@ def generate_synthetic_csv(
                 questions, repeats, sample_rng, rctx, pulldata_lookup,
                 choices_lookup, var_to_choice_list, strip_log,
                 force_values=force_values, geo_bbox=geo_bbox,
-                pulldata_tables=tables,
+                pulldata_tables=tables, provider=provider,
             )
             writer.writerow(_row_to_csv_dict(result.row, rctx, column_order))
 
