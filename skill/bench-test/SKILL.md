@@ -47,6 +47,17 @@ fills values. Two flags matter here (see `docs/synthetic-generator.md`):
 - `--coverage-trace [PATH]` -- write `<csv>.coverage.json`: per row, which cells
   were asked vs gated (with the failing gate expression + resolved operands) and
   where each answer came from. This is how you verify a scenario reached its path.
+- **case context** -- `--case-prefix` / `--case-ids-file`, or a scenario's
+  `"directives": {"case_pool": {"prefix": "BT"} | {"ids": [...]}}`, restricts the
+  caseid pool. For a case-managed form the screening gates read
+  `pulldata('cases', 'wave'/'total_phones', ${caseid})`, so **which case is drawn
+  decides whether the survey body opens -- answers alone cannot**. This is often
+  the single most important knob; see step 1's detection note.
+
+**Preload is mandatory.** A form that uses `pulldata()` or `search()`-appearance
+choices hard-errors without those CSVs -- confirm `pulldata_search_dirs` holds
+`cases.csv` and any choice CSVs before running. A simulation without the preload
+is meaningless (gated cascades never populate).
 
 `bench_scenarios.py` (next to this file) does the deterministic glue:
 `validate` (check must-hit answers), `expand` (materialise per-variation sheets +
@@ -60,6 +71,15 @@ to orient, `get_repeat_structure` for roster/count axes, `search_questions` +
 `get_choice_list` for key variables and their domains (incl. sentinels
 -99/-88/-666), and `get_gate_chain` / `get_variable_neighborhood` to learn which
 answers open which sections (so a scenario's answers are internally consistent).
+
+**Detect a case-managed / two-stage form.** Check whether a caller-ID or
+screening section gates the survey body -- tell-tale signs: `pulldata('cases', …,
+${caseid})` lookups and calculated gates like `right_respondent` / `wave` /
+`phone_response`. If so, **the survey body is gated by the case preload, not by
+answers**: reaching it needs the right *case context* (a scenario's
+`directives.case_pool`, step 2), and the tester's own bench data typically lived
+in a labelled subset of `cases.csv` (e.g. ids prefixed `BT`). Don't try to open
+these gates by answering -- pick the cases.
 
 ### 2. Gather scenarios (two sources -- use either or both)
 
@@ -79,7 +99,15 @@ scenario/variation in step 4).
 - **plausible edge/outlier** respondents (boundary ages, large rosters, rare-but-valid combos),
 - **should-trip-a-check** cases (internally inconsistent, straightlining, speeding, duplicate-like).
 
-Each scenario: `{id, title, persona, must_hit:{var:value}, expect:{reach:[...], block_at:[...]}, n_rows}`.
+Each scenario: `{id, title, persona, must_hit:{var:value}, expect:{reach:[...],
+block_at:[...]}, directives?:{case_pool:{...}, repeat_counts:{...}}, n_rows}`.
+For a **case-managed form**, set `directives.case_pool` (`{"prefix":"BT"}` or
+`{"ids":[...]}`) to the case profile that opens the intended path -- the
+screening calculates (`wave`, `total_phones`) then resolve from those cases --
+and let `must_hit` supply the caller-ID answers (call response, right-respondent
+confirmation, availability). A scenario is **{case profile + answers}**, not
+answers alone. `expand` copies `directives` into each answer sheet, so the fill
+picks the case pool up automatically.
 Write them to `<output_dir>/<survey>_cases.json` (the source of truth + a
 reproducibility artifact the user can edit).
 

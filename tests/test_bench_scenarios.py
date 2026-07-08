@@ -52,6 +52,7 @@ def test_validate_accepts_suffixed_key(tmp_path):
 def test_expand_writes_sheets_and_manifest_deterministically(tmp_path):
     cases = _write(tmp_path / "c.json", {"survey": "s", "scenarios": [
         {"id": "alpha", "must_hit": {"consent": "1"},
+         "directives": {"case_pool": {"prefix": "BT"}},
          "expect": {"reach": ["name"]}, "n_rows": 3},
     ]})
     out = tmp_path / "run"
@@ -62,6 +63,8 @@ def test_expand_writes_sheets_and_manifest_deterministically(tmp_path):
                       "alpha_v03.answers.json"]
     sheet = json.loads((out / "alpha_v01.answers.json").read_text(encoding="utf-8"))
     assert sheet["answers"] == {"consent": "1"}
+    # directives (incl. the case_pool profile) flow into each answer sheet
+    assert sheet["directives"]["case_pool"] == {"prefix": "BT"}
     manifest = json.loads((out / "run_manifest.json").read_text(encoding="utf-8"))
     assert len(manifest["runs"]) == 3
     seeds = [r["seed"] for r in manifest["runs"]]
