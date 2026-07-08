@@ -88,7 +88,8 @@ except ModuleNotFoundError:
 
     def _fb_meanings(config=None):
         ov = getattr(config, "SENTINEL_MEANINGS", None) if config is not None else None
-        return {int(k): tuple(v) for k, v in ov.items()} if ov else dict(_DEFAULT_MEANINGS)
+        # `is not None` (not truthiness): an empty {} is a deliberate override. (#6)
+        return {int(k): tuple(v) for k, v in ov.items()} if ov is not None else dict(_DEFAULT_MEANINGS)
 
     def _fb_scan_only(config=None):
         ov = getattr(config, "SENTINEL_SCAN_ONLY", None) if config is not None else None
@@ -543,6 +544,12 @@ class QuestionIndex:
     # repeat_group_name). Used to gate the suffix matcher so it only stamps
     # repeat_iteration on a field that actually lives inside a repeat. (#26.2)
     repeat_group_names: set = field(default_factory=set)
+    # True when the bridge JSON has repeat_count questions but NONE carry a
+    # repeat_group_name (stale/old bridge, or a name that diverges from the
+    # group_path) -- so repeat_group_names is empty despite repeats existing.
+    # In that degraded case the matcher falls back to suffix-based iteration
+    # stamping rather than dropping all repeat metadata. (review #8)
+    repeat_detection_degraded: bool = False
 
 
 def _build_question_index(questions: List[Dict]) -> QuestionIndex:
@@ -591,10 +598,21 @@ def _build_question_index(questions: List[Dict]) -> QuestionIndex:
                   f"fallback for this name to avoid silent ambiguity")
 
     repeat_group_names = _repeat_group_names(questions)
+    # Degraded when repeats clearly exist (there are repeat_count questions) but
+    # none declare a repeat_group_name, so the precise gate would be empty. Warn
+    # once here (index built once per survey) rather than per column. (review #8)
+    has_repeat_counts = any(q.get('type') == 'repeat_count' for q in questions)
+    degraded = (not repeat_group_names) and has_repeat_counts
+    if degraded:
+        print("  [WARN] repeat_count questions present but none carry a "
+              "repeat_group_name (stale/old bridge JSON?). Falling back to "
+              "suffix-based repeat-iteration stamping; regenerate questions.json "
+              "via `main.py --phases json` for precise repeat detection.")
 
     return QuestionIndex(exact=exact, lower=lower, trunc32=trunc32,
                          lower_trunc32=lower_trunc32,
-                         repeat_group_names=repeat_group_names)
+                         repeat_group_names=repeat_group_names,
+                         repeat_detection_degraded=degraded)
 
 
 def _repeat_group_names(questions: List[Dict]) -> set:
@@ -838,7 +856,11 @@ def adjust_skip_logic_for_repeats(metadata: Dict, var_name: str, questions: List
             adjusted = adjust_variable_refs(relevance, repeat_groups, iteration, questions, _index=_index)
             adjusted = replace_index_function(adjusted, iteration)
             converted = LogicConverter.convert_to_stata(adjusted, types, codes, var_name)
-            adjusted_relevances.append(converted)
+            # convert_to_stata returns None for an always-false ("0") / empty
+            # relevance; don't append nulls into the iteration-specific list.
+            # (review #10)
+            if converted is not None:
+                adjusted_relevances.append(converted)
         metadata['group_relevances_iteration_specific'] = adjusted_relevances
 
     return metadata
@@ -936,7 +958,14 @@ def determine_variable_source(var_name: str, questions: List[Dict],
 
     base_name = question['variable_name']
     rgs = _index.repeat_group_names if _index is not None else _repeat_group_names(questions)
-    in_repeat = _question_in_repeat(question, rgs)
+    # Degraded fallback (review #8): when the bridge has repeat_count questions
+    # but no repeat_group_name mapping, gate on the numeric suffix alone rather
+    # than dropping every repeat column to its base. A survey with genuinely no
+    # repeats has no repeat_count questions, so degraded stays False and the
+    # #26.2 `income2`-off-`income` false positive is NOT reintroduced.
+    degraded = (_index.repeat_detection_degraded if _index is not None
+                else ((not rgs) and any(q.get('type') == 'repeat_count' for q in questions)))
+    in_repeat = _question_in_repeat(question, rgs) or degraded
     q_is_sm = question.get('type') == 'select_multiple'
     choice_values = [str(c.get('value', '')) for c in (question.get('choices') or [])]
 
@@ -1039,6 +1068,13 @@ def create_variable_dictionary(
 ) -> pd.DataFrame:
     """Create comprehensive variable dictionary."""
     print(f"\nCreating {dataset_name} variable dictionary...")
+    # Clear the id()-keyed type/choice cache at the start of each survey. In a
+    # multi-survey run (main() loops over DATASETS, rebinding `questions`), a
+    # freed list's address can be reused by the next survey's list, so a stale
+    # entry would hand survey B survey A's type/choice maps -> wrong
+    # selected()/count-selected() expansion, silently. Clearing per survey keeps
+    # within-survey memoization while removing the cross-survey aliasing. (review #7)
+    _TYPE_CHOICE_CACHE.clear()
     records = []
     if minmax is None:
         minmax = {}

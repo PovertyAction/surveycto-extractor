@@ -871,8 +871,24 @@ class LogicConverter:
         # could not match as a bare identifier -- e.g. substr(v, 1, 1) = '0'.
         # Single quotes are never valid in a Stata if-expr, so convert the pair
         # to a double-quoted string literal. (#27.1, generalised)
+        #
+        # But these patterns are not literal-aware, so a single quote sitting
+        # INSIDE an already-emitted double-quoted needle -- e.g. step 8's
+        # strpos(x, "a='b'") -- would be mistaken for a comparison operand and
+        # corrupt the needle (-> "a= "b""). Mask the double-quoted needles for
+        # the duration of these two rewrites so only genuine top-level single-
+        # quoted operands are converted, then restore. (review #9)
+        _dq_needles: List[str] = []
+
+        def _mask_dq(m: 're.Match') -> str:
+            _dq_needles.append(m.group(0))
+            return f'__DQ_NEEDLE_{len(_dq_needles) - 1}__'
+
+        expr = re.sub(r'"[^"]*"', _mask_dq, expr)
         expr = re.sub(r"(!=|<=|>=|==?|<|>)\s*'([^']*)'", r'\1 "\2"', expr)
         expr = re.sub(r"'([^']*)'\s*(!=|<=|>=|==?|<|>)", r'"\1" \2', expr)
+        for _i, _needle in enumerate(_dq_needles):
+            expr = expr.replace(f'__DQ_NEEDLE_{_i}__', _needle)
 
         # --- Step 12e: mask string literals from the late-stage rewrites -----
         # Everything up to here needs real quotes (step 3b consumes quoted
@@ -1011,6 +1027,15 @@ class LogicConverter:
         "min", "max",
     })
 
+    # Math functions valid AS-IS in Stata that the converter passes through
+    # untranslated (same name in SurveyCTO and Stata). These are NOT leaks --
+    # e.g. `round(a) > 5` is legitimate Stata output -- so structural_issues
+    # must not flag them. (review #12)
+    _STATA_PASSTHROUGH = frozenset({
+        "round", "sqrt", "abs", "floor", "ceil", "exp", "ln", "log",
+        "log10", "sign", "trunc",
+    })
+
     @staticmethod
     def _remove_double_quoted(s: str) -> str:
         """Replace double-quoted literal spans (the converter's own emissions,
@@ -1072,8 +1097,12 @@ class LogicConverter:
         if re.search(r'!\s*(?:$|[&|,)])', bare):
             issues.append("dangling !")
 
-        for m in re.finditer(r'\b([a-z][a-z0-9:-]*)\s*\(', bare):
-            if m.group(1) not in LogicConverter._EMIT_WHITELIST:
+        # Case-insensitive so an uppercase leak (e.g. PULLDATA(...)) is caught
+        # too; normalize before the whitelist check. (review #12)
+        for m in re.finditer(r'\b([a-z][a-z0-9:-]*)\s*\(', bare, flags=re.IGNORECASE):
+            name = m.group(1).lower()
+            if (name not in LogicConverter._EMIT_WHITELIST
+                    and name not in LogicConverter._STATA_PASSTHROUGH):
                 issues.append(f"leaked function: {m.group(1)}()")
 
         return issues

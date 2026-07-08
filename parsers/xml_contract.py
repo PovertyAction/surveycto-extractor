@@ -326,10 +326,13 @@ class FormContract:
             "is_select_multiple": chosen.is_select_multiple,
             "ambiguous": len(candidates) > 1,
         }
-        # Ragged: fewer repeat indices than the node's repeat depth. SurveyCTO
-        # normally emits all levels, so flag it instead of silently truncating
-        # the level assignment. (#23.2)
-        if len(rep_idxs) < n_iter:
+        # Ragged: the number of repeat indices doesn't match the node's repeat
+        # depth. SurveyCTO normally emits exactly one index per level, so flag a
+        # mismatch instead of silently truncating (over-indexed: the zip above
+        # drops surplus indices) or under-assigning levels. Was `< n_iter`, which
+        # missed the over-indexed case (e.g. member_age_3_4 on a depth-1 field
+        # dropped the trailing 4 with no flag). (#23.2 / review #11)
+        if len(rep_idxs) != n_iter:
             result["ragged"] = True
         return result
 

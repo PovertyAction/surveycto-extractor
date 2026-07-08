@@ -169,6 +169,14 @@ class TestMapColumn:
         m = contract.map_column("member_name")   # depth 1, zero indices
         assert m.get("ragged") is True
 
+    def test_ragged_over_indexed_repeat_flagged(self, contract):
+        # More indices than the node's depth must ALSO be flagged: the zip
+        # truncation would otherwise drop the surplus index silently. Was only
+        # flagged for the under-indexed case (< n_iter). (#23.2 / review #11)
+        m = contract.map_column("member_name_3_4")   # depth 1, two indices
+        assert m["node_path"] == "members/member_name"
+        assert m.get("ragged") is True
+
 
 class TestBalancedArgParsing:
     """#23.4 -- search()/pulldata() args parsed balanced + quote-aware."""
