@@ -56,7 +56,9 @@ Per respondent the walker:
 | `--phases synthetic` | included in default `all` | Run the synthetic generator. (`json` must have been run already.) `--phases all` (the CLI default) runs `csv`, `json`, `sections`, **and** `synthetic`; explicit `--phases synthetic` runs only the generator. |
 | `--rows N` | 5 | Number of synthetic respondents. |
 | `--seed K` | 0 | RNG seed. Same `--seed` produces **byte-identical** CSV output across runs on the same day. |
-| `--force-value VAR=VAL` | — | Force one or more variables to specific values, bypassing relevance. May be repeated, or comma-separate multiple pairs in one flag. Example: `--force-value c_consent=1,hh_consent=1`. |
+| `--force-value VAR=VAL` | — | Force one or more variables to specific values, **bypassing relevance**. May be repeated, or comma-separate multiple pairs in one flag. Example: `--force-value c_consent=1,hh_consent=1`. |
+| `--answers-file PATH` | — | Apply a JSON answer sheet whose values fill matching questions — but **only through open gates** (unlike `--force-value`, a scripted answer never bypasses relevance). Invalid values fall back to a sampled value. May be repeated (sheets merge). See [Scripted answers](#--answers-file-scripted-coherent-answers). |
+| `--legacy-fail-open-relevance` | off (strict) | Restore the pre-ironclad behaviour where a relevance expression the evaluator can't interpret **shows** the question (fail open) instead of hiding it. See [Ironclad gating](#ironclad-gating). |
 
 ## Reproducibility
 
@@ -182,6 +184,69 @@ python main.py --survey my_survey --phases synthetic \
     --force-value c_consent=1 \
     --force-value hh_consent=1
 ```
+
+## `--answers-file`: scripted, coherent answers
+
+`--answers-file` is the **ironclad** counterpart to `--force-value`. Where
+`--force-value` *bypasses* a gate to guarantee a cell populates,
+`--answers-file` supplies answers that are applied **only when the deterministic
+evaluator opens the gate** — so a scripted respondent is subjected to exactly
+the skip logic a real person would hit. To reach a gated section you satisfy its
+gate by answering the upstream questions, not by forcing past it.
+
+This is what the bench-test skill uses to fill coherent "interesting cases": the
+skill authors a whole-respondent answer sheet consistent with a persona, and the
+engine fills the rest stochastically while guaranteeing the paths are real.
+
+Sheet shape:
+
+```json
+{
+  "answers": {
+    "c_consent_qs_ans": "1",
+    "hh_age": 34,
+    "symptoms": "2 5",
+    "member_age_2": 12
+  },
+  "directives": { "repeat_counts": { "members": 3 } }
+}
+```
+
+- **`answers`** — map of variable name (or a suffixed key like `member_age_2`
+  for repeat iteration 2) to value. Resolution per cell: `answers[suffixed_key]`
+  > `answers[base_var]` > stochastic fallback. `select_multiple` values are the
+  space-joined choice string (`"2 5"`).
+- **Validation** — each value is checked against the question's choices /
+  numeric bounds / text length. An **invalid** value is *not* written; the cell
+  falls back to a sampled value (source `scripted_invalid_fallback`), so the CSV
+  is never illegal.
+- **`directives.repeat_counts`** — pin a roster size. The repeat's own relevance
+  still gates it, so a pinned count on a gated-out repeat yields 0 iterations.
+- **Gated-out answers are ignored** — an answer for a question the evaluator
+  gates out never populates the cell (it is recorded, not forced).
+
+```bash
+python main.py --survey my_survey --phases synthetic --rows 1 \
+    --seed 7 --answers-file interesting_case_01.json
+```
+
+## Ironclad gating
+
+Relevance is evaluated by one deterministic authority (the walker's
+`_is_relevant`), and neither the RNG nor a scripted answer can override it. Two
+fidelity guarantees beyond the historical behaviour:
+
+- **Strict fail-closed (default).** If a relevance expression cannot be
+  evaluated (parse error / unsupported function), the question is **hidden** and
+  the failure is recorded in the strip-log — rather than silently *shown*, which
+  fabricated a cell real SurveyCTO would have blanked. Pass
+  `--legacy-fail-open-relevance` to restore the old show-on-error behaviour.
+- **Forward references resolve.** A gate that references a variable defined later
+  in the form used to see a blank (single forward pass) and wrongly gate the
+  cell out. The walker now re-evaluates gates to a fixpoint, so a gate reading a
+  later answer resolves correctly. Sampled values are memoized, so this never
+  perturbs the RNG stream; when a form has no forward references the output is
+  byte-identical to a single pass.
 
 ## Type behaviour
 

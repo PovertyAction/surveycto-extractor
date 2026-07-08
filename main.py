@@ -21,7 +21,7 @@ from extractors.csv_extractor import CSVExtractor
 from extractors.json_extractor import JSONExtractor
 from generators.diagram_generator import DiagramGenerator
 from generators.section_splitter import SectionSplitter
-from generators.synthetic_data import generate_synthetic_csv
+from generators.synthetic_data import ScriptedProvider, generate_synthetic_csv
 from transformers.logic_converter import clear_strip_log
 
 
@@ -180,9 +180,40 @@ def _parse_force_values(specs):
     return out
 
 
+def _load_answer_files(paths):
+    """Load one or more ``--answers-file`` JSON sheets for the scripted provider.
+
+    Each file: ``{"answers": {var-or-suffixed-key: value, ...},
+    "directives": {"repeat_counts": {repeat_name: N, ...}}}``. Multiple files
+    merge in order (later wins). Returns ``(answers, repeat_counts)``. Scripted
+    answers are inputs to gating -- an answer for a question the deterministic
+    evaluator gates out is ignored, never forced (that is the separate
+    ``--force-value`` path)."""
+    answers = {}
+    repeat_counts = {}
+    if not paths:
+        return answers, repeat_counts
+    for p in paths:
+        path = Path(p)
+        with path.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            raise ValueError(f"--answers-file {p}: expected a JSON object")
+        a = data.get("answers") or {}
+        if not isinstance(a, dict):
+            raise ValueError(f"--answers-file {p}: 'answers' must be an object")
+        answers.update({str(k): v for k, v in a.items()})
+        directives = data.get("directives") or {}
+        rc = (directives.get("repeat_counts") if isinstance(directives, dict) else {}) or {}
+        if isinstance(rc, dict):
+            repeat_counts.update({str(k): int(v) for k, v in rc.items()})
+    return answers, repeat_counts
+
+
 def run_synthetic_phase(
     survey_key: str, n_rows: int = 5, seed: int = 0,
-    force_values=None,
+    force_values=None, provider=None, strict: bool = True,
+    repeat_count_overrides=None,
 ):
     """Generate a SurveyCTO-shaped synthetic export CSV from questions.json."""
     survey_cfg = config.SURVEYS[survey_key]
@@ -243,6 +274,9 @@ def run_synthetic_phase(
         force_values=force_values,
         geo_bbox=geo_bbox,
         form_settings=form_settings,
+        provider=provider,
+        strict=strict,
+        repeat_count_overrides=repeat_count_overrides,
     )
     print()
 
@@ -300,6 +334,27 @@ def main():
              "can be comma-separated (use repeated flags if values contain "
              "commas). Example: --force-value c_consent=1,hh_consent=1"
     )
+    parser.add_argument(
+        "--answers-file",
+        action="append",
+        default=None,
+        metavar="PATH",
+        help="For --phases synthetic: a JSON answer sheet whose values fill the "
+             "matching questions -- but ONLY through open gates (unlike "
+             "--force-value, a scripted answer never bypasses relevance). "
+             "Shape: {\"answers\": {var-or-suffixed-key: value}, \"directives\": "
+             "{\"repeat_counts\": {repeat_name: N}}}. Invalid values fall back to "
+             "a sampled value. May be repeated; sheets merge in order. Used by "
+             "the bench-test skill to fill coherent 'interesting cases'."
+    )
+    parser.add_argument(
+        "--legacy-fail-open-relevance",
+        action="store_true",
+        help="For --phases synthetic: restore the pre-ironclad behaviour where a "
+             "relevance expression the evaluator cannot interpret shows the "
+             "question (fail open) instead of hiding it. Default is strict "
+             "(fail closed + recorded)."
+    )
 
     args = parser.parse_args()
 
@@ -313,6 +368,9 @@ def main():
 
     synthetic_rows = args.rows if args.rows is not None else 5
     force_values = _parse_force_values(args.force_value)
+    scripted_answers, repeat_count_overrides = _load_answer_files(args.answers_file)
+    synthetic_provider = ScriptedProvider(scripted_answers) if scripted_answers else None
+    synthetic_strict = not args.legacy_fail_open_relevance
 
     errors = []
     for survey_key in surveys:
@@ -325,7 +383,9 @@ def main():
             if not run_all and phases == {"synthetic"}:
                 run_synthetic_phase(
                     survey_key, n_rows=synthetic_rows, seed=args.seed,
-                    force_values=force_values,
+                    force_values=force_values, provider=synthetic_provider,
+                    strict=synthetic_strict,
+                    repeat_count_overrides=repeat_count_overrides,
                 )
                 continue
 
@@ -339,7 +399,9 @@ def main():
             if run_all or "synthetic" in phases:
                 run_synthetic_phase(
                     survey_key, n_rows=synthetic_rows, seed=args.seed,
-                    force_values=force_values,
+                    force_values=force_values, provider=synthetic_provider,
+                    strict=synthetic_strict,
+                    repeat_count_overrides=repeat_count_overrides,
                 )
 
         except Exception as e:

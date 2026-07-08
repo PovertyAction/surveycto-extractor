@@ -61,6 +61,7 @@ from generators.sampling import (
     format_time_for_csv,
     numeric_bounds,
     sample_python_value,
+    text_max_length,
 )
 from transformers.expression_evaluator import (
     EvalContext,
@@ -201,6 +202,102 @@ class DefaultStochasticProvider:
             ),
             "stochastic",
         )
+
+
+def _validate_scripted_value(raw: Any, req: AnswerRequest) -> Tuple[bool, Any, Optional[str]]:
+    """Validate a scripted answer against the question's choices/constraint.
+
+    Returns ``(ok, coerced_value, reason)``. Structured checks cover the types
+    that carry a machine-checkable domain (selects, numerics, text length);
+    other types accept the value as a string. The engine's deterministic gate
+    remains the real authority -- validation only prevents writing an obviously
+    illegal cell value."""
+    qt = req.q_type
+    choice_vals = {str(c.get("value", "")).strip() for c in (req.choices or [])}
+    choice_vals.discard("")
+    if qt == "select_one":
+        s = str(raw).strip()
+        if choice_vals and s not in choice_vals:
+            return False, None, f"{s!r} not in choices"
+        return True, s, None
+    if qt == "select_multiple":
+        toks = str(raw).split()
+        bad = [t for t in toks if choice_vals and t not in choice_vals]
+        if bad:
+            return False, None, f"tokens {bad} not in choices"
+        return True, " ".join(toks), None
+    if qt == "integer":
+        try:
+            iv = int(str(raw).strip())
+        except (TypeError, ValueError):
+            return False, None, f"{raw!r} not an integer"
+        lo, hi = numeric_bounds(req.constraint)
+        if lo is not None and iv < lo:
+            return False, None, f"{iv} < min {lo}"
+        if hi is not None and iv > hi:
+            return False, None, f"{iv} > max {hi}"
+        return True, iv, None
+    if qt == "decimal":
+        try:
+            fv = float(str(raw).strip())
+        except (TypeError, ValueError):
+            return False, None, f"{raw!r} not a number"
+        lo, hi = numeric_bounds(req.constraint)
+        if lo is not None and fv < lo:
+            return False, None, f"{fv} < min {lo}"
+        if hi is not None and fv > hi:
+            return False, None, f"{fv} > max {hi}"
+        return True, fv, None
+    if qt == "text":
+        s = str(raw)
+        mx = text_max_length(req.constraint)
+        if mx is not None and len(s) > mx:
+            return False, None, f"length {len(s)} > max {mx}"
+        return True, s, None
+    return True, str(raw), None
+
+
+class ScriptedProvider:
+    """Applies a caller-supplied answer sheet on top of the stochastic sampler.
+
+    Resolution per cell: ``answers[suffixed_key]`` > ``answers[base_var]`` >
+    sampled fallback. A scripted value is validated against the question's
+    choices / constraint; an invalid value is NOT written -- we fall back to a
+    sampled value and record the rejection (source ``scripted_invalid_fallback``).
+    Because the provider is reached only for a cell the gate authority already
+    opened, scripted answers are inputs to gating, never overrides. Pass
+    ``strict_scripted=True`` to raise on an invalid answer instead of falling
+    back. (plan A4)"""
+
+    def __init__(self, answers=None, *, strict_scripted=False, on_result=None):
+        self.answers = dict(answers or {})
+        self.strict_scripted = strict_scripted
+        self.on_result = on_result   # optional callback(req, AnswerResult) for the trace
+
+    def _sample(self, req: AnswerRequest) -> Any:
+        return sample_python_value(
+            req.q_type, req.choices, req.constraint, req.rng, **req.sampler_kwargs
+        )
+
+    def provide(self, req: AnswerRequest) -> AnswerResult:
+        raw = self.answers.get(req.key)
+        if raw is None:
+            raw = self.answers.get(req.var_name)
+        if raw is None:
+            res = AnswerResult(self._sample(req), "stochastic")
+        else:
+            ok, coerced, reason = _validate_scripted_value(raw, req)
+            if ok:
+                res = AnswerResult(coerced, "scripted")
+            elif self.strict_scripted:
+                raise ValueError(f"scripted answer for {req.key!r} invalid: {reason}")
+            else:
+                res = AnswerResult(
+                    self._sample(req), "scripted_invalid_fallback", note=reason
+                )
+        if self.on_result is not None:
+            self.on_result(req, res)
+        return res
 
 
 # ── Run-context for metadata + ids ────────────────────────────────────────────
@@ -888,6 +985,7 @@ def _walk_one(
     pulldata_tables: Optional[Dict[str, Any]] = None,
     provider: Optional[AnswerProvider] = None,
     strict: bool = True,
+    repeat_count_overrides: Optional[Dict[str, int]] = None,
 ) -> WalkResult:
     """Generate one respondent's row.
 
@@ -1033,9 +1131,16 @@ def _walk_one(
                         slot[combo] = 0
                         row[col] = ""
                         continue
-                    n = _resolve_repeat_count(
-                        q.get("calculation"), ctx, strip_log, col, rng, constraint,
-                    )
+                    # A scripted directive can pin the roster size; the repeat's
+                    # own relevance still gates it (a pinned count on a gated-out
+                    # repeat above yields 0), so this never bypasses skip logic.
+                    override = (repeat_count_overrides or {}).get(repeat_name)
+                    if override is not None:
+                        n = max(0, int(override))
+                    else:
+                        n = _resolve_repeat_count(
+                            q.get("calculation"), ctx, strip_log, col, rng, constraint,
+                        )
                     slot[combo] = n
                     row[col] = n
                 continue
@@ -1425,6 +1530,7 @@ def generate_synthetic_csv(
     form_settings: Optional[Dict[str, Any]] = None,
     provider: Optional[AnswerProvider] = None,
     strict: bool = True,
+    repeat_count_overrides: Optional[Dict[str, int]] = None,
 ) -> Path:
     """Walk the form and write ``n_rows`` synthetic respondents to a wide CSV.
 
@@ -1521,6 +1627,7 @@ def generate_synthetic_csv(
             choices_lookup, var_to_choice_list, log,
             force_values=force_values, geo_bbox=geo_bbox,
             pulldata_tables=tables, provider=provider, strict=strict,
+            repeat_count_overrides=repeat_count_overrides,
         )
 
     # ── Pass 1: collect repeat_counts per respondent; drop rows.
@@ -1554,6 +1661,7 @@ def generate_synthetic_csv(
                 choices_lookup, var_to_choice_list, strip_log,
                 force_values=force_values, geo_bbox=geo_bbox,
                 pulldata_tables=tables, provider=provider, strict=strict,
+                repeat_count_overrides=repeat_count_overrides,
             )
             writer.writerow(_row_to_csv_dict(result.row, rctx, column_order))
 

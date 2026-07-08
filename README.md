@@ -103,6 +103,17 @@ python main.py --survey my_survey --phases synthetic --rows 20 --seed 42 \
     --force-value c_consent=1 --force-value hh_consent=1
 ```
 
+Skip logic is **ironclad**: relevance is enforced by one deterministic
+evaluator that neither the RNG nor any supplied answer can override. For
+coherent, path-faithful rows — e.g. "interesting cases" for an HFC dry-run —
+`--answers-file` applies a JSON answer sheet **through the real gates** (unlike
+`--force-value`, which bypasses them):
+
+```bash
+python main.py --survey my_survey --phases synthetic --rows 1 \
+    --answers-file interesting_case_01.json
+```
+
 Determinism: same `--seed K` produces byte-identical output across reruns
 (on the same day; the date sampler clamps to today).
 

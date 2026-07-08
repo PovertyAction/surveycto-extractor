@@ -14,6 +14,7 @@ from generators.sampling import sample_python_value
 from generators.synthetic_data import (
     AnswerResult,
     DefaultStochasticProvider,
+    ScriptedProvider,
     generate_synthetic_csv,
 )
 
@@ -25,6 +26,7 @@ _META = {
 
 
 def _run(tmp_path, form, *, n_rows=1, seed=1, **kwargs):
+    tmp_path.mkdir(parents=True, exist_ok=True)
     qp = tmp_path / "q.json"
     qp.write_text(json.dumps(form), encoding="utf-8")
     out = tmp_path / "synth.csv"
@@ -107,3 +109,93 @@ def test_provider_never_populates_gated_cell(tmp_path):
     assert rows[0]["hidden"] == ""
     assert "shown" in prov.seen
     assert "hidden" not in prov.seen
+
+
+# ── ScriptedProvider ──────────────────────────────────────────────────────────
+
+_YESNO = [{"value": "1", "label": "Yes"}, {"value": "0", "label": "No"}]
+
+
+def test_scripted_consent_cascade_populates_through_the_gate(tmp_path):
+    """A scripted consent=1 opens the consent-gated section via the REAL gate
+    (not a bypass). consent=0 leaves it blank."""
+    form = [
+        {"type": "select_one", "choice_list": "yn", "variable_name": "consent",
+         "choices": _YESNO, "group_path": []},
+        {"type": "text", "variable_name": "followup",
+         "relevance": "${consent} = 1", "group_path": []},
+    ]
+    _, yes = _read(_run(tmp_path / "yes", form,
+                        provider=ScriptedProvider({"consent": "1"})))
+    _, no = _read(_run(tmp_path / "no", form,
+                       provider=ScriptedProvider({"consent": "0"})))
+    assert yes[0]["consent"] == "1" and yes[0]["followup"] != ""
+    assert no[0]["consent"] == "0" and no[0]["followup"] == ""
+
+
+def test_scripted_invalid_choice_falls_back_to_valid_sample(tmp_path):
+    form = [
+        {"type": "select_one", "choice_list": "c", "variable_name": "color",
+         "choices": [{"value": "1"}, {"value": "2"}, {"value": "3"}],
+         "group_path": []},
+    ]
+    _, rows = _read(_run(tmp_path, form, provider=ScriptedProvider({"color": "99"})))
+    assert rows[0]["color"] in {"1", "2", "3"}      # sampled fallback, never "99"
+
+
+def test_scripted_out_of_bounds_integer_falls_back(tmp_path):
+    form = [
+        {"type": "integer", "variable_name": "age",
+         "constraint": ". >= 0 and . <= 5", "group_path": []},
+    ]
+    _, rows = _read(_run(tmp_path, form, provider=ScriptedProvider({"age": 999})))
+    assert 0 <= int(rows[0]["age"]) <= 5            # sampled fallback, never 999
+
+
+def test_scripted_answer_for_gated_question_is_ignored(tmp_path):
+    form = [
+        {"type": "text", "variable_name": "hidden", "relevance": "1 = 2",
+         "group_path": []},
+    ]
+    _, rows = _read(_run(tmp_path, form, provider=ScriptedProvider({"hidden": "X"})))
+    assert rows[0]["hidden"] == ""
+
+
+def test_repeat_count_directive_pins_roster_size(tmp_path):
+    form = [
+        {"type": "repeat_count", "variable_name": "m_count",
+         "repeat_group_name": "m", "group_path": []},
+        {"type": "text", "variable_name": "mname", "group_path": ["m"]},
+    ]
+    header, _ = _read(_run(tmp_path, form, repeat_count_overrides={"m": 3}))
+    content = [c for c in header if c not in _META]
+    assert "mname_1" in content and "mname_3" in content
+    assert "mname_4" not in content
+
+
+def test_repeat_count_directive_still_gated(tmp_path):
+    """A pinned roster size on a gated-out repeat still yields zero iterations."""
+    form = [
+        {"type": "repeat_count", "variable_name": "m_count",
+         "repeat_group_name": "m", "relevance": "1 = 2", "group_path": []},
+        {"type": "text", "variable_name": "mname", "group_path": ["m"]},
+    ]
+    header, _ = _read(_run(tmp_path, form, repeat_count_overrides={"m": 3}))
+    content = [c for c in header if c not in _META]
+    assert not any(c.startswith("mname") for c in content)
+
+
+def test_scripted_run_is_deterministic(tmp_path):
+    form = [
+        {"type": "select_one", "choice_list": "yn", "variable_name": "consent",
+         "choices": _YESNO, "group_path": []},
+        {"type": "text", "variable_name": "followup",
+         "relevance": "${consent} = 1", "group_path": []},
+        {"type": "integer", "variable_name": "n",
+         "constraint": ". >= 0 and . <= 9", "group_path": []},
+    ]
+    a, b = tmp_path / "a", tmp_path / "b"
+    a.mkdir(); b.mkdir()
+    o1 = _run(a, form, n_rows=4, seed=5, provider=ScriptedProvider({"consent": "1"}))
+    o2 = _run(b, form, n_rows=4, seed=5, provider=ScriptedProvider({"consent": "1"}))
+    assert o1.read_bytes() == o2.read_bytes()
