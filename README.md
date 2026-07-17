@@ -40,6 +40,7 @@ A survey has two phases — and this toolkit covers both:
 
 **Pre-collection — instrument day.** You have a SurveyCTO `.xlsx` form but no
 submissions yet. Run the toolkit against the form alone to:
+
 - Extract structured documentation, group hierarchy, per-section JSON slices.
 - Generate a synthetic SurveyCTO-shaped export CSV with N synthetic respondents.
 - **Run your full cleaning + HFC pipeline against the synthetic CSV** to catch
@@ -48,6 +49,7 @@ submissions yet. Run the toolkit against the form alone to:
 
 **Post-collection — data day.** Real `.dta` has landed. Add it to the config
 and run the toolkit to:
+
 - Generate a variable dictionary mapping every Stata variable to its source
   question, skip logic, choices, observed range, sentinel counts, missing rates.
 - Generate a relationship graph (calculation dependencies, gating chains,
@@ -351,7 +353,7 @@ Stata cleaning modules must follow the guidelines in:
 
 These files need no modification — they are fully project-agnostic. The
 `surveycto_refs/` subdirectory holds derivative summaries we maintain by hand
-against https://docs.surveycto.com. See
+against <https://docs.surveycto.com>. See
 `coding_guidelines/surveycto_refs/README.md` for the source pages and refresh
 procedure.
 
@@ -455,7 +457,7 @@ uv run surveycto-vardict --survey my_survey  # post-collection vardict + graph
 directory you run from (override with `--config`/`SURVEYCTO_CONFIG`). Source
 layout:
 
-```
+```text
 surveycto-extractor/
 ├── pyproject.toml  uv.lock  .python-version
 ├── src/surveycto_extractor/

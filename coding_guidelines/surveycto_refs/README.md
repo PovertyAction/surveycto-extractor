@@ -13,7 +13,7 @@ Each file's header records the regeneration date and points back at the canonica
 
 ## Source and attribution
 
-These primers are written and maintained in-house from the public SurveyCTO documentation at https://docs.surveycto.com — primarily the *Designing forms: core concepts* section, with the specific pages cited in each primer's "Canonical docs" header line.
+These primers are written and maintained in-house from the public SurveyCTO documentation at <https://docs.surveycto.com> — primarily the *Designing forms: core concepts* section, with the specific pages cited in each primer's "Canonical docs" header line.
 
 SurveyCTO's documentation is © SurveyCTO. We treat these primers as derivative summaries for the limited internal purpose of grounding our XLSForm-to-Stata converter; they are not redistributed as a SurveyCTO product. If `docs.surveycto.com` semantics change, the primers can drift — review the linked pages whenever the converter behaves unexpectedly on a new form.
 
@@ -27,7 +27,7 @@ SurveyCTO's documentation is © SurveyCTO. We treat these primers as derivative 
 
 There is no automated refresh — these are written by hand against the current SurveyCTO docs. To resync:
 
-1. Read the relevant pages on https://docs.surveycto.com/02-designing-forms/01-core-concepts/ (XLSForm columns, field types, expressions, constraints, relevance, groups/repeats).
+1. Read the relevant pages on <https://docs.surveycto.com/02-designing-forms/01-core-concepts/> (XLSForm columns, field types, expressions, constraints, relevance, groups/repeats).
 2. Update the primer text to match.
 3. Bump the `STATUS: regenerated <YYYY-MM-DD>` line.
 4. Rerun `python generators/build_type_catalog.py` if `xlsform.md`'s field-type table changed.

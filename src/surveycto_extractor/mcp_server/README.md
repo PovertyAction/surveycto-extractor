@@ -16,22 +16,22 @@ Complement to `skill/search_survey.py` for high-volume query sessions
 
 1. Install the MCP dependency:
 
-```bash
-uv sync --extra mcp
-```
+   ```bash
+   uv sync --extra mcp
+   ```
 
 2. Add to your project's `.mcp.json` (in the project root):
 
-```json
-{
-  "mcpServers": {
-    "survey-expert": {
-      "command": "uv",
-      "args": ["run", "--extra", "mcp", "python", "-m", "surveycto_extractor.mcp_server.survey_server"]
-    }
-  }
-}
-```
+   ```json
+   {
+     "mcpServers": {
+       "survey-expert": {
+         "command": "uv",
+         "args": ["run", "--extra", "mcp", "python", "-m", "surveycto_extractor.mcp_server.survey_server"]
+       }
+     }
+   }
+   ```
 
 The same block works in `.claude/settings.json`. A ready-made
 `.mcp.json.example` sits in the repo root (`cp .mcp.json.example .mcp.json`).

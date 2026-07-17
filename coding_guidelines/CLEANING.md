@@ -4,6 +4,7 @@ Language-independent principles for cleaning survey data. For Stata-specific syn
 implementation, see [STATA.md](STATA.md).
 
 ## Table of Contents
+
 - [Module Organization](#module-organization)
 - [Assertions](#assertions)
 - [Two-Phase Workflow](#two-phase-workflow)
@@ -44,6 +45,7 @@ When splitting a module, use a letter suffix under the same numeric prefix: `05a
 ### Module Header Documentation
 
 Every module must begin with a comment block documenting:
+
 - **INPUTS**: All files loaded (with `${global}` paths), one per line.
 - **OUTPUTS**: All files saved.
 - **DEPENDENCIES**: Other modules whose output this module consumes.
@@ -53,6 +55,7 @@ Update headers whenever input files change. The header is the primary documentat
 ### Form-Version Coverage
 
 When survey instruments were added or removed mid-fieldwork (e.g., a module added after the first N enumerators), document:
+
 1. Which households have coverage (a flag or indicator variable).
 2. How the module handles households without coverage (imputation, scaling, or structural missing).
 3. What matched-household aggregates are used for imputation (prefer treatment-arm medians over global medians to preserve experimental structure).
@@ -60,6 +63,7 @@ When survey instruments were added or removed mid-fieldwork (e.g., a module adde
 ### Multi-Source Variables
 
 When the same construct can be measured from multiple survey sections (e.g., fruit income from both the crops module and the fruit-trees module), document:
+
 1. All possible data sources and the hierarchy for deduplication.
 2. The logic for households that report in only one source.
 3. The prevalence of each case (how many HH fall into each branch).
@@ -69,6 +73,7 @@ When the same construct can be measured from multiple survey sections (e.g., fru
 ## Assertions
 
 ### Philosophy
+
 Use assertions to codify what must hold in the raw data for transformations to be sensible. If an assertion fails, the script should stop --- that is a feature, not a bug.
 
 ### Core Patterns
@@ -90,9 +95,11 @@ Use assertions to codify what must hold in the raw data for transformations to b
 ## Two-Phase Workflow
 
 ### Principle
+
 Separate validation into two phases to ensure transformations rest on verified raw data.
 
-**Phase A --- Validate raw data BEFORE you touch it**
+#### Phase A --- Validate raw data BEFORE you touch it
+
 1. Check raw invariants that should hold straight from the instrument:
    - Positive values where expected (e.g., loan sizes).
    - Categorical values within allowed domain (e.g., loan type in {1, 2, 3}).
@@ -100,7 +107,8 @@ Separate validation into two phases to ensure transformations rest on verified r
    - Structural skip: downstream variables missing where skip applies.
 2. Verify the do-file's skip logic against the survey instrument (see [Survey Instrument Verification](#survey-instrument-verification)).
 
-**Phase B --- Validate AFTER/WHILE transforming**
+#### Phase B --- Validate AFTER/WHILE transforming
+
 1. Perform transformations (recode special missings, zero-by-logic, generate totals).
 2. Add tolerance/proportion assertions with rationale comments.
 3. If an assertion fails, inspect contradictions, refine logic or code, repeat.
@@ -141,6 +149,7 @@ Before trusting or modifying a cleaning module's skip-logic implementation, veri
 Whenever the value of a downstream variable can be inferred from a skip pattern or gateway, fill in the logically implied value rather than leaving it missing.
 
 **When to apply**: The gateway definitively determines the downstream value. For example:
+
 - "No animals owned" implies `has_<animal_type> = 0` for all animal types.
 - "No loans received" implies `loan_size = 0`, `loan_balance = 0`.
 - "Did not purchase any inputs" implies all purchase indicators = 0.
@@ -148,6 +157,7 @@ Whenever the value of a downstream variable can be inferred from a skip pattern 
 **When NOT to apply**: The gateway says "no" but the downstream question is about something the gateway doesn't determine. In that case, the value is genuinely missing.
 
 **Multi-level zero-by-logic**: When skip patterns are nested (e.g., "bought any inputs?" -> "bought fertilizer?" -> "bought brand X?"), apply zero-by-logic at each level:
+
 1. First, set all downstream variables to 0 if the top-level gateway is off.
 2. Then, set item-specific downstream variables to 0 if the item-level gateway is off but the top-level gateway is on.
 
@@ -169,13 +179,16 @@ A single variable that mixes long- and short-survey values conflates different m
 ### Rules
 
 1. **Always guard conditional fills with multiple conditions.** When filling zeros for short-survey HH, require both the short-survey flag AND the relevant gateway:
-   ```
+
+   ```text
    set to 0 only if: (short_survey == 1) AND (hh_gate == 0)
    ```
+
    This prevents overwriting genuine missing values from form-version gaps.
 
    **Additionally, always include a missing-check condition** when zeroing short-survey variables. If an upstream module has already set a value (e.g., a binary indicator derived from gateway data), a blanket zero-fill overwrites it:
-   ```
+
+   ```text
    WRONG:  set to 0 if (short_survey == 1)           -- overwrites legitimate values
    RIGHT:  set to 0 if (short_survey == 1) AND missing(var)  -- only fills genuinely missing
    ```
@@ -228,10 +241,13 @@ Survey instruments encode special responses as negative integers. These must be 
 **Mixed sentinel formats and type conversion**: Some data collection platforms partially convert integer sentinels to Stata extended missing (`.d`, `.r`) during field data collection — some variables may have -99/-88 while others already have `.d`/`.r`. Always check for both integer sentinels and pre-existing extended missing. Survey exports may also deliver the same variable as string in one batch and numeric in another. Before recoding, ensure all target variables are numeric. Do not use error-suppressing wrappers (e.g., `capture destring`) that silently swallow failures — if conversion fails, the script should stop so the cause can be investigated.
 
 ### Consistency Across Modules
+
 Recode according to what the instrument defines for each question type. Different question types may use different sentinel codes (e.g., -98 "don't remember" for brand recall vs. -99 "don't know" for amounts). Check the instrument to determine which codes are valid for each variable, and recode exactly those. This prevents both missing a valid code and recoding a code that doesn't apply.
 
 ### Completeness Within a Module
+
 Every numeric variable loaded by a module that accepts sentinel codes per the survey instrument must have an explicit recode. It is not sufficient to recode the "main" variables (e.g., quantities) while leaving related variables (e.g., monetary amounts, conversion factors) unrecoded in the same module. When reviewing or writing a module:
+
 1. **List all numeric variables** loaded from raw data (the `use ... using` statement).
 2. **Check each one** against the survey instrument for its constraint or choice list.
 3. **Add recodes** for any variable whose instrument definition allows sentinel codes but has no recode in the do-file.
@@ -240,6 +256,7 @@ Every numeric variable loaded by a module that accepts sentinel codes per the su
 Common patterns where recodes are missed: payment/income variables recoded in one section but not another; balance/amount variables after a reshape; conversion factors that feed into division (see step 5 above).
 
 ### Survey Constraint Bugs
+
 SurveyCTO constraints may be incomplete — e.g., `.<=7` instead of `(.>=0 and .<=7) or .=-99 or .=-88`. A missing lower bound allows any negative number (including sentinel codes and typos) to pass validation during data collection. When you encounter unexpected negative values that are not standard sentinel codes, check the instrument constraint. If the constraint lacks a lower bound or explicit sentinel allowances, the value is likely an enumerator typo that passed the defective constraint. Recode it to the most plausible extended missing code.
 
 ---
@@ -247,10 +264,13 @@ SurveyCTO constraints may be incomplete — e.g., `.<=7` instead of `(.>=0 and .
 ## Missing Value Tracking
 
 ### Principle
+
 Create dummy variables to record the specific reason a variable is missing. This preserves information that would otherwise be lost when recoding sentinel codes to a generic missing value.
 
 ### Flag Design
+
 For each variable with meaningful missing patterns, create:
+
 - `is_mi_var`: Overall missing indicator (1 if missing for any reason).
 - `mi_dk_var`: Don't know (originally -99).
 - `mi_rf_var`: Refused (originally -88).
@@ -259,11 +279,13 @@ For each variable with meaningful missing patterns, create:
 Create these flags **before** recoding sentinel codes to missing, since the sentinel code values are needed to populate the flags.
 
 ### When to Create Flags
+
 - Create flags when the tolerance assertion for a sentinel code used a threshold **>5%**. Below 5%, the sentinel code is rare enough that separate flags add variable clutter without analytical value.
 - Also create flags when the analysis plan explicitly distinguishes between "don't know" and other forms of missing, regardless of share.
 - Skip flag creation for the majority of variables where sentinel codes are well under 5%.
 
 ### Scope: Full Sample, Unconditional
+
 Even when the tolerance assertion was computed on a subpopulation (e.g., "share of dk among respondents who reported having loans"), the missing-reason flags must be computed on the **full sample** (unconditionally). This ensures downstream analysis can filter by missing reason without needing to reconstruct the subpopulation logic.
 
 ---
@@ -292,6 +314,7 @@ Strict propagation handles this naturally: if all components are missing, the ag
 If a component is missing but you believe the true value is zero (e.g., a food group not consumed), that is a **zero-by-logic** decision, not a missing-propagation decision. Apply zero-by-logic *before* aggregation to fill the zero explicitly. Then the aggregate will include the zero and strict propagation works correctly.
 
 ### Document the Choice
+
 Every aggregate must have a comment explaining which missing-propagation approach is used and which flag drives the missing (e.g., "missing if any Kessler item is dk/rf").
 
 ### Post-Aggregation Validation
@@ -309,6 +332,7 @@ Without these checks, silent upstream changes (e.g., a recoding that shifts a fe
 ## Cross-Variable Consistency Checks
 
 ### Principle
+
 When one variable logically constrains another (e.g., a gateway determines whether a follow-up was asked, or a count determines how many detail records exist), validate the relationship explicitly.
 
 ### Common Patterns
@@ -316,6 +340,7 @@ When one variable logically constrains another (e.g., a gateway determines wheth
 **Gateway-to-frequency validation**: If a binary occurrence variable says "no" (e.g., "did not experience food insecurity"), the associated frequency variable must be 0. Assert this and fill where needed.
 
 **Count-to-detail harmonization**: When a headline count variable (e.g., "number of loans received") disagrees with the number of populated detail records, decide which is authoritative:
+
 - If detail records are more numerous, the count was likely under-reported --- harmonize upward.
 - If the count is larger, some detail records were skipped --- keep the count but mark the missing details.
 - Assert and document the number of cases requiring harmonization.
@@ -331,6 +356,7 @@ When constructing ordinal categories from multiple conditions (e.g., food insecu
 **Preferred: Mutually exclusive conditions.** Define each category with conditions that cannot overlap by construction. Then assert: (a) every observation is assigned exactly one category (exhaustiveness), and (b) no observation meets conditions for two categories (mutual exclusivity). This is self-documenting and order-independent.
 
 **Acceptable when required by methodology: Sequential overwrite ("severity-wins").** Some standard indices (e.g., HFIAS) define categories with intentionally overlapping conditions, where the most severe category wins. In this case, assign categories in increasing severity order so the last `replace` wins. When using this pattern:
+
 1. **Document that order matters** --- a comment explaining why sequential overwrite is used (cite the methodology).
 2. **Assert coverage** --- after categorization, assert that the share of uncategorized observations is below the documented missing tolerance.
 3. **Do not generalize** --- use this pattern only when the external methodology requires it, not as a default approach.
@@ -340,9 +366,11 @@ When constructing ordinal categories from multiple conditions (e.g., food insecu
 ## Tolerance Specification Guidelines
 
 ### Principle
+
 When raw data contains violations of expected patterns, quantify the deviation, print a warning, and assert the share is below a documented tolerance. This makes data quality visible without halting the pipeline for minor issues.
 
 ### Default Tolerance: 1%
+
 Use 1% as the default tolerance unless there is a documented reason to deviate. This means: violations must affect fewer than 1% of observations in the relevant denominator.
 
 ### When to Use Higher Tolerances
@@ -357,6 +385,7 @@ Use 1% as the default tolerance unless there is a documented reason to deviate. 
 | >25% | Extremely rare; indicates the variable may not be usable | "<=50% don't know on total installment payment" --- flag for potential exclusion from analysis |
 
 ### Conditional / Sub-Question Variables
+
 Variables asked only under a skip-logic gate (e.g., "which shop?" when seller == Shop) will have high sentinel-code shares if you divide by the full sample. Always compute shares using the **eligible denominator**:
 
 - Main/gateway variable: denominator is observations that should answer the main question.
@@ -365,6 +394,7 @@ Variables asked only under a skip-logic gate (e.g., "which shop?" when seller ==
 By default, keep formal share assertions on gateway variables and at least log warnings for sub-questions. If a sub-question has a strong instrument expectation, assert using its gate-eligible denominator.
 
 ### Requirements
+
 1. **Always assert with shares, not absolute counts.** An assertion like `assert bad_count < 20` is fragile --- it breaks when sample size changes. Instead, compute `bad_count / denominator` and assert the share is below the tolerance. Print a warning with both the count and the share.
 2. **Always count against the relevant denominator**, not total observations.
 3. **Comment the tolerance** with a brief rationale: why this threshold, and what instrument behavior or data pattern justifies it.
@@ -386,6 +416,7 @@ When a gate says "off" but downstream follow-up data exists (or vice versa), res
 4. **Document the decision** in a comment explaining what was done and why.
 
 ### Missing Propagation
+
 When information is genuinely unknown (e.g., "Other" selected but specify-text is blank, or "don't know" codes), the constructed outcome must be **missing**, not defaulted to a value. Blank text fields are the string equivalent of missing numeric values --- they mean "we don't know."
 
 ---
@@ -412,6 +443,7 @@ When a categorical survey question includes an "Other (specify)" option with a f
 ### Priority Ordering
 
 When a text matches multiple keyword lists (e.g., "iron and mud"), use this priority:
+
 1. **Ambiguous** overrides everything --- if the text signals mixed/unclear, set missing.
 2. **Improved** wins over unimproved --- if both match but not ambiguous, the improved material is likely the primary one (e.g., "cement over mud" = cement roof).
 3. **Unimproved** --- only if no improved or ambiguous match.
@@ -420,6 +452,7 @@ When a text matches multiple keyword lists (e.g., "iron and mud"), use this prio
 ### Absence/Inapplicability Responses
 
 Respondents sometimes answer "Other" with text that doesn't describe a material but describes a situation: "has no house", "lives with relatives", "tent", "under construction". These are **not missing** --- they carry information. Map them to the substantively correct category:
+
 - For improved-vs-unimproved indicators, these are clearly **unimproved** (or "no proper housing").
 - Add keywords for these patterns to the appropriate regex.
 - When new data arrives, review the QC table for new absence patterns and update the regex.
@@ -433,21 +466,27 @@ Always produce a QC table showing each unique Other-specify text and its mapping
 ## QC Reporting Requirements
 
 ### Module-End Audit
+
 Every cleaning module must end with a summary of the output dataset:
+
 - Full variable descriptions (names, types, labels).
 - Summary statistics for all variables (mean, min, max, count, missing count).
 
 This output appears in the log and serves as a regression test: if a code change alters the dataset structure or value distributions, it will be visible in the log diff.
 
 ### In-Module Diagnostics
+
 Throughout each module, include targeted summaries at key checkpoints:
+
 - After loading data: confirm row count and key variable types.
 - After sentinel code recoding: summarize affected variables to confirm recodes applied correctly.
 - After aggregate creation: summarize the aggregate and its components.
 - After zero-by-logic fills: summarize to confirm expected value distributions.
 
 ### What to Review in Logs
+
 When reviewing a module's log output, check for:
+
 - **Warnings**: Any "WARNING:" messages printed by the module (skip-logic violations, tolerance checks).
 - **Replace counts**: Stata's "X real changes made" messages --- unexpected counts indicate a problem.
 - **Assertion failures**: If the script completed, all assertions passed, but review the log to understand what was checked.
@@ -455,9 +494,11 @@ When reviewing a module's log output, check for:
 - **TODOs and developer comments**: Notes left for future work.
 
 ### QC Tables
+
 For modules with Other-specify classification or complex categorical mappings, produce a QC table (see [Other-Specify Classification > QC Table Requirement](#qc-table-requirement)). Surface these tables to the user for review.
 
 ### Contract Tables
+
 When creating new binary indicators from multi-select or categorical variables, produce a frequency table (contract) showing the distribution. This confirms the indicator was constructed correctly and provides a baseline for future data comparison.
 
 ---
@@ -483,9 +524,11 @@ Use variable labels to document where each variable comes from and how it was co
 Survey instruments with "select all that apply" questions often store responses as a delimited string (e.g., `"2 4 5"` meaning options 2, 4, and 5 were selected). These should be decomposed into binary indicator variables for analysis on an as-needed basis.
 
 ### Principle
+
 For each choice value in the select-multiple question, create a binary indicator (0/1) that is 1 if that choice was selected and 0 otherwise. Set to missing if the original variable is missing (respondent wasn't asked or didn't answer).
 
 ### Workflow
+
 1. **Check the instrument** for the full set of valid choice values (including "other" codes like -66).
 2. **Create one binary indicator per choice value**, named consistently (e.g., `varname_choicevalue_suffix`).
 3. **Apply zero-by-logic** from gateway variables: if the gateway says the question was not asked, all indicators should be 0.
@@ -496,7 +539,8 @@ For each choice value in the select-multiple question, create a binary indicator
 Select-multiple questions often include a "None" option (typically coded as 0) alongside substantive options (1, 2, 3, ...). The binary indicator for option 0 means "none selected" — but the useful analytical variable is usually `has_any` (= 1 if any option was selected).
 
 To invert, use an equality test, **not subtraction**:
-```
+
+```text
 WRONG:  has_any = none_option - 1     --> produces -1 / 0 (invalid encoding)
 RIGHT:  has_any = (none_option == 0)  --> produces  0 / 1 (correct 0/1 indicator)
 ```
@@ -525,9 +569,11 @@ Reshape operations (wide-to-long or long-to-wide) are a common source of silent 
 ## Deterministic Joins
 
 ### Principle
+
 Many-to-many joins are non-deterministic — the row matching depends on sort order and can produce different results on different runs or machines. Never use them.
 
 ### When Many-to-Many Relationships Exist
+
 When two datasets share a key that is not unique on either side, make the relationship explicit:
 
 1. **Cross-join** the datasets on the shared key, producing all pairwise combinations.
@@ -535,6 +581,7 @@ When two datasets share a key that is not unique on either side, make the relati
 3. **Verify** the resulting dataset has the expected ID structure.
 
 ### Why This Matters
+
 A non-deterministic join can silently change results when data is re-sorted, re-exported, or run on a different machine. The output may look reasonable but differ from run to run. Deterministic alternatives (cross-join + collapse, or reshape to create a proper key) produce identical results regardless of input order.
 
 Use `joinby` (explicit cross-join) + `collapse` instead of `merge m:m`.
@@ -560,19 +607,23 @@ Without cardinality checks, a module that silently drops observations (e.g., due
 ## One-Off Data Corrections
 
 ### Principle
+
 When fixing individual data errors (e.g., a misrecorded value for a specific household), prefer structural/value signatures over hard-coded IDs.
 
 ### Why
+
 Hard-coded household IDs break when IDs are tokenized (de-identified), renamed, or resequenced. Structural signatures — combinations of observable variable values that uniquely identify the error — remain valid across ID transformations.
 
 ### Pattern
+
 1. **Identify the error** using a combination of variable values that is unique to the affected observation(s) (e.g., an unusual label + quantity + amount combination).
 2. **Assert the match count** — the signature must match exactly the expected number of observations (usually 1). If the data changes and the signature matches 0 or more than expected, the assert fails loudly.
 3. **Apply the correction** conditional on the signature.
 4. **Document the rationale** in a comment: what the error is, why the correction is appropriate, and what instrument evidence supports it.
 
 ### Example (Pseudocode)
-```
+
+```text
 Count observations where item_label == "strange_value" AND qty == 999
 Assert count == 1
 Replace qty = correct_value where item_label == "strange_value" AND qty == 999
@@ -593,12 +644,15 @@ Scattered manual overrides are difficult to audit, easy to miss during review, a
 ## Input Data Schema Assumptions
 
 ### Principle: Verify Then Assume Immutability
+
 When writing a cleaning module, first research the input data to determine what variables exist, their types, and their value domains. Once verified, **code as if the schema is immutable** --- do not use defensive wrappers (e.g., error-suppressing captures, "drop if exists" patterns) to handle schema changes silently.
 
 ### Rationale
+
 If the input schema changes (e.g., a variable is renamed, removed, or changes type), the cleaning module **should break loudly** so the change is noticed and the code is updated deliberately. Silent defensive code masks upstream changes that could affect data quality.
 
 ### In Practice
+
 - **Drops**: If a variable was verified to exist in the input data, drop it directly without error suppression. If the upstream schema changes and removes it, the script will fail, surfacing the change.
 - **Type conversions**: If a variable was verified to be string, convert it directly. Do not wrap in error-suppressing constructs.
 - **Variable existence**: Do not use "capture confirm variable" to check if a variable exists before using it. If the variable should exist per the instrument, use it directly and let the script fail if it doesn't.

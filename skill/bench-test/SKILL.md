@@ -66,6 +66,7 @@ a seed manifest), `report` (join traces to expectations).
 ## Workflow
 
 ### 1. Read the survey
+
 Prefer the **survey-expert MCP tools** (no raw-file reading): `get_survey_info`
 to orient, `get_repeat_structure` for roster/count axes, `search_questions` +
 `get_choice_list` for key variables and their domains (incl. sentinels
@@ -95,6 +96,7 @@ scenario/variation in step 4).
 **(b) Auto-derived (fallback / augmentation).** If the user gives no scenarios
 (or wants more coverage), propose the number they asked for in step 3 (default
 ~6-8), spanning what an HFC needs to exercise:
+
 - **realistic-normal** coherent households (baseline distributions, real correlations),
 - **plausible edge/outlier** respondents (boundary ages, large rosters, rare-but-valid combos),
 - **should-trip-a-check** cases (internally inconsistent, straightlining, speeding, duplicate-like).
@@ -112,7 +114,9 @@ Write them to `<output_dir>/<survey>_cases.json` (the source of truth + a
 reproducibility artifact the user can edit).
 
 ### 3. Confirm scope with the user (ask -- do not assume)
+
 BEFORE deriving or generating, ask with `AskUserQuestion`:
+
 1. **How many scenarios / interesting cases, and how much coverage** -- e.g.
    "a few (3-4, just the key paths)" / "moderate (6-8, main branches + common edges)" /
    "thorough (10+, exhaustive branch + sentinel coverage)". Use the answer to size how many
@@ -125,6 +129,7 @@ accepted set to `<survey>_cases.json`, and run
 fixing any FAIL before generating.
 
 ### 4. Generate (coherent cases + stochastic bulk -> one dataset)
+
 `python bench_scenarios.py expand --cases <cases.json> --variations N --seed S --out <run_dir>`
 writes one answer sheet per variation + `run_manifest.json` (deterministic seeds).
 
@@ -157,6 +162,7 @@ the column contract is stable; pin roster sizes via `directives.repeat_counts`
 if a scenario needs a fixed schema).
 
 ### 5. Report
+
 `python bench_scenarios.py report --manifest <run_dir>/run_manifest.json --trace-dir <run_dir> --out <run_dir>/<survey>_bench_report.md`
 produces per-scenario **PASS/FAIL** verdicts (a FAIL pulls the failing gate +
 resolved operands from the trace, e.g. "expected the youth module but
@@ -164,6 +170,7 @@ resolved operands from the trace, e.g. "expected the youth module but
 user, flag any REJECTED must-hit answers, and point them at the final CSV.
 
 ## Guardrails
+
 - **Synthetic only.** Read form *metadata* (`questions.json`, `*_variable_graph.json`)
   and the human-authored cases file **only**. Never read real respondent data
   (`data/`, `*_WIDE.csv`, `*.dta`, `*.parquet`). Personas are fictional -- never
