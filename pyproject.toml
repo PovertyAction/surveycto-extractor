@@ -93,5 +93,5 @@ builtin = "clear,rare,informal,usage,code,names"
 # unparseable=(valid variant), master=(master seed RNG / "master" questions file),
 # fo=form_order local, iff=(if-and-only-if), falsy=(programming term),
 # ws=(openpyxl worksheet), stdio=(standard I/O).
-ignore-words-list = "jupyter,ipa,anc,lits,missings,fallow,unparseable,master,fo,iff,falsy,ws,stdio,fillin"
+ignore-words-list = "jupyter,ipa,anc,lits,missings,fallow,unparseable,master,fo,iff,falsy,ws,stdio,fillin,lets"
 skip = "uv.lock,*.dta,*.parquet,*.xlsx"
