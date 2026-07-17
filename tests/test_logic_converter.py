@@ -15,7 +15,11 @@ SurveyCTO->Stata relevance translator:
 Plus guards that valid translations still work, so the boundary tightening did
 not over-restrict.
 """
-from transformers.logic_converter import LogicConverter, clear_strip_log
+
+from surveycto_extractor.transformers.logic_converter import (
+    LogicConverter,
+    clear_strip_log,
+)
 
 convert = LogicConverter.convert_to_stata
 
@@ -32,7 +36,7 @@ class TestFindBalancedQuoteAware:
         # Was: '", a, b) & x > 5 & !missing(x)'  (orphaned tail after quoted ')')
         result = convert('join(")", ${a}, ${b}) and ${x} > 5', {})
         assert result == "x > 5 & !missing(x)"
-        assert '"' not in result          # no orphaned quote
+        assert '"' not in result  # no orphaned quote
         assert "join" not in result.lower()
 
     def test_concat_with_quoted_paren_fully_stripped(self):
@@ -45,7 +49,7 @@ class TestFindBalancedQuoteAware:
         # opening paren is at index 4; matching close is the one before " rest"
         close = LogicConverter._find_balanced(s, 4)
         assert s[close] == ")"
-        assert s[close + 1:] == " rest"
+        assert s[close + 1 :] == " rest"
 
     def test_split_top_level_args_quote_aware(self):
         # A comma inside a string literal is not a separator.
@@ -128,16 +132,21 @@ class TestRegressionGuards:
         assert convert("min(${g})", {}) is None
 
     def test_selected_select_one(self):
-        assert convert("selected(${food}, '3')", {"food": "select_one"}) == "(food == 3)"
+        assert (
+            convert("selected(${food}, '3')", {"food": "select_one"}) == "(food == 3)"
+        )
 
     def test_selected_select_multiple(self):
-        assert convert("selected(${ls}, '2')", {"ls": "select_multiple"}) == "(ls_2 == 1)"
+        assert (
+            convert("selected(${ls}, '2')", {"ls": "select_multiple"}) == "(ls_2 == 1)"
+        )
 
 
 class TestStructuralIssues:
     """#27.7 -- structural_issues must flag every corruption mode a strip or
     translate bug can leave behind. Inputs are the exact corrupted outputs
-    quoted in issues #22 and #27."""
+    quoted in issues #22 and #27.
+    """
 
     issues = staticmethod(LogicConverter.structural_issues)
 
@@ -146,7 +155,7 @@ class TestStructuralIssues:
 
     def test_residual_single_quote(self):
         # From #22 case 3: contains needle emptied with orphan quote tail.
-        assert "residual single quote" in self.issues("strpos(a, \"\") > 0')")
+        assert "residual single quote" in self.issues('strpos(a, "") > 0\')')
 
     def test_orphan_comma(self):
         # From #27.6: sentinel-as-argument leaves cond( , 2, 3).
@@ -161,12 +170,14 @@ class TestStructuralIssues:
         assert "dangling !" in self.issues("a == 1 & !")
 
     def test_leaked_function(self):
-        assert any(i.startswith("leaked function: pulldata")
-                   for i in self.issues("pulldata('x', 'y', 'z', a) == 1"))
+        assert any(
+            i.startswith("leaked function: pulldata")
+            for i in self.issues("pulldata('x', 'y', 'z', a) == 1")
+        )
 
     def test_quoted_content_ignored(self):
         # Parens, commas, quotes inside a double-quoted Stata literal are fine.
-        assert self.issues('regexm(a, "(x,y) \'q\'") & b == 1') == []
+        assert self.issues("regexm(a, \"(x,y) 'q'\") & b == 1") == []
 
     def test_clean_conditions_pass(self):
         assert self.issues("x > 5 & !missing(x)") == []
@@ -176,7 +187,8 @@ class TestStructuralIssues:
 
 class TestLiteralMasking:
     """#27 Class B -- late-stage operator rewrites must not reach inside the
-    string literals the converter itself emits at step 8."""
+    string literals the converter itself emits at step 8.
+    """
 
     def test_regex_needle_equals_not_doubled(self):
         # Step 14 (= -> ==) must not touch the '=' inside the emitted needle.
@@ -211,7 +223,8 @@ class TestLiteralMasking:
 
 class TestQuoteAwareStripsAndCleanup:
     """C7 -- #22 (all) + #27.1,2,4,5,6,8,9. Each asserts the output is also
-    structurally clean, so a fix can't trade one corruption for another."""
+    structurally clean, so a fix can't trade one corruption for another.
+    """
 
     def _clean(self, result):
         if result is not None:
@@ -305,18 +318,23 @@ class TestStartsEndsWith:
     """Review HIGH #4 -- starts-with() emitted a Stata-based substr(v, 1, N)
     that Step 9 re-shifted to substr(v, 2, N-1), so the comparison could never
     be true. It must finalize to a valid 1-based substr; ends-with is unchanged
-    (its `.` length makes Step 9 a no-op)."""
+    (its `.` length makes Step 9 a no-op).
+    """
 
     def test_starts_with_offsets_correct(self):
         # first 2 chars == "07" -- was substr(phone, 2, 1) before the fix
-        assert convert("starts-with(${phone}, '07')", {}) == 'substr(phone, 1, 2) == "07"'
+        assert (
+            convert("starts-with(${phone}, '07')", {}) == 'substr(phone, 1, 2) == "07"'
+        )
 
     def test_starts_with_longer_needle(self):
         assert convert("starts-with(${v}, 'abc')", {}) == 'substr(v, 1, 3) == "abc"'
 
     def test_starts_with_in_compound(self):
-        assert convert("starts-with(${phone}, '07') and ${x} > 5", {}) == \
-            'substr(phone, 1, 2) == "07" & x > 5 & !missing(x)'
+        assert (
+            convert("starts-with(${phone}, '07') and ${x} > 5", {})
+            == 'substr(phone, 1, 2) == "07" & x > 5 & !missing(x)'
+        )
 
     def test_ends_with_unchanged(self):
         assert convert("ends-with(${v}, 'xy')", {}) == 'substr(v, -2, .) == "xy"'
@@ -329,7 +347,7 @@ class TestReviewMedLowFixes:
         # #9: step 12f's single->double rewrite must not treat single quotes
         # INSIDE an emitted double-quoted needle as comparison operands.
         # Was: strpos(x, "a= "b"") (broken nested quoting).
-        assert convert('contains(${x}, "a=\'b\'")', {}) == 'strpos(x, "a=\'b\'") > 0'
+        assert convert("contains(${x}, \"a='b'\")", {}) == "strpos(x, \"a='b'\") > 0"
 
     def test_structural_issues_passes_through_valid_math(self):
         # #12: round/sqrt/abs/... are valid in Stata AND SurveyCTO; not leaks.
@@ -338,13 +356,15 @@ class TestReviewMedLowFixes:
 
     def test_structural_issues_flags_uppercase_leak(self):
         # #12: the check is now case-insensitive, so PULLDATA(...) is caught.
-        assert LogicConverter.structural_issues("PULLDATA(x) > 5") == \
-            ["leaked function: PULLDATA()"]
+        assert LogicConverter.structural_issues("PULLDATA(x) > 5") == [
+            "leaked function: PULLDATA()"
+        ]
 
 
 class TestConstraintCorruptionsFromSample:
     """C7 -- three real corruptions the structural validator surfaced in the
-    sample's own constraint expressions (all `.`-form constraints)."""
+    sample's own constraint expressions (all `.`-form constraints).
+    """
 
     constraint = staticmethod(LogicConverter.convert_constraint_to_stata)
 
@@ -354,17 +374,22 @@ class TestConstraintCorruptionsFromSample:
         # Stata double-quoted string, not survive as an invalid ' literal.
         result = self.constraint(
             ". = -888 or (substr(., 0, 1) = '0' and string-length(.) = 10)",
-            "resp_contact", {}, {})
-        assert result == ('resp_contact == -888 | (substr(resp_contact, 1, 1) '
-                          '== "0" & strlen(resp_contact) == 10)')
+            "resp_contact",
+            {},
+            {},
+        )
+        assert result == (
+            "resp_contact == -888 | (substr(resp_contact, 1, 1) "
+            '== "0" & strlen(resp_contact) == 10)'
+        )
         assert LogicConverter.structural_issues(result) == []
 
     def test_index_dependent_constraint_dropped_cleanly(self):
         # A per-iteration constraint gated on index() cannot be evaluated in
         # the wide-export Stata world -> dropped whole, not left as cond(X, ).
         result = self.constraint(
-            "if(index() = 1, . >= 18, if(index() = 2, . >= 3, . >= 0))",
-            "age", {}, {})
+            "if(index() = 1, . >= 18, if(index() = 2, . >= 3, . >= 0))", "age", {}, {}
+        )
         assert result is None
 
     def test_cond_with_stripped_branch_no_orphan_comma(self):

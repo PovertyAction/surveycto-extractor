@@ -27,7 +27,7 @@ Cases file schema (both user-supplied and auto-derived scenarios use this):
     ]
   }
 
-An answer sheet (what --expand writes, one per variation) is the shape main.py
+An answer sheet (what --expand writes, one per variation) is the shape surveycto-extract
 consumes via --answers-file:
 
   {"answers": {var-or-suffixed-key: value}, "directives": {"repeat_counts": {name: N}}}

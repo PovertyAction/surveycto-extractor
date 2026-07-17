@@ -6,11 +6,12 @@ pattern change silently breaks a case (cf. commit 2a6c591, "Pass 5 fix:
 text_max_length regex matched = inside >= / !="). Cover the operator variants,
 the disjunction/conditional bail-outs, and the known quote-tracking limitation.
 """
-from generators.sampling import (
-    numeric_bounds,
-    text_max_length,
-    select_multiple_count_bounds,
+
+from surveycto_extractor.generators.sampling import (
     _has_top_level_or,
+    numeric_bounds,
+    select_multiple_count_bounds,
+    text_max_length,
 )
 
 

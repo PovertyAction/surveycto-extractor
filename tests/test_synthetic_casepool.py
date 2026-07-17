@@ -5,17 +5,29 @@ For case-managed forms (caller-ID / screening), the survey body is gated by
 pool to the bench-test cases makes those gates resolve the way they did for the
 tester, so the synth reproduces the bench-test context.
 """
+
 import pandas as pd
 import pytest
 
-from extractors.pulldata_loader import PullDataTable
-from generators.synthetic_data import _build_caseid_pool
+from surveycto_extractor.extractors.pulldata_loader import PullDataTable
+from surveycto_extractor.generators.synthetic_data import _build_caseid_pool
 
 # a caseid-keyed pulldata ref so the pool is built from the 'id' column
-_FORM = [{"variable_name": "wave", "type": "calculate",
-          "calculation": "pulldata('cases', 'wave', 'id', ${caseid})"}]
-_TABLES = {"cases": PullDataTable("cases", pd.DataFrame(
-    {"id": ["BT001", "BT002", "P100", "P101"], "wave": ["1", "2", "1", "3"]}))}
+_FORM = [
+    {
+        "variable_name": "wave",
+        "type": "calculate",
+        "calculation": "pulldata('cases', 'wave', 'id', ${caseid})",
+    }
+]
+_TABLES = {
+    "cases": PullDataTable(
+        "cases",
+        pd.DataFrame(
+            {"id": ["BT001", "BT002", "P100", "P101"], "wave": ["1", "2", "1", "3"]}
+        ),
+    )
+}
 
 
 def test_pool_unfiltered_has_all_cases():

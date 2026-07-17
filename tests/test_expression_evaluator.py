@@ -3,13 +3,15 @@
 tree-walking interpreter that the synthetic generator leans on. Covers operator
 precedence, short-circuit logic, missing-value propagation, the select / count
 string functions, repeat aggregates, pulldata, dates, and the regex() error
-contract (issue #12)."""
+contract (issue #12).
+"""
+
 import datetime
 import math
 
 import pytest
 
-from transformers.expression_evaluator import (
+from surveycto_extractor.transformers.expression_evaluator import (
     EvalContext,
     EvaluationError,
     ExpressionError,
@@ -51,7 +53,8 @@ class TestShortCircuit:
 class TestBlankNumericArgsDoNotCrash:
     """A blank numeric arg coerces to NaN; int(NaN) raises ValueError -- which
     is NOT an ExpressionError, so it used to escape safe_evaluate and abort the
-    whole pipeline instead of degrading. round()/substr() must handle it."""
+    whole pipeline instead of degrading. round()/substr() must handle it.
+    """
 
     def test_round_blank_precision_defaults_to_zero(self):
         # Was: ValueError("cannot convert float NaN to integer") escapes.
@@ -61,45 +64,68 @@ class TestBlankNumericArgsDoNotCrash:
         assert evaluate("substr(${s}, ${n})", ctx(row={"s": "hi", "n": ""})) == ""
 
     def test_substr_blank_end_runs_to_end(self):
-        assert evaluate("substr(${s}, 1, ${n})",
-                        ctx(row={"s": "hello", "n": ""})) == "ello"
+        assert (
+            evaluate("substr(${s}, 1, ${n})", ctx(row={"s": "hello", "n": ""}))
+            == "ello"
+        )
 
     def test_safe_evaluate_no_longer_raises_on_blank_args(self):
         # The pipeline calls these through safe_evaluate; confirm no ValueError
         # leaks (it would if the fns raised a non-ExpressionError).
-        assert safe_evaluate("round(5.5, ${d})", ctx(row={"d": ""}),
-                             default="DEFAULT") == 6.0
-        assert safe_evaluate("substr(${s}, ${n})", ctx(row={"s": "hi", "n": ""}),
-                             default="DEFAULT") == ""
+        assert (
+            safe_evaluate("round(5.5, ${d})", ctx(row={"d": ""}), default="DEFAULT")
+            == 6.0
+        )
+        assert (
+            safe_evaluate(
+                "substr(${s}, ${n})", ctx(row={"s": "hi", "n": ""}), default="DEFAULT"
+            )
+            == ""
+        )
 
 
 class TestNestedRepeatIfAggregates:
     """Review HIGH #3 -- count-if/sum-if/... over a NESTED repeat field (stored
     base_o_i) returned 0/empty: the predicate was pushed only the innermost
     index, so ${x} resolved to base_i (nonexistent) instead of base_o_i.
-    #28.5 had only fixed the predicate-free sum(${plot}) path."""
+    #28.5 had only fixed the predicate-free sum(${plot}) path.
+    """
 
     def _nested(self):
         # parcels(o) -> plots(i): plot_1_1, plot_1_2 (parcel 1), plot_2_1 (parcel 2)
         return {
-            "plot_1_1": "1", "plot_1_2": "1", "plot_2_1": "1",
-            "plot_status_1_1": "active", "plot_status_1_2": "active",
+            "plot_1_1": "1",
+            "plot_1_2": "1",
+            "plot_2_1": "1",
+            "plot_status_1_1": "active",
+            "plot_status_1_2": "active",
             "plot_status_2_1": "active",
         }
 
     def test_count_if_nested_counts_all(self):
-        assert evaluate("count-if(${plot}, ${plot_status}='active')",
-                        ctx(row=self._nested())) == 3.0
+        assert (
+            evaluate(
+                "count-if(${plot}, ${plot_status}='active')", ctx(row=self._nested())
+            )
+            == 3.0
+        )
 
     def test_count_if_nested_respects_predicate(self):
         row = self._nested()
         row["plot_status_2_1"] = "fallow"
-        assert evaluate("count-if(${plot}, ${plot_status}='active')",
-                        ctx(row=row)) == 2.0
+        assert (
+            evaluate("count-if(${plot}, ${plot_status}='active')", ctx(row=row)) == 2.0
+        )
 
     def test_sum_if_nested(self):
-        row = {"yield_1_1": "10", "yield_1_2": "20", "yield_2_1": "30",
-               "ok_1_1": "1", "ok_1_2": "1", "ok_2_1": "0"}
+        row = {
+            "yield_1_1": "10",
+            "yield_1_2": "20",
+            "yield_2_1": "30",
+            "ok_1_1": "1",
+            "ok_1_2": "1",
+            "ok_2_1": "0",
+        }
         assert evaluate("sum-if(${yield}, ${ok}='1')", ctx(row=row)) == 30.0
 
     def test_single_level_if_still_works(self):
@@ -127,8 +153,11 @@ class TestMissingValues:
         # Blank + blank is NaN, which serialises to an empty string, not 0 or
         # "nan" -- matching a blank SurveyCTO export cell. (#28.2)
         c = ctx(row={"inc1": "", "inc2": ""})
-        assert evaluate("${inc1} + ${inc2}", c) != evaluate("${inc1} + ${inc2}", c)  # NaN
-        from transformers.expression_evaluator import _to_string
+        assert evaluate("${inc1} + ${inc2}", c) != evaluate(
+            "${inc1} + ${inc2}", c
+        )  # NaN
+        from surveycto_extractor.transformers.expression_evaluator import _to_string
+
         assert _to_string(evaluate("${inc1} + ${inc2}", c)) == ""
 
     def test_explicit_nan_operand_makes_comparison_false(self):
@@ -161,8 +190,9 @@ class TestDateArithmetic:
 
     def test_age_gate_now_reachable(self):
         c = ctx(row={"dob": "1990-01-01"}, now=datetime.datetime(2020, 1, 1))
-        assert evaluate_bool(
-            "int((today() - date(${dob})) div 365.25) >= 18", c) is True
+        assert (
+            evaluate_bool("int((today() - date(${dob})) div 365.25) >= 18", c) is True
+        )
 
     def test_blank_dob_age_is_nan_not_zero(self):
         c = ctx(row={"dob": ""}, now=datetime.datetime(2020, 1, 1))
@@ -177,6 +207,7 @@ class TestPulldataErrorContract:
     def test_pulldata_raising_lookup_surfaces_error(self):
         def _boom(*a):
             raise KeyError("no such column")
+
         c = ctx(pulldata_lookup=_boom)
         # safe_evaluate should log/raise, not silently blank (#28.9).
         with pytest.raises(EvaluationError):
@@ -198,21 +229,26 @@ class TestNestedRepeatScoping:
         # At (outer=2, inner=3), a reference to an outer-scoped field `a`
         # (stored a_2) must resolve to a_2, NOT a_3 (a different outer
         # iteration) -- the cross-iteration bleed of #28.4.
-        c = ctx(row={"a_2": "two", "a_3": "three"},
-                repeat_stack=[("outer", 2), ("inner", 3)])
+        c = ctx(
+            row={"a_2": "two", "a_3": "three"},
+            repeat_stack=[("outer", 2), ("inner", 3)],
+        )
         assert evaluate("${a}", c) == "two"
 
     def test_nested_field_resolves_full_chain(self):
-        c = ctx(row={"b_2_3": "correct", "b_2_1": "other", "b_1_3": "wrong"},
-                repeat_stack=[("outer", 2), ("inner", 3)])
+        c = ctx(
+            row={"b_2_3": "correct", "b_2_1": "other", "b_1_3": "wrong"},
+            repeat_stack=[("outer", 2), ("inner", 3)],
+        )
         assert evaluate("${b}", c) == "correct"
 
     def test_sum_over_nested_field_scoped_to_current_outer(self):
         # sum(${plot}) inside parcel 2 sums only parcel 2's plots (#28.5) --
         # the old single-suffix enumeration found nothing for nested storage.
-        c = ctx(row={"plot_1_1": "10", "plot_1_2": "20",
-                     "plot_2_1": "3", "plot_2_2": "4"},
-                repeat_stack=[("parcel", 2)])
+        c = ctx(
+            row={"plot_1_1": "10", "plot_1_2": "20", "plot_2_1": "3", "plot_2_2": "4"},
+            repeat_stack=[("parcel", 2)],
+        )
         assert evaluate("sum(${plot})", c) == 7  # 3 + 4, not 37 and not 0
 
     def test_single_repeat_sum_unchanged(self):
@@ -252,11 +288,13 @@ class TestRegexErrorContract:
     def test_safe_evaluate_applies_fallback_and_logs(self):
         logged = []
         out = safe_evaluate(
-            "regex('x', '[')", ctx(), default=True,
+            "regex('x', '[')",
+            ctx(),
+            default=True,
             on_error=lambda e, exc: logged.append((e, exc)),
         )
-        assert out is True            # caller's documented fallback
-        assert len(logged) == 1       # surfaced, not hidden
+        assert out is True  # caller's documented fallback
+        assert len(logged) == 1  # surfaced, not hidden
         assert isinstance(logged[0][1], ExpressionError)
 
 
@@ -269,7 +307,9 @@ class TestPulldata:
                 (csv, col, key_col, str(key_val)), ""
             ),
         )
-        assert evaluate("pulldata('cases', 'phone', 'id', ${caseid})", c) == "0700000000"
+        assert (
+            evaluate("pulldata('cases', 'phone', 'id', ${caseid})", c) == "0700000000"
+        )
 
     def test_pulldata_without_lookup_returns_empty(self):
         assert evaluate("pulldata('cases', 'phone', 'id', 'c1')", ctx()) == ""

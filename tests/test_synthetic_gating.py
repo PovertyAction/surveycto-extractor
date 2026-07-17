@@ -7,20 +7,31 @@ than silently shown -- so we never fabricate a cell we cannot prove SurveyCTO
 would display. ``--legacy-fail-open-relevance`` (strict=False) restores the old
 show-on-error behaviour.
 """
+
 import csv
 import json
 
-from transformers.expression_evaluator import EvalContext
-from generators.synthetic_data import (
+from surveycto_extractor.generators.synthetic_data import (
     StripLog,
     _is_relevant,
     generate_synthetic_csv,
 )
+from surveycto_extractor.transformers.expression_evaluator import EvalContext
 
 _META = {
-    "CompletionDate", "SubmissionDate", "starttime", "endtime", "deviceid",
-    "subscriberid", "simid", "devicephonenum", "username", "duration",
-    "caseid", "KEY", "formdef_version",
+    "CompletionDate",
+    "SubmissionDate",
+    "starttime",
+    "endtime",
+    "deviceid",
+    "subscriberid",
+    "simid",
+    "devicephonenum",
+    "username",
+    "duration",
+    "caseid",
+    "KEY",
+    "formdef_version",
 }
 
 
@@ -30,8 +41,13 @@ def _run(tmp_path, form, *, n_rows=1, seed=1, **kwargs):
     qp.write_text(json.dumps(form), encoding="utf-8")
     out = tmp_path / "synth.csv"
     generate_synthetic_csv(
-        qp, out, pulldata_search_dirs=[], survey_name="t",
-        n_rows=n_rows, seed=seed, **kwargs,
+        qp,
+        out,
+        pulldata_search_dirs=[],
+        survey_name="t",
+        n_rows=n_rows,
+        seed=seed,
+        **kwargs,
     )
     with out.open(encoding="utf-8") as f:
         reader = csv.DictReader(f)
@@ -40,23 +56,32 @@ def _run(tmp_path, form, *, n_rows=1, seed=1, **kwargs):
 
 # ── CSV-level behaviour ───────────────────────────────────────────────────────
 
+
 def test_strict_unevaluable_relevance_fails_closed(tmp_path):
     form = [
-        {"type": "text", "variable_name": "q",
-         "relevance": "never_a_real_fn() = 1", "group_path": []},
+        {
+            "type": "text",
+            "variable_name": "q",
+            "relevance": "never_a_real_fn() = 1",
+            "group_path": [],
+        },
     ]
-    _, strict_rows = _run(tmp_path / "strict", form)          # default strict=True
+    _, strict_rows = _run(tmp_path / "strict", form)  # default strict=True
     _, legacy_rows = _run(tmp_path / "legacy", form, strict=False)
-    assert strict_rows[0]["q"] == ""            # un-evaluable -> hidden
-    assert legacy_rows[0]["q"] != ""            # fail-open -> shown
+    assert strict_rows[0]["q"] == ""  # un-evaluable -> hidden
+    assert legacy_rows[0]["q"] != ""  # fail-open -> shown
 
 
 def test_validly_false_relevance_blanks_in_both_modes(tmp_path):
     """A defined-falsy gate is legitimate gating, unchanged by strict mode."""
     form = [
         {"type": "text", "variable_name": "x", "group_path": []},
-        {"type": "text", "variable_name": "dep",
-         "relevance": "${x} = 999999", "group_path": []},
+        {
+            "type": "text",
+            "variable_name": "dep",
+            "relevance": "${x} = 999999",
+            "group_path": [],
+        },
     ]
     _, strict_rows = _run(tmp_path / "s", form)
     _, legacy_rows = _run(tmp_path / "l", form, strict=False)
@@ -65,6 +90,7 @@ def test_validly_false_relevance_blanks_in_both_modes(tmp_path):
 
 
 # ── GateDecision unit behaviour ───────────────────────────────────────────────
+
 
 def test_gate_decision_captures_operands_on_validly_false():
     sl = StripLog()
@@ -89,12 +115,21 @@ def test_gate_decision_unevaluable_strict_vs_legacy():
 def test_forward_referenced_gate_resolves(tmp_path):
     """A gate referencing a variable defined LATER resolves via the fixpoint:
     ``early`` is gated on ``${late}=1``; ``late`` (a calc = 1) is defined after
-    it, so a single pass would blank ``early``. Phase B re-gates and shows it."""
+    it, so a single pass would blank ``early``. Phase B re-gates and shows it.
+    """
     form = [
-        {"type": "text", "variable_name": "early",
-         "relevance": "${late} = 1", "group_path": []},
-        {"type": "calculate", "variable_name": "late",
-         "calculation": "1", "group_path": []},
+        {
+            "type": "text",
+            "variable_name": "early",
+            "relevance": "${late} = 1",
+            "group_path": [],
+        },
+        {
+            "type": "calculate",
+            "variable_name": "late",
+            "calculation": "1",
+            "group_path": [],
+        },
     ]
     _, rows = _run(tmp_path / "fwd", form)
     assert rows[0]["late"] == "1"
@@ -103,23 +138,44 @@ def test_forward_referenced_gate_resolves(tmp_path):
 
 def test_forward_referenced_gate_stays_closed_when_false(tmp_path):
     form = [
-        {"type": "text", "variable_name": "early",
-         "relevance": "${late} = 1", "group_path": []},
-        {"type": "calculate", "variable_name": "late",
-         "calculation": "0", "group_path": []},
+        {
+            "type": "text",
+            "variable_name": "early",
+            "relevance": "${late} = 1",
+            "group_path": [],
+        },
+        {
+            "type": "calculate",
+            "variable_name": "late",
+            "calculation": "0",
+            "group_path": [],
+        },
     ]
     _, rows = _run(tmp_path / "fwd0", form)
-    assert rows[0]["early"] == ""       # gate genuinely false after resolution
+    assert rows[0]["early"] == ""  # gate genuinely false after resolution
 
 
 def test_forward_ref_run_is_deterministic(tmp_path):
     form = [
-        {"type": "text", "variable_name": "early",
-         "relevance": "${late} = 1", "group_path": []},
-        {"type": "integer", "variable_name": "n", "constraint": ". >= 0 and . <= 50",
-         "relevance": "${late} = 1", "group_path": []},
-        {"type": "calculate", "variable_name": "late",
-         "calculation": "1", "group_path": []},
+        {
+            "type": "text",
+            "variable_name": "early",
+            "relevance": "${late} = 1",
+            "group_path": [],
+        },
+        {
+            "type": "integer",
+            "variable_name": "n",
+            "constraint": ". >= 0 and . <= 50",
+            "relevance": "${late} = 1",
+            "group_path": [],
+        },
+        {
+            "type": "calculate",
+            "variable_name": "late",
+            "calculation": "1",
+            "group_path": [],
+        },
     ]
     _, r1 = _run(tmp_path / "d1", form, n_rows=5, seed=9)
     _, r2 = _run(tmp_path / "d2", form, n_rows=5, seed=9)

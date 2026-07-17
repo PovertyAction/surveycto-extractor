@@ -7,17 +7,18 @@ Then `map_column` is checked on the wide-column shapes that fuzzy matching
 struggles with (repeat `_N` suffixes, select_multiple choice binaries, system
 and unmapped columns).
 """
+
 import json
 
 import pytest
 
-from parsers.xml_contract import (
+from surveycto_extractor.parsers.xml_contract import (
     FormContract,
-    parse_contract,
-    build_contract,
-    is_system_column,
     _parse_pulldata,
     _parse_search,
+    build_contract,
+    is_system_column,
+    parse_contract,
 )
 
 # A minimal but representative compiled XForm:
@@ -88,8 +89,14 @@ class TestParseContract:
 
     def test_nodes_discovered(self, contract):
         names = {n.name for n in contract.nodes.values()}
-        assert {"name", "fav_color", "langs", "pre_score",
-                "member_name", "member_age"} <= names
+        assert {
+            "name",
+            "fav_color",
+            "langs",
+            "pre_score",
+            "member_name",
+            "member_age",
+        } <= names
 
     def test_repeat_detected(self, contract):
         assert "members" in contract.repeat_groups
@@ -166,14 +173,14 @@ class TestMapColumn:
     def test_ragged_under_indexed_repeat_flagged(self, contract):
         # A repeat field with fewer indices than its depth is flagged ragged
         # instead of silently dropping the level. (#23.2)
-        m = contract.map_column("member_name")   # depth 1, zero indices
+        m = contract.map_column("member_name")  # depth 1, zero indices
         assert m.get("ragged") is True
 
     def test_ragged_over_indexed_repeat_flagged(self, contract):
         # More indices than the node's depth must ALSO be flagged: the zip
         # truncation would otherwise drop the surplus index silently. Was only
         # flagged for the under-indexed case (< n_iter). (#23.2 / review #11)
-        m = contract.map_column("member_name_3_4")   # depth 1, two indices
+        m = contract.map_column("member_name_3_4")  # depth 1, two indices
         assert m["node_path"] == "members/member_name"
         assert m.get("ragged") is True
 
@@ -276,6 +283,7 @@ class TestNestedRepeats:
         # Phase-4 regex (base_(\d+)_(\d+): group1=choice, group2=repeat) so the
         # two paths can't silently diverge again.
         import re
+
         xml = """<?xml version="1.0"?>
 <h:html xmlns="http://www.w3.org/2002/xforms" xmlns:h="http://www.w3.org/1999/xhtml"
         xmlns:jr="http://openrosa.org/javarosa">

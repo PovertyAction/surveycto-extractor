@@ -16,7 +16,7 @@ user_invocable: true
 SETUP INSTRUCTIONS:
 1. Copy this folder to .claude/skills/bench-test/ in your project.
 2. Copy bench_scenarios.py alongside this file.
-3. Requires the surveycto-extractor toolkit (main.py + a filled config.py with the
+3. Requires the surveycto-extractor toolkit (surveycto-extract + a filled config.py with the
    survey's SURVEYS/DATASETS entry) and, ideally, the survey-expert MCP server for
    scenario derivation. Delete this comment block once customised.
 -->
@@ -36,7 +36,7 @@ Invoke: `/bench-test <survey_key>` (a key in `config.SURVEYS`). With no key, lis
 
 ## The engine contract you build on
 
-The toolkit's `main.py --phases synthetic` walks the form deterministically and
+The toolkit's `surveycto-extract --phases synthetic` walks the form deterministically and
 fills values. Two flags matter here (see `docs/synthetic-generator.md`):
 
 - `--answers-file PATH` -- apply a JSON answer sheet **through open gates only**
@@ -135,7 +135,7 @@ engine). For scale, run one fill subagent per scenario (or per variation): each
 edits its sheet, then runs the engine. Fill each variation:
 
 ```bash
-python main.py --survey <key> --phases synthetic --rows 1 \
+uv run surveycto-extract --survey <key> --phases synthetic --rows 1 \
     --seed <run.seed> --answers-file <run.answers_file> \
     --coverage-trace <run_dir>/<scenario>_v<NN>.coverage.json
 ```

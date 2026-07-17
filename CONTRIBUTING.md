@@ -25,5 +25,5 @@ Contributions are welcome. Please read this before opening a PR.
 ## Code style
 
 - Python 3.10+ compatible (3.10-3.13 are exercised in CI).
-- No external dependencies beyond those in `requirements.txt`.
+- No external dependencies beyond those declared in `pyproject.toml`.
 - All new modules must be project-agnostic (no hardcoded paths or survey names).

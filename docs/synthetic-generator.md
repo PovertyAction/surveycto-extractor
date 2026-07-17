@@ -11,10 +11,10 @@ logic, and exercises every check before the first respondent is interviewed.
 
 ```bash
 # Generate questions.json first (required input)
-python main.py --survey my_survey --phases json
+uv run surveycto-extract --survey my_survey --phases json
 
 # Then synth (default 5 rows)
-python main.py --survey my_survey --phases synthetic --rows 20 --seed 42
+uv run surveycto-extract --survey my_survey --phases synthetic --rows 20 --seed 42
 ```
 
 Outputs: `<output_dir>/<survey>_synthetic.csv` and (when applicable) a
@@ -46,7 +46,7 @@ Per respondent the walker:
    (`inner_count_1, inner_count_2, …`), and the column header is the rectangular
    `max(outer) × max(inner)` grid SurveyCTO pads to. This mirrors the suffix
    logic the variable dictionary uses to reconstruct nested rosters from real
-   data (`create_variable_dictionaries._build_repeat_tree`).
+   data (`surveycto_extractor.cli.vardict._build_repeat_tree`).
 
 ## CLI flags
 
@@ -77,7 +77,7 @@ question-level samples.
 Verify with `md5sum`:
 
 ```bash
-python main.py --survey my_survey --phases synthetic --rows 20 --seed 42
+uv run surveycto-extract --survey my_survey --phases synthetic --rows 20 --seed 42
 md5sum <output_dir>/my_survey_synthetic.csv
 # Re-run — md5 must match
 ```
@@ -107,9 +107,9 @@ the simulation on a chosen case-management context:
 
 ```bash
 # bench-test cases only -- their preload (wave, total_phones) drives the gates
-python main.py --survey s --phases synthetic --case-prefix BT
+uv run surveycto-extract --survey s --phases synthetic --case-prefix BT
 # or an explicit id list (one per line) -- e.g. the exact cases a tester used
-python main.py --survey s --phases synthetic --case-ids-file bt_ids.txt
+uv run surveycto-extract --survey s --phases synthetic --case-ids-file bt_ids.txt
 ```
 
 Equivalently, an answer sheet may carry `"directives": {"case_pool": {"prefix": "BT"}}`
@@ -198,11 +198,11 @@ references a forced variable that's defined later) resolve correctly.
 
 ```bash
 # Force the whole consent cascade
-python main.py --survey my_survey --phases synthetic --rows 20 \
+uv run surveycto-extract --survey my_survey --phases synthetic --rows 20 \
     --force-value c_consent_qs_ans=1,c_consent_understand=1,c_consent=1
 
 # Or with repeated flags (use this when values contain commas)
-python main.py --survey my_survey --phases synthetic \
+uv run surveycto-extract --survey my_survey --phases synthetic \
     --force-value c_consent=1 \
     --force-value hh_consent=1
 ```
@@ -248,7 +248,7 @@ Sheet shape:
   gates out never populates the cell (it is recorded, not forced).
 
 ```bash
-python main.py --survey my_survey --phases synthetic --rows 1 \
+uv run surveycto-extract --survey my_survey --phases synthetic --rows 1 \
     --seed 7 --answers-file interesting_case_01.json
 ```
 
@@ -436,7 +436,7 @@ patterns we use.
 
 | File | What it does |
 |---|---|
-| `main.py:run_synthetic_phase` | Phase entry point, reads settings sheet for `form_id` / `version`, dispatches to `generate_synthetic_csv` |
+| `surveycto_extractor/cli/extract.py:run_synthetic_phase` | Phase entry point, reads settings sheet for `form_id` / `version`, dispatches to `generate_synthetic_csv` |
 | `generators/synthetic_data.py` | Walker, run-context builder, metadata-value emitter, search() expander, audit URL formatter, CSV writer |
 | `generators/sampling.py` | Type-aware value sampling, numeric/text bound extraction, conditional select_multiple constraint parsing |
 | `extractors/pulldata_loader.py` | Pulldata CSV discovery, indexed lookup, key normalisation |

@@ -1,8 +1,8 @@
 {
     "mcpServers": {
         "survey-expert": {
-            "command": "python",
-            "args": ["mcp_server/survey_server.py"]
+            "command": "uv",
+            "args": ["run", "--extra", "mcp", "python", "-m", "surveycto_extractor.mcp_server.survey_server"]
         }
     }
 }

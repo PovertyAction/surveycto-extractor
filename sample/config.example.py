@@ -2,11 +2,11 @@
 Sample config for the bundled household survey demo.
 
 To run the sample:
-  1. Copy this file to config.py in the repo root (same folder as main.py):
+  1. Copy this file to config.py in the repo root:
          cp sample/config.example.py config.py
   2. From the repo root, run:
-         python main.py --survey household_survey
-         python create_variable_dictionaries.py --survey household_survey --xlsx
+         uv run surveycto-extract --survey household_survey
+         uv run surveycto-vardict --survey household_survey --xlsx
 """
 
 from pathlib import Path
@@ -39,7 +39,7 @@ SURVEYS = {
         # Recommended for HFC dry-runs that need consent-gated sections
         # populated (the random sampler hits the gate ~12% of the time
         # without forcing):
-        #   python main.py --survey household_survey --phases synthetic \
+        #   uv run surveycto-extract --survey household_survey --phases synthetic \
         #       --force-value c_consent_qs_ans=1 \
         #       --force-value c_consent_understand=1 \
         #       --force-value c_consent=1 --force-value hh_consent=1
@@ -47,7 +47,7 @@ SURVEYS = {
 }
 
 # Data side — needs .dta + questions_json bridge; run after data collection (Phase 4+)
-# questions_json points to the *_questions.json file produced by: main.py --phases json
+# questions_json points to the *_questions.json file produced by: surveycto-extract --phases json
 DATASETS = {
     "household_survey": {
         "data":           SAMPLE_DIR / "household_survey.dta",
@@ -56,7 +56,7 @@ DATASETS = {
         "output_xlsx":    SAMPLE_DIR / "output" / "household_survey_variable_dictionary.xlsx",
         # Optional: if you saved the deployed form's compiled XForm XML, point
         # xml_path at it to enable the deterministic XML-contract overlay
-        # (enrich_with_contract.py). Additive — omit it and Phase 4 is unchanged.
+        # (surveycto-enrich). Additive — omit it and Phase 4 is unchanged.
         # The bundled sample ships no compiled XForm, so this is left commented.
         #   "xml_path":             SAMPLE_DIR / "Household_Survey.xml",
         #   "xml_attachments_dirs": [SAMPLE_DIR],

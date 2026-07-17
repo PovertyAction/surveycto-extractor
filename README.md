@@ -14,13 +14,18 @@ your agent can query while you clean.
 ```bash
 git clone https://github.com/PovertyAction/surveycto-extractor.git
 cd surveycto-extractor
-pip install -r requirements.txt
+uv sync                              # create the env + install (uses the committed uv.lock)
 
-cp sample/config.example.py config.py
+cp sample/config.example.py config.py   # the pre-filled demo config
 
-python main.py --survey household_survey
-python create_variable_dictionaries.py --survey household_survey --xlsx
+uv run surveycto-extract --survey household_survey
+uv run surveycto-vardict --survey household_survey --xlsx
 ```
+
+For a **real project** (not the bundled demo), run `uv run surveycto-init` to
+drop a blank `config.py` template into the current directory, then fill in
+`SURVEYS`/`DATASETS`. `config.py` is per-project and gitignored; the tool
+discovers it in the directory you run from.
 
 Outputs land in `sample/output/`. The sample uses the
 [IPA High Frequency Checks](https://github.com/PovertyAction/high-frequency-checks)
@@ -69,7 +74,7 @@ instrument-side settings. Only `input_file`, `output_dir`, `sections_dir`, and
 ### 2. Extract documentation and structure
 
 ```bash
-python main.py --survey my_survey
+uv run surveycto-extract --survey my_survey
 ```
 
 The default `--phases all` produces every instrument-side output in one run:
@@ -87,7 +92,7 @@ combination).
 ### 3. Generate a synthetic export CSV
 
 ```bash
-python main.py --survey my_survey --phases synthetic --rows 20 --seed 42
+uv run surveycto-extract --survey my_survey --phases synthetic --rows 20 --seed 42
 ```
 
 Produces `<survey>_synthetic.csv` — a wide-export CSV indistinguishable in
@@ -99,7 +104,7 @@ values.
 
 ```bash
 # Force the consent cascade so HFC dry-runs exercise the gated sections
-python main.py --survey my_survey --phases synthetic --rows 20 --seed 42 \
+uv run surveycto-extract --survey my_survey --phases synthetic --rows 20 --seed 42 \
     --force-value c_consent=1 --force-value hh_consent=1
 ```
 
@@ -110,7 +115,7 @@ coherent, path-faithful rows — e.g. "interesting cases" for an HFC dry-run —
 `--force-value`, which bypasses them):
 
 ```bash
-python main.py --survey my_survey --phases synthetic --rows 1 \
+uv run surveycto-extract --survey my_survey --phases synthetic --rows 1 \
     --answers-file interesting_case_01.json
 ```
 
@@ -148,7 +153,7 @@ day, and the variable-dictionary output paths.
 ### 1. Generate the variable dictionary
 
 ```bash
-python create_variable_dictionaries.py --survey my_survey --xlsx
+uv run surveycto-vardict --survey my_survey --xlsx
 ```
 
 Maps every Stata variable to its source question, skip logic, choice list,
@@ -181,7 +186,7 @@ By default the column → question mapping uses heuristic name matching, which i
 the right default when all you have is the dataset plus `questions.json`. On
 complex instruments (nested repeats, `select_multiple` inside repeats,
 `pulldata()` preloads, dotted group nodes) fuzzy matching both leaves real
-columns unmatched and can occasionally mis-match.
+columns unmatched and can occasionally mismatch.
 
 If you **saved the deployed form's compiled XForm XML** (Design → Download under
 your SurveyCTO server's form definition), point at it and the extractor uses it
@@ -192,7 +197,7 @@ as the authoritative, deterministic spine:
 "xml_path": DATA_DIR / "forms" / "my_survey.xml",
 ```
 
-Then re-run Phase 4 (or `python enrich_with_contract.py --survey my_survey` to
+Then re-run Phase 4 (or `uv run surveycto-enrich --survey my_survey` to
 overlay without rebuilding). Each variable gains a `contract` block recording
 exactly **where it comes from** — `node_path`, repeat coordinates,
 `select_multiple` choice code, and `data_source` (parsed `search()` / `pulldata()`
@@ -201,13 +206,13 @@ and select-from-file choice labels are pulled from the form's attached CSVs.
 
 This is **optional and additive**: omit `xml_path` and Phase 4 behaves exactly as
 before. It's worth saving the XForm — it is the one input that makes the mapping
-deterministic. See `enrich_with_contract.py`.
+deterministic. See `surveycto-enrich`.
 
 ### 2. Use the variable graph
 
 The variable-dictionary step also writes `<survey>_variable_graph.json` — a
 directed graph capturing how variables relate (requires `networkx`, which
-`pip install -r requirements.txt` now includes):
+`uv sync` installs by default):
 
 - `calculates_from` — A's calculation references B.
 - `gated_by` — A's relevance references B.
@@ -227,7 +232,7 @@ hop:
 ### 3. Generate the summary-stats do-file
 
 ```bash
-python create_summary_stats_dofile.py --survey my_survey
+uv run surveycto-summary-stats --survey my_survey
 ```
 
 Produces a Stata do-file with `tabstat` calls for every numeric variable,
@@ -288,7 +293,7 @@ The `mcp_server/` directory contains an optional MCP server that keeps variable
 dictionaries in memory for instant lookups — the high-performance alternative
 for sessions with heavy query volume (10–50+ lookups per cleaning module).
 
-| | `skill/search_survey.py` | `mcp_server/survey_server.py` |
+| | `skill/search_survey.py` | `surveycto_extractor.mcp_server` |
 |---|---|---|
 | Loads JSON | Every call | Once at startup |
 | Dependencies | None (stdlib) | `mcp[cli]` |
@@ -301,7 +306,7 @@ for sessions with heavy query volume (10–50+ lookups per cleaning module).
 | Multi-survey filter | `--survey KEY` flag | `survey` parameter on every tool |
 
 ```bash
-pip install "mcp[cli]" networkx
+uv sync --extra mcp
 ```
 
 Add to your project's `.mcp.json` (a ready-made `.mcp.json.example` in the
@@ -311,8 +316,8 @@ repo root works out of the box for the sample: `cp .mcp.json.example .mcp.json`)
 {
   "mcpServers": {
     "survey-expert": {
-      "command": "python",
-      "args": ["path/to/surveycto_extractor/mcp_server/survey_server.py"]
+      "command": "uv",
+      "args": ["run", "--extra", "mcp", "python", "-m", "surveycto_extractor.mcp_server.survey_server"]
     }
   }
 }
@@ -420,32 +425,50 @@ SENTINEL_SCAN_ONLY = [-98]   # counted as sentinels but never recoded
 ```
 
 The single source of truth is `core/sentinels.py`, read by both
-`create_variable_dictionaries.py` and `generators/load_survey_metadata.py` so
-the two can never disagree. If `core/sentinels.py` is missing (e.g. a partial
+`surveycto-vardict` and the Stata-metadata loader (`generators/load_survey_metadata.py`)
+so the two can never disagree. If `core/sentinels.py` is missing (e.g. a partial
 vendor copy of the toolkit), the pipeline falls back to these same defaults with
 a warning rather than failing.
 
 ---
 
-## Repo layout (for projects that vendor this toolkit)
+## Using this toolkit in a project
 
-Recommended layout when copying this repo into a cleaning project:
+Install it as a package — from a clone of this repo, or (once published) as a
+dependency of your own project:
+
+```bash
+uv sync                       # from a clone of this repo
+# or, in another project:  uv add surveycto-extractor
+```
+
+Then, from your project directory:
+
+```bash
+uv run surveycto-init                        # writes a config.py template into ./
+# edit config.py → fill in SURVEYS / DATASETS
+uv run surveycto-extract --survey my_survey  # instrument day (csv/json/sections/synthetic)
+uv run surveycto-vardict --survey my_survey  # post-collection vardict + graph
+```
+
+`config.py` is per-project and gitignored; the tool discovers it in the
+directory you run from (override with `--config`/`SURVEYCTO_CONFIG`). Source
+layout:
 
 ```
-my_project/
-└── surveycto_extractor/
-    ├── coding_guidelines/                  ← reference from your AGENTS.md
-    ├── skill/                              ← copy to .claude/skills/survey-expert/
-    ├── config.py                           ← copy from config.template.py, fill in
-    ├── main.py                             ← instrument-side entry point
-    ├── create_variable_dictionaries.py     ← post-collection vardict + graph
-    ├── enrich_with_contract.py             ← overlays the XML contract onto the vardict
-    ├── create_summary_stats_dofile.py      ← post-collection summary stats
-    ├── core/                               ← shared support (sentinels table)
-    ├── parsers/                            ← survey + compiled-XForm (xml_contract) parsers
-    ├── generators/                         ← outputs incl. Stata metadata (load_survey_metadata)
-    ├── extractors/  transformers/          ← CSV/JSON extraction, logic conversion
-    └── ...
+surveycto-extractor/
+├── pyproject.toml  uv.lock  .python-version
+├── src/surveycto_extractor/
+│   ├── cli/            ← console entry points: extract, vardict, summary_stats, enrich, init
+│   ├── core/           ← shared support (sentinels table)
+│   ├── parsers/        ← survey + compiled-XForm (xml_contract) parsers
+│   ├── extractors/  transformers/   ← CSV/JSON extraction, logic conversion
+│   ├── generators/     ← outputs incl. Stata metadata (load_survey_metadata)
+│   ├── mcp_server/     ← optional MCP add-on (uv sync --extra mcp)
+│   └── templates/      ← the config.py template surveycto-init writes
+├── skill/              ← copy to .claude/skills/ (stdlib-only search + bench-test)
+├── coding_guidelines/  ← reference from your AGENTS.md
+└── sample/             ← bundled demo (household_survey)
 ```
 
 ---
@@ -461,11 +484,11 @@ configured `pulldata_search_dirs`. See the
 **`search_survey.py` finds no surveys**
 Check that `DOCS` in `search_survey.py` points to the directory containing
 your `*_variable_dictionary.json` files. Run
-`create_variable_dictionaries.py` first if the dictionary doesn't exist yet.
+`surveycto-vardict` first if the dictionary doesn't exist yet.
 
 **`FileNotFoundError: Bridge file not found`**
-`create_variable_dictionaries.py` needs the `*_questions.json` file produced
-by `main.py --phases json`. Run instrument-day first.
+`surveycto-vardict` needs the `*_questions.json` file produced
+by `surveycto-extract --phases json`. Run instrument-day first.
 
 **Summary-stats do-file has wrong `${input_data}` path**
 Add `"output_do"` and `"sumstats_dir_stata"` keys to your `DATASETS` entry.
