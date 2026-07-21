@@ -398,7 +398,7 @@ def main() -> None:
     DATASETS = get_datasets()
 
     if not DATASETS:
-        print("ERROR: config.DATASETS is empty. Add survey entries to config.py.")
+        print("ERROR: config.DATASETS is empty. Add survey entries to config.toml.")
         sys.exit(1)
 
     if args.survey:

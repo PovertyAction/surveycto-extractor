@@ -1,0 +1,54 @@
+# ============================================================================
+# config.toml -- SurveyCTO Extractor project configuration
+# ============================================================================
+# `surveycto-init` writes this file into your project as config.toml. It is
+# per-project and gitignored; the tool discovers it in the directory you run
+# from (override with the SURVEYCTO_CONFIG environment variable).
+#
+# Paths are RESOLVED RELATIVE TO THIS FILE's directory (absolute paths work too).
+#
+#   [surveys.KEY]  -> instrument day: surveycto-extract (csv/json/sections/synthetic)
+#   [datasets.KEY] -> data day:       surveycto-vardict, surveycto-summary-stats
+# Each [datasets.KEY] must share its KEY with a [surveys.KEY].
+# Uncomment and fill in the tables below.
+# ----------------------------------------------------------------------------
+
+# --- Instrument side: one [surveys.KEY] table per SurveyCTO form ------------
+# [surveys.my_survey]
+# input_file        = "path/to/my_survey.xlsx"          # required
+# output_dir        = "survey_documentation/my_survey"
+# sections_dir      = "survey_documentation/my_survey/sections"
+# name              = "My Survey Full Name"
+# max_section_depth = 3
+# external_choices_csv = ""                             # or "path/to/choices.csv"
+# # Optional synthetic-phase settings:
+# # pulldata_search_dirs = ["data/form_attachments"]    # dirs holding pulldata CSVs
+# # geo_bbox = [-1.5, 4.2, 29.5, 35.0]                  # [lat_min, lat_max, lon_min, lon_max]
+
+# --- Data side: one [datasets.KEY] table per collected dataset --------------
+# [datasets.my_survey]
+# data           = "data/my_survey.dta"                                       # Stata dataset
+# questions_json = "survey_documentation/my_survey/my_survey_questions.json"  # Phase-2 bridge
+# output_json    = "survey_documentation/my_survey/my_survey_variable_dictionary.json"
+# output_xlsx    = "survey_documentation/my_survey/my_survey_variable_dictionary.xlsx"
+# # skip_ord_dta = true
+# # Optional compiled-XForm contract overlay (deterministic mapping; see surveycto-enrich):
+# # xml_path             = "data/forms/my_survey.xml"
+# # xml_attachments_dirs = ["data/forms"]
+
+# --- Column mappings (optional; these defaults match IPA's convention) ------
+# [columns]
+# survey          = ["type", "name", "label", "constraint", "relevance", "required", "calculation"]
+# choices         = ["list_name", "value", "label"]
+# excluded_types  = ["begin group", "end group", "begin repeat", "end repeat", "note", "start", "end", "deviceid", "username", "simserial", "phonenumber"]
+# system_prefixes = ["instanceID", "instanceName", "KEY", "SET-OF-"]
+
+# --- Sentinel / special-missing codes (optional) ----------------------------
+# Numeric codes standing in for non-response. Omit this section to use the IPA
+# default (-99=Don't know/.d, -88=Refused/.r, -77=N/A/.n, -66=Other/.o,
+# -55=Not in list/.m). An empty [sentinels.meanings] table DISABLES recoding.
+# [sentinels]
+# scan_only = [-98]                     # counted/scanned but never recoded
+# [sentinels.meanings]                  # code -> [human label, Stata extended-missing]
+# "-99" = ["Don't know", ".d"]
+# "-88" = ["Refused to answer", ".r"]

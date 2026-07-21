@@ -16,16 +16,16 @@ git clone https://github.com/PovertyAction/surveycto-extractor.git
 cd surveycto-extractor
 uv sync                              # create the env + install (uses the committed uv.lock)
 
-cp sample/config.example.py config.py   # the pre-filled demo config
+cp sample/config.example.toml config.toml   # the pre-filled demo config
 
 uv run surveycto-extract --survey household_survey
 uv run surveycto-vardict --survey household_survey --xlsx
 ```
 
 For a **real project** (not the bundled demo), run `uv run surveycto-init` to
-drop a blank `config.py` template into the current directory, then fill in
-`SURVEYS`/`DATASETS`. `config.py` is per-project and gitignored; the tool
-discovers it in the directory you run from.
+drop a blank `config.toml` template into the current directory, then fill in the
+`[surveys.KEY]` / `[datasets.KEY]` tables. `config.toml` is per-project and
+gitignored; the tool discovers it in the directory you run from.
 
 Outputs land in `sample/output/`. The sample uses the
 [IPA High Frequency Checks](https://github.com/PovertyAction/high-frequency-checks)
@@ -68,9 +68,10 @@ collection starts.
 
 ### 1. Configure your project
 
-Copy `config.template.py` to `config.py` and fill in the `SURVEYS` dict — the
-instrument-side settings. Only `input_file`, `output_dir`, `sections_dir`, and
-`name` are required at this stage. Full reference under
+Run `uv run surveycto-init` to write a `config.toml`, then fill in a
+`[surveys.KEY]` table — the instrument-side settings. Only `input_file`,
+`output_dir`, `sections_dir`, and `name` are required at this stage. Full
+reference under
 [Configuration](#configuration).
 
 ### 2. Extract documentation and structure
@@ -148,7 +149,7 @@ against the synth will work against real data. Use this step to:
 
 ## Post-collection: data day
 
-Add the `DATASETS` block to `config.py` once your `.dta` is available. Each
+Add a `[datasets.KEY]` table to `config.toml` once your `.dta` is available. Each
 entry points at the dataset, the bridge `*_questions.json` from instrument
 day, and the variable-dictionary output paths.
 
@@ -194,9 +195,9 @@ If you **saved the deployed form's compiled XForm XML** (Design → Download und
 your SurveyCTO server's form definition), point at it and the extractor uses it
 as the authoritative, deterministic spine:
 
-```python
-# in config.py, on the DATASETS entry:
-"xml_path": DATA_DIR / "forms" / "my_survey.xml",
+```toml
+# in config.toml, under the [datasets.KEY] table:
+xml_path = "data/forms/my_survey.xml"
 ```
 
 Then re-run Phase 4 (or `uv run surveycto-enrich --survey my_survey` to
@@ -329,8 +330,8 @@ repo root works out of the box for the sample: `cp .mcp.json.example .mcp.json`)
 > still points at `mcp/survey_server.py`, update the path — a stale path shows
 > up as "failed to connect" in `/mcp`.
 
-The server finds `config.py` in its parent directory automatically (override
-with the `SURVEY_CONFIG` env var). It degrades gracefully — if config or JSON
+The server discovers `config.toml` (or a legacy `config.py`) in the current
+working directory (override with `SURVEYCTO_CONFIG`). It degrades gracefully — if config or JSON
 files are missing, tools return setup instructions rather than crashing. See
 `mcp_server/README.md` for full details.
 
@@ -361,47 +362,45 @@ procedure.
 
 ## Configuration
 
-`config.py` has two top-level dicts that map onto the two lifecycle phases.
+`config.toml` has two main tables that map onto the two lifecycle phases (a
+legacy `config.py` with `SURVEYS`/`DATASETS` dicts is still honoured as a
+fallback). Path values are **resolved relative to the config file's directory**.
 
-**`SURVEYS`** — instrument side, required for the pre-collection phases
+**`[surveys.KEY]`** — instrument side, required for the pre-collection phases
 (`csv`, `json`, `sections`, `synthetic`). Only needs the `.xlsx` form, so you
 can configure it on day 1.
 
-```python
-SURVEYS = {
-    "my_survey": {
-        "input_file":           Path("path/to/My_Survey.xlsx"),
-        "external_choices_csv": None,
-        "output_dir":           Path("path/to/survey_documentation/my_survey"),
-        "sections_dir":         Path("path/to/survey_documentation/my_survey/sections"),
-        "name":                 "My Survey Full Name",
-        "max_section_depth":    3,
-        # Optional, used by --phases synthetic:
-        # "pulldata_search_dirs": [Path("path/to/forms-media")],
-        # "geo_bbox":             (lat_min, lat_max, lon_min, lon_max),
-    },
-}
+```toml
+[surveys.my_survey]
+input_file        = "path/to/My_Survey.xlsx"
+output_dir        = "survey_documentation/my_survey"
+sections_dir      = "survey_documentation/my_survey/sections"
+name              = "My Survey Full Name"
+max_section_depth = 3
+# external_choices_csv = "path/to/choices.csv"
+# Optional, used by --phases synthetic:
+# pulldata_search_dirs = ["path/to/forms-media"]
+# geo_bbox             = [lat_min, lat_max, lon_min, lon_max]
 ```
 
-**`DATASETS`** — data side, required for the post-collection scripts. Needs
-the collected `.dta` plus the `questions_json` bridge file from Phase 2 of
-instrument day.
+**`[datasets.KEY]`** — data side, required for the post-collection scripts.
+Needs the collected `.dta` plus the `questions_json` bridge file from Phase 2 of
+instrument day. Each `[datasets.KEY]` shares its `KEY` with a `[surveys.KEY]`.
 
-```python
-DATASETS = {
-    "my_survey": {
-        "data":           Path("path/to/my_survey_data.dta"),
-        "questions_json": Path("path/to/survey_documentation/my_survey/my_survey_questions.json"),
-        "output_json":    Path("path/to/survey_documentation/my_survey/my_survey_variable_dictionary.json"),
-        "output_xlsx":    Path("path/to/survey_documentation/my_survey/my_survey_variable_dictionary.xlsx"),
-        # "output_do":          Path("scripts/cleaning/my_survey_summary_stats.do"),
-        # "sumstats_dir_stata": "${project_root}/path/to/survey_documentation/my_survey",
-    },
-}
+```toml
+[datasets.my_survey]
+data           = "path/to/my_survey_data.dta"
+questions_json = "survey_documentation/my_survey/my_survey_questions.json"
+output_json    = "survey_documentation/my_survey/my_survey_variable_dictionary.json"
+output_xlsx    = "survey_documentation/my_survey/my_survey_variable_dictionary.xlsx"
+# output_do          = "scripts/cleaning/my_survey_summary_stats.do"
+# sumstats_dir_stata = "${project_root}/path/to/survey_documentation/my_survey"
 ```
 
 The `questions_json` path is the bridge between the two sides — Phase 4 will
-fail with an actionable error if it doesn't exist yet.
+fail with an actionable error if it doesn't exist yet. (`SURVEY_COLUMNS`,
+`CHOICES_COLUMNS`, `EXCLUDED_TYPES`, `SYSTEM_PREFIXES` default to the IPA
+convention; override them under a `[columns]` table only if you need to.)
 
 ### Sentinel / special-missing codes
 
@@ -419,11 +418,16 @@ special-missing codes** — the IPA convention this toolkit has been used with:
 
 This is a **project convention, not a fixed standard**. If your study uses a
 different set — or if any of these are legitimate response values in your data
-— override the table wholesale in `config.py`:
+— override the table wholesale under `[sentinels]` in `config.toml` (an empty
+`[sentinels.meanings]` disables recoding):
 
-```python
-SENTINEL_MEANINGS = { -99: ("Don't know", ".d"), -88: ("Refused", ".r") }
-SENTINEL_SCAN_ONLY = [-98]   # counted as sentinels but never recoded
+```toml
+[sentinels]
+scan_only = [-98]                # counted as sentinels but never recoded
+
+[sentinels.meanings]             # code -> [label, Stata extended-missing]
+"-99" = ["Don't know", ".d"]
+"-88" = ["Refused", ".r"]
 ```
 
 The single source of truth is `core/sentinels.py`, read by both
@@ -447,14 +451,14 @@ uv sync                       # from a clone of this repo
 Then, from your project directory:
 
 ```bash
-uv run surveycto-init                        # writes a config.py template into ./
-# edit config.py → fill in SURVEYS / DATASETS
+uv run surveycto-init                        # writes a config.toml template into ./
+# edit config.toml → fill in [surveys.KEY] / [datasets.KEY]
 uv run surveycto-extract --survey my_survey  # instrument day (csv/json/sections/synthetic)
 uv run surveycto-vardict --survey my_survey  # post-collection vardict + graph
 ```
 
-`config.py` is per-project and gitignored; the tool discovers it in the
-directory you run from (override with `--config`/`SURVEYCTO_CONFIG`). Source
+`config.toml` is per-project and gitignored; the tool discovers it in the
+directory you run from (override with `SURVEYCTO_CONFIG`). Source
 layout:
 
 ```text
@@ -467,7 +471,7 @@ surveycto-extractor/
 │   ├── extractors/  transformers/   ← CSV/JSON extraction, logic conversion
 │   ├── generators/     ← outputs incl. Stata metadata (load_survey_metadata)
 │   ├── mcp_server/     ← optional MCP add-on (uv sync --extra mcp)
-│   └── templates/      ← the config.py template surveycto-init writes
+│   └── templates/      ← the config.toml template surveycto-init writes
 ├── skill/              ← copy to .claude/skills/ (stdlib-only search + bench-test)
 ├── coding_guidelines/  ← reference from your AGENTS.md
 └── sample/             ← bundled demo (household_survey)
@@ -501,5 +505,5 @@ information from the JSON extractor to distinguish `select_one` from
 `select_multiple`.
 
 **`calculate` fields missing from `questions.json`**
-Remove `"calculate"` from `EXCLUDED_TYPES` in `config.py`. Calculate fields
+Add a `[columns]` table to `config.toml` with an `excluded_types` list that omits `"calculate"`. Calculate fields
 are needed for skip-logic resolution and synthetic generation.
