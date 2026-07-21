@@ -4,6 +4,7 @@ Covers path resolution relative to the config dir, sentinel/geo_bbox coercion,
 the empty-table-is-override rule, baked-in column defaults, the legacy .py
 fallback, and the absent/broken cases.
 """
+
 import sys
 from pathlib import Path
 
@@ -79,7 +80,10 @@ def test_non_path_and_empty_string_fields(tmp_path):
     assert s["name"] == "HH"  # str untouched
     assert s["max_section_depth"] == 3  # int untouched
     assert s["external_choices_csv"] is None  # "" -> None
-    assert s["pulldata_search_dirs"] == [tmp_path.resolve() / "media", tmp_path.resolve() / "forms"]
+    assert s["pulldata_search_dirs"] == [
+        tmp_path.resolve() / "media",
+        tmp_path.resolve() / "forms",
+    ]
     d = cfg.DATASETS["hh"]
     assert d["skip_ord_dta"] is True
     assert d["sumstats_dir_stata"] == "${root}/out/hh"  # Stata literal, NOT resolved
@@ -108,7 +112,9 @@ def test_empty_meanings_table_is_a_deliberate_override(tmp_path):
 def test_absent_sentinels_uses_default(tmp_path):
     cfg = config_loader.load_config(path=_write(tmp_path, '[surveys.s]\nname = "S"\n'))
     assert not hasattr(cfg, "SENTINEL_MEANINGS")
-    assert sentinels.resolve_sentinel_meanings(cfg) == sentinels.DEFAULT_SENTINEL_MEANINGS
+    assert (
+        sentinels.resolve_sentinel_meanings(cfg) == sentinels.DEFAULT_SENTINEL_MEANINGS
+    )
 
 
 def test_column_defaults_and_override(tmp_path):
