@@ -5,9 +5,10 @@ and load_survey_metadata.py read, resolving the old cross-module disagreement
 (#26.8) where -99 meant "Refused" in one place and "Don't know" in the other.
 It is also config-overridable, since sentinel codes are a project convention.
 """
+
 import types
 
-from core import sentinels as s
+from surveycto_extractor.core import sentinels as s
 
 
 class TestDefaults:
@@ -35,7 +36,8 @@ class TestDefaults:
 class TestConfigOverride:
     def test_wholesale_override(self):
         cfg = types.SimpleNamespace(
-            SENTINEL_MEANINGS={-1: ("Missing", ".m"), -2: ("Skipped", ".s")})
+            SENTINEL_MEANINGS={-1: ("Missing", ".m"), -2: ("Skipped", ".s")}
+        )
         meanings = s.resolve_sentinel_meanings(cfg)
         assert s.sentinel_meaning("-1", meanings) == "Missing"
         assert s.sentinel_meaning("-99", meanings) is None  # default is gone
@@ -55,5 +57,6 @@ class TestConfigOverride:
         cfg = types.SimpleNamespace(SENTINEL_MEANINGS={})
         assert s.resolve_sentinel_meanings(cfg) == {}
         # ... and the scan list then carries only the scan-only codes.
-        assert s.sentinel_scan_codes(s.resolve_sentinel_meanings(cfg),
-                                     s.resolve_scan_only(cfg)) == [-98]
+        assert s.sentinel_scan_codes(
+            s.resolve_sentinel_meanings(cfg), s.resolve_scan_only(cfg)
+        ) == [-98]

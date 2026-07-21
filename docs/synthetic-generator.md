@@ -11,10 +11,10 @@ logic, and exercises every check before the first respondent is interviewed.
 
 ```bash
 # Generate questions.json first (required input)
-python main.py --survey my_survey --phases json
+uv run surveycto-extract --survey my_survey --phases json
 
 # Then synth (default 5 rows)
-python main.py --survey my_survey --phases synthetic --rows 20 --seed 42
+uv run surveycto-extract --survey my_survey --phases synthetic --rows 20 --seed 42
 ```
 
 Outputs: `<output_dir>/<survey>_synthetic.csv` and (when applicable) a
@@ -46,7 +46,7 @@ Per respondent the walker:
    (`inner_count_1, inner_count_2, …`), and the column header is the rectangular
    `max(outer) × max(inner)` grid SurveyCTO pads to. This mirrors the suffix
    logic the variable dictionary uses to reconstruct nested rosters from real
-   data (`create_variable_dictionaries._build_repeat_tree`).
+   data (`surveycto_extractor.cli.vardict._build_repeat_tree`).
 
 ## CLI flags
 
@@ -56,7 +56,9 @@ Per respondent the walker:
 | `--phases synthetic` | included in default `all` | Run the synthetic generator. (`json` must have been run already.) `--phases all` (the CLI default) runs `csv`, `json`, `sections`, **and** `synthetic`; explicit `--phases synthetic` runs only the generator. |
 | `--rows N` | 5 | Number of synthetic respondents. |
 | `--seed K` | 0 | RNG seed. Same `--seed` produces **byte-identical** CSV output across runs on the same day. |
-| `--force-value VAR=VAL` | — | Force one or more variables to specific values, bypassing relevance. May be repeated, or comma-separate multiple pairs in one flag. Example: `--force-value c_consent=1,hh_consent=1`. |
+| `--force-value VAR=VAL` | — | Force one or more variables to specific values, **bypassing relevance**. May be repeated, or comma-separate multiple pairs in one flag. Example: `--force-value c_consent=1,hh_consent=1`. |
+| `--answers-file PATH` | — | Apply a JSON answer sheet whose values fill matching questions — but **only through open gates** (unlike `--force-value`, a scripted answer never bypasses relevance). Invalid values fall back to a sampled value. May be repeated (sheets merge). See [Scripted answers](#--answers-file-scripted-coherent-answers). |
+| `--legacy-fail-open-relevance` | off (strict) | Restore the pre-ironclad behaviour where a relevance expression the evaluator can't interpret **shows** the question (fail open) instead of hiding it. See [Ironclad gating](#ironclad-gating). |
 
 ## Reproducibility
 
@@ -75,7 +77,7 @@ question-level samples.
 Verify with `md5sum`:
 
 ```bash
-python main.py --survey my_survey --phases synthetic --rows 20 --seed 42
+uv run surveycto-extract --survey my_survey --phases synthetic --rows 20 --seed 42
 md5sum <output_dir>/my_survey_synthetic.csv
 # Re-run — md5 must match
 ```
@@ -86,12 +88,34 @@ If your form has no `pulldata()` calls, this section doesn't apply — the
 generator runs fine with zero CSVs configured.
 
 If your form references `pulldata('foo', ...)` (in calculation,
-relevance, constraint, or choice_filter), the generator **must** find
-`foo.csv` in one of the configured `pulldata_search_dirs`. Missing CSVs
-raise `MissingPullDataError` with the list of search directories. There's
-no override flag — the synthetic CSV is essentially useless without
-pulldata (gated cascades won't populate, `search()` choice expansion
-can't resolve, and pulldata-derived columns stay blank).
+relevance, constraint, or choice_filter) **or** a select uses a
+`search('foo', ...)` appearance to pull its choices from a CSV, the
+generator **must** find `foo.csv` in one of the configured
+`pulldata_search_dirs`. Both are mandatory: missing CSVs raise
+`MissingPullDataError` with the list of search directories. There's no
+override flag — the simulation is essentially useless without the preload
+(gated cascades won't populate, `search()` choice expansion can't resolve,
+and pulldata-derived columns stay blank). A caller-ID / case-managed form
+is the clearest case: the screening gates read `pulldata('cases', 'wave', …)`
+etc., so **without `cases.csv` the survey body never opens**.
+
+### Running on a specific case context (`--case-prefix` / `--case-ids-file`)
+
+When the form is keyed on `${caseid}` (a `pulldata('cases', …, 'id', ${caseid})`
+lookup), the generator draws caseids from that table. Restrict the pool to run
+the simulation on a chosen case-management context:
+
+```bash
+# bench-test cases only -- their preload (wave, total_phones) drives the gates
+uv run surveycto-extract --survey s --phases synthetic --case-prefix BT
+# or an explicit id list (one per line) -- e.g. the exact cases a tester used
+uv run surveycto-extract --survey s --phases synthetic --case-ids-file bt_ids.txt
+```
+
+Equivalently, an answer sheet may carry `"directives": {"case_pool": {"prefix": "BT"}}`
+(or `{"ids": [...]}`) so the bench-test skill sets the case profile per scenario.
+A filter that matches no caseid is a hard error (you asked for a context that
+isn't in the table).
 
 Configure search dirs per-survey in `config.py`:
 
@@ -174,14 +198,77 @@ references a forced variable that's defined later) resolve correctly.
 
 ```bash
 # Force the whole consent cascade
-python main.py --survey my_survey --phases synthetic --rows 20 \
+uv run surveycto-extract --survey my_survey --phases synthetic --rows 20 \
     --force-value c_consent_qs_ans=1,c_consent_understand=1,c_consent=1
 
 # Or with repeated flags (use this when values contain commas)
-python main.py --survey my_survey --phases synthetic \
+uv run surveycto-extract --survey my_survey --phases synthetic \
     --force-value c_consent=1 \
     --force-value hh_consent=1
 ```
+
+## `--answers-file`: scripted, coherent answers
+
+`--answers-file` is the **ironclad** counterpart to `--force-value`. Where
+`--force-value` *bypasses* a gate to guarantee a cell populates,
+`--answers-file` supplies answers that are applied **only when the deterministic
+evaluator opens the gate** — so a scripted respondent is subjected to exactly
+the skip logic a real person would hit. To reach a gated section you satisfy its
+gate by answering the upstream questions, not by forcing past it.
+
+This is what the bench-test skill uses to fill coherent "interesting cases": the
+skill authors a whole-respondent answer sheet consistent with a persona, and the
+engine fills the rest stochastically while guaranteeing the paths are real.
+
+Sheet shape:
+
+```json
+{
+  "answers": {
+    "c_consent_qs_ans": "1",
+    "hh_age": 34,
+    "symptoms": "2 5",
+    "member_age_2": 12
+  },
+  "directives": { "repeat_counts": { "members": 3 } }
+}
+```
+
+- **`answers`** — map of variable name (or a suffixed key like `member_age_2`
+  for repeat iteration 2) to value. Resolution per cell: `answers[suffixed_key]`
+  > `answers[base_var]` > stochastic fallback. `select_multiple` values are the
+  space-joined choice string (`"2 5"`).
+- **Validation** — each value is checked against the question's choices /
+  numeric bounds / text length. An **invalid** value is *not* written; the cell
+  falls back to a sampled value (source `scripted_invalid_fallback`), so the CSV
+  is never illegal.
+- **`directives.repeat_counts`** — pin a roster size. The repeat's own relevance
+  still gates it, so a pinned count on a gated-out repeat yields 0 iterations.
+- **Gated-out answers are ignored** — an answer for a question the evaluator
+  gates out never populates the cell (it is recorded, not forced).
+
+```bash
+uv run surveycto-extract --survey my_survey --phases synthetic --rows 1 \
+    --seed 7 --answers-file interesting_case_01.json
+```
+
+## Ironclad gating
+
+Relevance is evaluated by one deterministic authority (the walker's
+`_is_relevant`), and neither the RNG nor a scripted answer can override it. Two
+fidelity guarantees beyond the historical behaviour:
+
+- **Strict fail-closed (default).** If a relevance expression cannot be
+  evaluated (parse error / unsupported function), the question is **hidden** and
+  the failure is recorded in the strip-log — rather than silently *shown*, which
+  fabricated a cell real SurveyCTO would have blanked. Pass
+  `--legacy-fail-open-relevance` to restore the old show-on-error behaviour.
+- **Forward references resolve.** A gate that references a variable defined later
+  in the form used to see a blank (single forward pass) and wrongly gate the
+  cell out. The walker now re-evaluates gates to a fixpoint, so a gate reading a
+  later answer resolves correctly. Sampled values are memoized, so this never
+  perturbs the RNG stream; when a form has no forward references the output is
+  byte-identical to a single pass.
 
 ## Type behaviour
 
@@ -275,6 +362,7 @@ real exports do:
 | `speed_violations_list` (form type `speed violations list`) | empty (matches real default when no violations occurred) |
 
 URL placeholders:
+
 - `<KEY>` is the full submission key in the form `uuid:<UUID>` (matches
   the `KEY` column value).
 - `<uuid>` in the filename is the **bare** UUID (the `uuid:` prefix
@@ -349,7 +437,7 @@ patterns we use.
 
 | File | What it does |
 |---|---|
-| `main.py:run_synthetic_phase` | Phase entry point, reads settings sheet for `form_id` / `version`, dispatches to `generate_synthetic_csv` |
+| `surveycto_extractor/cli/extract.py:run_synthetic_phase` | Phase entry point, reads settings sheet for `form_id` / `version`, dispatches to `generate_synthetic_csv` |
 | `generators/synthetic_data.py` | Walker, run-context builder, metadata-value emitter, search() expander, audit URL formatter, CSV writer |
 | `generators/sampling.py` | Type-aware value sampling, numeric/text bound extraction, conditional select_multiple constraint parsing |
 | `extractors/pulldata_loader.py` | Pulldata CSV discovery, indexed lookup, key normalisation |

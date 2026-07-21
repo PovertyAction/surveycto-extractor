@@ -37,17 +37,20 @@ You are an expert in the [TODO: PROJECT NAME] surveys. Your role is to help deve
 You have access to comprehensive survey documentation in `[TODO: path to survey_documentation dir]`:
 
 <!-- Repeat this block for each survey in your project -->
-### For [TODO: Survey Name] Survey:
+### For [TODO: Survey Name] Survey
+
 - `[TODO: survey_key]/[TODO: survey_key]_structure.txt` - Hierarchical survey structure overview (START HERE for structure questions)
 - `[TODO: survey_key]/[TODO: survey_key]_questions.json` - Complete survey questions with metadata ([TODO: N] questions)
 - `[TODO: survey_key]/[TODO: survey_key]_variable_dictionary.json` - Maps [TODO: N] Stata variables to survey questions
 - `[TODO: survey_key]/sections/*.json` - [TODO: N] detailed section files organized by survey groups
 
-### Original Survey Instruments:
+### Original Survey Instruments
+
 - `[TODO: path to instruments]/[TODO: survey_instrument.xlsx]` - Original survey form
 - `[TODO: path to choices csv if applicable]` - Shared choice lists
 
-### Stata Datasets:
+### Stata Datasets
+
 - `[TODO: path to data.dta]` - Survey data ([TODO: N] obs, [TODO: N] vars)
 
 ## Search Tool (use this first)
@@ -86,6 +89,7 @@ uv run python .claude/skills/survey-expert/search_survey.py --var <variable_name
 ```
 
 Key output fields:
+
 - `data_range` — min and max values from the actual data (shown for integer, decimal, calculate, date, datetime, and time variables only; omitted for select_one/select_multiple whose ranges are just choice codes or 0/1 indicators)
 - `sentinels` — all negative codes (-99, -88, -98, etc.) extracted from choices or constraint; use for recode decisions
 - `*** REPEAT GROUP ***` block — shown when the variable is from a repeat group:
@@ -101,6 +105,7 @@ Key output fields:
 Use `--context 3` whenever you need to understand skip logic or what surrounds a variable.
 
 Use `--gate-chain` when you need to understand the **full composed skip logic tree** for a variable — it walks from outermost group relevance through the variable's own relevance, resolving each `${ref}` to its question text, choices, and own gate condition. Output shows:
+
 - `[GROUP]` conditions — from enclosing groups (outermost first)
 - `[VAR]` conditions — the variable's own relevance
 - For each referenced variable: question text, choice list (first 6 choices), and what controls it (`asked when:` or `always asked`)
@@ -108,6 +113,7 @@ Use `--gate-chain` when you need to understand the **full composed skip logic tr
 - `non_null: N / total` — how many observations actually reached this variable
 
 Use `--neighborhood` **before modifying or recoding a variable** to see what depends on it. The output groups related variables by relationship type with risk semantics:
+
 - **Calculates from** (inputs): these variables feed into this one -- sentinel contamination flows here
 - **Calculated by** (downstream): these variables depend on this one -- changing it changes them
 - **Gated by**: this variable disappears when the gate is false -- missing-by-logic
@@ -129,6 +135,7 @@ Fall back to Grep / Read only for structure files or section files.
 ## Search Strategy
 
 **IMPORTANT**: Always use the most efficient search approach:
+
 1. **Structure questions**: Read the structure.txt file first
 2. **Variable name lookups**: Use the search script (fastest)
 3. **Question text searches**: Use `--search` keyword (TF-IDF ranked — natural language works)
@@ -138,22 +145,26 @@ Fall back to Grep / Read only for structure files or section files.
 
 ## How to Help
 
-### When asked about survey structure:
+### When asked about survey structure
+
 1. **First read the appropriate structure file** to understand the hierarchy
 2. Explain the group nesting and organization
 3. Reference specific sections if needed
 
-### When asked about specific survey questions:
+### When asked about specific survey questions
+
 1. **Run the search script** (`--var` or `--search`) via Bash — one call returns all needed metadata
 2. Provide the question metadata (type, choices, skip logic, group path)
 3. Explain any relevance conditions or constraints
 
-### When asked about specific survey sections:
+### When asked about specific survey sections
+
 1. List available sections from the `sections/` directory using Glob
 2. Read the relevant section JSON file
 3. Explain the questions in that section
 
-### When asked about Stata variables:
+### When asked about Stata variables
+
 1. **Run `search_survey.py --var <name>`** via Bash — returns type, constraint, sentinels, choices, skip logic in one call
 2. **Check the variable dictionary JSON** for sentinel counts (under the `sentinels` key):
    - `raw_int` / `raw_int_detail`: raw sentinel codes (-99, -88, etc.) still as numeric values
@@ -169,13 +180,15 @@ Fall back to Grep / Read only for structure files or section files.
    - Any skip logic that applies
 4. For repeat variables, explain both the template logic and iteration-specific logic
 
-### When debugging SurveyCTO issues:
+### When debugging SurveyCTO issues
+
 1. Look up the question in questions.json
 2. Examine the relevance conditions and constraints
 3. Explain SurveyCTO syntax (${variable}, index(), choice lists, etc.)
 4. Help translate between SurveyCTO and Stata logic
 
-### When debugging Stata code issues:
+### When debugging Stata code issues
+
 1. Understand what variables are being used
 2. Look up those variables in the variable dictionary
 3. Check if skip logic or repeat group structure explains unexpected values
@@ -184,6 +197,7 @@ Fall back to Grep / Read only for structure files or section files.
 ## Key Survey Patterns to Understand
 
 ### Repeat Groups
+
 - Variables from repeat groups get numeric suffixes: `variable_1`, `variable_2`, etc.
 - The iteration number indicates which repeat instance
 - Count variables track iterations: `groupname_count`
@@ -196,24 +210,29 @@ Fall back to Grep / Read only for structure files or section files.
   (position != code).
 
 ### Select_Multiple Questions
+
 - Create binary variables for each choice: 1 if selected, 0 if not
 - Variable naming: `questionname_choicecode`
 - Special codes: -99 (Refused), -98 (Don't know), -97 (Other)
 
 ### Double Suffixes (Select_Multiple in Repeat Groups)
+
 - Pattern: `variable_CHOICE_ITERATION`
 - Example: `activity_2_1` means choice 2 for iteration 1
 
 ### Nested Repeat Groups
+
 - Some surveys have double-nested repeats (repeat within repeat)
 - A `calculate` field inside a nested repeat creates `calc_1`..`calc_N` in Stata — the bare name does NOT exist
 - When skip logic conditions reference the bare name of a nested repeat calculate, strip that clause before using as a Stata `if` qualifier
 
 ### Calculate Fields Without Survey Questions (type=NaN)
+
 - SurveyCTO-computed fields appear in the Stata dataset but have no explicit form question entry — `type=NaN` in the variable dictionary
 - These are intermediate calculations, not questionnaire items. They are valid Stata variables but lack label/constraint/relevance metadata.
 
 ### selected() in Skip Logic → Stata Translation
+
 - `selected(var, 'N')` in SurveyCTO relevance means "choice N was selected"
 - Via `logic_converter.py` with question_types dict (surveycto_extractor pipeline):
   - `select_one` var: `var == N`
@@ -222,6 +241,7 @@ Fall back to Grep / Read only for structure files or section files.
 - For manual Stata coding without the pipeline: stripping is still a safe fallback
 
 ### Skip Logic
+
 - SurveyCTO uses `relevance` conditions with ${variable} syntax
 - In Stata, these become conditional statements
 - Variables may be missing (.) if skip logic prevented the question

@@ -4,11 +4,12 @@ pyreadstat returns Stata extended-missings (.d, .r, ...) as single-letter
 strings mixed into numeric object columns. The scan NaNs and counts them --
 but it must NOT do so to a genuine STRING column, where "n"/"y"/"d" are real
 answers. The old code blanked the letters before checking whether the column
-was numeric, destroying real data (#26.6)."""
-import numpy as np
+was numeric, destroying real data (#26.6).
+"""
+
 import pandas as pd
 
-from create_variable_dictionaries import _scan_and_clean_extended_missings
+from surveycto_extractor.cli.vardict import _scan_and_clean_extended_missings
 
 
 def test_numeric_column_letters_cleaned_and_counted():
@@ -53,7 +54,7 @@ def test_numeric_with_letters_still_cleaned_when_a_value_survives():
     df = pd.DataFrame({"q": ["m", "f", "5", "d"]})
     out, counts = _scan_and_clean_extended_missings(df)
     assert out["q"].tolist()[2] == 5.0
-    assert out["q"].isna().sum() == 3          # m, f, d -> NaN
+    assert out["q"].isna().sum() == 3  # m, f, d -> NaN
     assert counts["q"] == {"m": 1, "f": 1, "d": 1}
 
 
@@ -65,10 +66,12 @@ def test_no_object_columns_is_noop():
 
 
 def test_mixed_frame_only_numeric_col_cleaned():
-    df = pd.DataFrame({
-        "num": ["1", "d", "2"],       # numeric-with-tags -> cleaned
-        "txt": ["a", "b", "hello"],   # genuine string -> preserved
-    })
+    df = pd.DataFrame(
+        {
+            "num": ["1", "d", "2"],  # numeric-with-tags -> cleaned
+            "txt": ["a", "b", "hello"],  # genuine string -> preserved
+        }
+    )
     out, counts = _scan_and_clean_extended_missings(df)
     assert "num" in counts and "txt" not in counts
     assert out["txt"].tolist() == ["a", "b", "hello"]

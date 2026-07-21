@@ -1,0 +1,26 @@
+name: Pre-commit
+
+on:
+  pull_request:
+    branches: [master]
+  push:
+    branches: [master, dev]
+
+jobs:
+  pre-commit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv and set the Python version
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+      - name: Sync (all extras)
+        run: uv sync --locked --all-extras
+      # Run pre-commit via uv (pre-commit is in the dev extra). Avoids
+      # pre-commit/action's `python -m pip install`, which fails against the
+      # pip-less uv venv that setup-uv activates.
+      - name: Run pre-commit
+        run: uv run pre-commit run --all-files --show-diff-on-failure

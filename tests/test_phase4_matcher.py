@@ -6,25 +6,37 @@ fabricate that metadata: it stamped select_multiple + choice_code on any
 double-suffix column regardless of type, and repeat_iteration on any
 single-suffix column regardless of whether the field was in a repeat. (#26)
 """
-from create_variable_dictionaries import (
-    determine_variable_source,
+
+from surveycto_extractor.cli.vardict import (
     _build_question_index,
     adjust_skip_logic_for_repeats,
+    determine_variable_source,
 )
 
 # outer repeat "orpt" containing inner repeat "irpt"; a plain int inside the
 # inner repeat; a top-level int; a select_multiple (with a negative code) in a
 # repeat; a valid single-level repeat field.
 QUESTIONS = [
-    {"variable_name": "orpt_count", "type": "repeat_count",
-     "repeat_group_name": "orpt", "group_path": []},
-    {"variable_name": "irpt_count", "type": "repeat_count",
-     "repeat_group_name": "irpt", "group_path": ["orpt"]},
-    {"variable_name": "plot_area", "type": "integer",
-     "group_path": ["orpt", "irpt"]},
+    {
+        "variable_name": "orpt_count",
+        "type": "repeat_count",
+        "repeat_group_name": "orpt",
+        "group_path": [],
+    },
+    {
+        "variable_name": "irpt_count",
+        "type": "repeat_count",
+        "repeat_group_name": "irpt",
+        "group_path": ["orpt"],
+    },
+    {"variable_name": "plot_area", "type": "integer", "group_path": ["orpt", "irpt"]},
     {"variable_name": "income", "type": "integer", "group_path": []},
-    {"variable_name": "colors", "type": "select_multiple", "group_path": ["orpt"],
-     "choices": [{"value": "1"}, {"value": "2"}, {"value": "-99"}]},
+    {
+        "variable_name": "colors",
+        "type": "select_multiple",
+        "group_path": ["orpt"],
+        "choices": [{"value": "1"}, {"value": "2"}, {"value": "-99"}],
+    },
 ]
 IDX = _build_question_index(QUESTIONS)
 
@@ -68,7 +80,7 @@ def test_valid_positive_code_select_multiple():
 
 def test_single_level_repeat_field():
     # A field directly in a repeat gets repeat_iteration from its single suffix.
-    r = _src("colors_1")   # choice 1 indicator (SM wins over repeat here)
+    r = _src("colors_1")  # choice 1 indicator (SM wins over repeat here)
     assert r["is_select_multiple"] is True
     assert r["choice_code"] == "1"
 
@@ -81,12 +93,24 @@ def test_unmatched_column_returns_empty_source():
 # --- C14: iteration-specific group relevances through the converter (#26.5/7) --
 
 _REL_QUESTIONS = [
-    {"variable_name": "rc", "type": "repeat_count",
-     "repeat_group_name": "rpt", "group_path": []},
-    {"variable_name": "n", "type": "integer", "group_path": []},          # top-level
-    {"variable_name": "sib", "type": "integer", "group_path": ["rpt"]},   # repeat sibling
-    {"variable_name": "sm", "type": "select_multiple", "group_path": ["rpt"],
-     "choices": [{"value": "1"}]},
+    {
+        "variable_name": "rc",
+        "type": "repeat_count",
+        "repeat_group_name": "rpt",
+        "group_path": [],
+    },
+    {"variable_name": "n", "type": "integer", "group_path": []},  # top-level
+    {
+        "variable_name": "sib",
+        "type": "integer",
+        "group_path": ["rpt"],
+    },  # repeat sibling
+    {
+        "variable_name": "sm",
+        "type": "select_multiple",
+        "group_path": ["rpt"],
+        "choices": [{"value": "1"}],
+    },
     {"variable_name": "q", "type": "text", "group_path": ["rpt"]},
 ]
 _REL_IDX = _build_question_index(_REL_QUESTIONS)
@@ -94,9 +118,13 @@ _REL_IDX = _build_question_index(_REL_QUESTIONS)
 
 def _iteration_relevances(relevances):
     meta = {
-        "is_repeat": True, "repeat_iteration": 2, "group_path": "rpt",
-        "stata_skip_logic": "", "group_relevances": relevances,
-        "skip_logic_template": None, "group_relevances_template": None,
+        "is_repeat": True,
+        "repeat_iteration": 2,
+        "group_path": "rpt",
+        "stata_skip_logic": "",
+        "group_relevances": relevances,
+        "skip_logic_template": None,
+        "group_relevances_template": None,
         "skip_logic_iteration_specific": None,
         "group_relevances_iteration_specific": None,
     }
@@ -130,6 +158,7 @@ def test_selected_in_relevance_not_transposed():
 
 
 # --- review #8: stale-bridge degraded repeat detection --------------------------
+
 
 def test_stale_bridge_falls_back_to_suffix_stamping():
     # A bridge JSON produced before the repeat_group_name field existed: the

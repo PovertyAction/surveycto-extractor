@@ -7,11 +7,12 @@ authoritative-XML behaviour: fuzzy misses get backfilled (`resolved_by: xml`),
 select_multiple choice codes decode against a search() CSV, system/legacy columns
 are classified, and the summary/audit counters are correct.
 """
+
 import json
 
 import pytest
 
-from enrich_with_contract import enrich_contract
+from surveycto_extractor.cli.enrich import enrich_contract
 
 _XML = """<?xml version="1.0"?>
 <h:html xmlns="http://www.w3.org/2002/xforms"
@@ -45,32 +46,59 @@ _XML = """<?xml version="1.0"?>
 _QUESTIONS = [
     {"variable_name": "name", "question_text": "Your name", "type": "text"},
     {"variable_name": "langs", "question_text": "Languages", "type": "select_multiple"},
-    {"variable_name": "pre_score", "question_text": "Preloaded score", "type": "integer"},
+    {
+        "variable_name": "pre_score",
+        "question_text": "Preloaded score",
+        "type": "integer",
+    },
 ]
 
 # Phase-4 output schema: top-level dataset/summary/variables, per-var survey block.
 _VARDICT = {
     "dataset": {"name": "t", "n_observations": 1, "n_variables": 5},
     "summary": {
-        "total_variables": 5, "matched_to_questions": 1, "unmatched": 4,
-        "from_repeat_groups": 0, "select_multiple_choices": 0,
+        "total_variables": 5,
+        "matched_to_questions": 1,
+        "unmatched": 4,
+        "from_repeat_groups": 0,
+        "select_multiple_choices": 0,
     },
     "variables": {
         # fuzzy already matched correctly -> survey kept, contract added
-        "name": {"variable_order": 1, "non_null_count": 1, "stata": {"type": "str"},
-                 "survey": {"original_variable_name": "name", "question_text": "Your name"}},
+        "name": {
+            "variable_order": 1,
+            "non_null_count": 1,
+            "stata": {"type": "str"},
+            "survey": {"original_variable_name": "name", "question_text": "Your name"},
+        },
         # fuzzy missed -> XML resolves (pulldata provenance)
-        "pre_score": {"variable_order": 2, "non_null_count": 1, "stata": {"type": "int"},
-                      "survey": {"original_variable_name": None}},
+        "pre_score": {
+            "variable_order": 2,
+            "non_null_count": 1,
+            "stata": {"type": "int"},
+            "survey": {"original_variable_name": None},
+        },
         # select_multiple choice binary -> XML resolves + decodes choice 1
-        "langs_1": {"variable_order": 3, "non_null_count": 1, "stata": {"type": "byte"},
-                    "survey": {"original_variable_name": None}},
+        "langs_1": {
+            "variable_order": 3,
+            "non_null_count": 1,
+            "stata": {"type": "byte"},
+            "survey": {"original_variable_name": None},
+        },
         # SurveyCTO transport column -> system
-        "KEY": {"variable_order": 4, "non_null_count": 1, "stata": {"type": "str"},
-                "survey": {"original_variable_name": None}},
+        "KEY": {
+            "variable_order": 4,
+            "non_null_count": 1,
+            "stata": {"type": "str"},
+            "survey": {"original_variable_name": None},
+        },
         # has data but no node in the deployed form -> legacy
-        "old_var_9": {"variable_order": 5, "non_null_count": 1, "stata": {"type": "byte"},
-                      "survey": {"original_variable_name": None}},
+        "old_var_9": {
+            "variable_order": 5,
+            "non_null_count": 1,
+            "stata": {"type": "byte"},
+            "survey": {"original_variable_name": None},
+        },
     },
 }
 
@@ -131,8 +159,8 @@ class TestOverlay:
 
     def test_summary_counters(self, enriched):
         s = enriched["summary"]
-        assert s["matched_after_xml"] == 3        # name, pre_score, langs_1
-        assert s["resolved_by_xml"] == 2          # pre_score, langs_1 (both exact)
+        assert s["matched_after_xml"] == 3  # name, pre_score, langs_1
+        assert s["resolved_by_xml"] == 2  # pre_score, langs_1 (both exact)
         assert s["resolved_by_xml_heuristic"] == 0
         assert s["corrected_by_xml"] == 0
         assert s["system_columns"] == 1
@@ -158,16 +186,26 @@ _CORR_XML = """<?xml version="1.0"?>
   <h:body/></h:html>"""
 
 _CORR_QUESTIONS = [
-    {"variable_name": "age", "question_text": "Age in years", "type": "integer",
-     "constraint": ". >= 0", "stata_constraint": "age >= 0"},
+    {
+        "variable_name": "age",
+        "question_text": "Age in years",
+        "type": "integer",
+        "constraint": ". >= 0",
+        "stata_constraint": "age >= 0",
+    },
 ]
 
 _CORR_VARDICT = {
     "summary": {"total_variables": 2},
     "variables": {
         # fuzzy WRONGLY matched 'age' to question 'agee' -> XML corrects it
-        "age": {"survey": {"original_variable_name": "agee", "question_text": "wrong",
-                           "constraint": ". > 200"}},
+        "age": {
+            "survey": {
+                "original_variable_name": "agee",
+                "question_text": "wrong",
+                "constraint": ". > 200",
+            }
+        },
         # 'Pre_xyz' has no node; the string-key fallback resolves it to node 'Pre'
         # -> must be flagged heuristic, not authoritative.
         "Pre_xyz": {"survey": {"original_variable_name": None}},
@@ -177,8 +215,10 @@ _CORR_VARDICT = {
 
 def _write_corr(tmp_path):
     (tmp_path / "cf.xml").write_text(_CORR_XML, encoding="utf-8")
-    q = tmp_path / "q.json"; q.write_text(json.dumps(_CORR_QUESTIONS), encoding="utf-8")
-    vd = tmp_path / "vd.json"; vd.write_text(json.dumps(_CORR_VARDICT), encoding="utf-8")
+    q = tmp_path / "q.json"
+    q.write_text(json.dumps(_CORR_QUESTIONS), encoding="utf-8")
+    vd = tmp_path / "vd.json"
+    vd.write_text(json.dumps(_CORR_VARDICT), encoding="utf-8")
     return vd, q, tmp_path / "cf.xml"
 
 
@@ -189,8 +229,8 @@ class TestCorrectionHeuristicIdempotence:
         age = d["variables"]["age"]
         assert age["contract"]["corrected_from"] == "agee"
         assert "resolved_by" not in age["contract"]
-        assert age["survey"]["original_variable_name"] == "age"   # XML wins
-        # refilled from the CORRECT node, incl. the wider whitelist (constraint),
+        assert age["survey"]["original_variable_name"] == "age"  # XML wins
+        # refilled from the CORRECT node, incl. the wider allowlist (constraint),
         # and the wrong fuzzy constraint is gone.
         assert age["survey"]["constraint"] == ". >= 0"
         assert age["survey"]["stata_constraint"] == "age >= 0"
@@ -202,7 +242,7 @@ class TestCorrectionHeuristicIdempotence:
         c = d["variables"]["Pre_xyz"]["contract"]
         assert c["match"] == "string_key"
         assert c["string_key"] == "xyz"
-        assert c["resolved_by"] == "xml-heuristic"   # NOT plain "xml"
+        assert c["resolved_by"] == "xml-heuristic"  # NOT plain "xml"
         # the heuristic is counted separately and does NOT inflate resolved_by_xml
         assert d["summary"]["resolved_by_xml_heuristic"] == 1
         assert d["summary"]["resolved_by_xml"] == 0
@@ -217,8 +257,20 @@ class TestCorrectionHeuristicIdempotence:
         second = enrich_contract(output_json=vd, questions_json=q, xml_path=xml)
         second_json = json.loads(vd.read_text(encoding="utf-8"))
         assert second_json == first_json
-        assert second["summary"]["corrected_by_xml"] == first["summary"]["corrected_by_xml"] == 1
-        assert second["summary"]["resolved_by_xml"] == first["summary"]["resolved_by_xml"]
-        assert second["summary"]["resolved_by_xml_heuristic"] == first["summary"]["resolved_by_xml_heuristic"] == 1
+        assert (
+            second["summary"]["corrected_by_xml"]
+            == first["summary"]["corrected_by_xml"]
+            == 1
+        )
+        assert (
+            second["summary"]["resolved_by_xml"] == first["summary"]["resolved_by_xml"]
+        )
+        assert (
+            second["summary"]["resolved_by_xml_heuristic"]
+            == first["summary"]["resolved_by_xml_heuristic"]
+            == 1
+        )
         assert second["variables"]["age"]["contract"]["corrected_from"] == "agee"
-        assert second["variables"]["Pre_xyz"]["contract"]["resolved_by"] == "xml-heuristic"
+        assert (
+            second["variables"]["Pre_xyz"]["contract"]["resolved_by"] == "xml-heuristic"
+        )

@@ -8,9 +8,10 @@ survey instruments, the correct Stata equivalent, and what cannot be translated.
 in `tabstat` or `replace if` contexts.
 
 **Sources**:
-- SurveyCTO Expressions Reference — https://docs.surveycto.com/02-designing-forms/01-core-concepts/09.expressions.html
-- SurveyCTO Data Export Format — https://docs.surveycto.com/05-exporting-and-publishing-data/01-overview/09.data-format.html
-- **In-house function catalog**: [`surveycto_refs/expressions.md`](surveycto_refs/expressions.md) — derivative primer we maintain by hand against the SurveyCTO docs; when extending the converter, treat it as the working reference for what each function does, what its arguments look like, and which SurveyCTO operators diverge from ODK/XPath. [`surveycto_refs/xlsform.md`](surveycto_refs/xlsform.md) plays the same role for XLSForm column semantics. Verify against the canonical pages on https://docs.surveycto.com if anything looks stale.
+
+- SurveyCTO Expressions Reference — <https://docs.surveycto.com/02-designing-forms/01-core-concepts/09.expressions.html>
+- SurveyCTO Data Export Format — <https://docs.surveycto.com/05-exporting-and-publishing-data/01-overview/09.data-format.html>
+- **In-house function catalog**: [`surveycto_refs/expressions.md`](surveycto_refs/expressions.md) — derivative primer we maintain by hand against the SurveyCTO docs; when extending the converter, treat it as the working reference for what each function does, what its arguments look like, and which SurveyCTO operators diverge from ODK/XPath. [`surveycto_refs/xlsform.md`](surveycto_refs/xlsform.md) plays the same role for XLSForm column semantics. Verify against the canonical pages on <https://docs.surveycto.com> if anything looks stale.
 
 **Downstream consumer**: `transformers/logic_converter.py`
 
@@ -66,6 +67,7 @@ Stata variable names cannot contain `-`:
 | `-99` (Don't know) | `var__99` | Same |
 
 **Implementation**: to construct the column suffix from a choice code string `N`:
+
 - If `N` is non-negative: suffix = `_N` (e.g., `_1`, `_99`)
 - If `N` is negative: suffix = `__abs(N)` (e.g., `__66`, `__99`)
 
@@ -79,7 +81,7 @@ For a `select_multiple` inside a repeat group at iteration x with choice code N:
 
 For nested repeats (outer iteration x, inner iteration y): `var_x_y`.
 
-*(Per SurveyCTO documentation and observed data; verify if using deeply nested repeats.)*
+(Per SurveyCTO documentation and observed data; verify if using deeply nested repeats.)
 
 **Critical rule**: to translate `selected(${var}, 'N')` correctly, you MUST know whether
 `var` is `select_one` or `select_multiple`. The translation differs. See §5.
@@ -92,7 +94,7 @@ For nested repeats (outer iteration x, inner iteration y): `var_x_y`.
 
 Every `${varname}` reference is replaced with `varname` (bare identifier, no braces).
 
-```
+```text
 ${consent}      →  consent
 ${hh_size}      →  hh_size
 ${hhmem_age}    →  hhmem_age        (then suffixed if inside a repeat — see §2.2)
@@ -119,7 +121,7 @@ receives the already-substituted string; it does NOT need to re-derive iteration
 Variable substitution (`${…}` → bare name) must happen **before** any function translation,
 because functions reference the bare names:
 
-```
+```text
 Step 1: ${food_source} → food_source
 Step 2: selected(food_source, '3') → food_source == 3    (select_one)
                                    → food_source_3 == 1   (select_multiple, positive code)
@@ -170,7 +172,7 @@ In SurveyCTO, if a numeric field is unanswered (blank), any comparison involving
 evaluates to `false`. In Stata, an unanswered numeric field becomes `.` (system missing).
 Because Stata treats `.` as **positive infinity** for all relational operators:
 
-```
+```text
 SurveyCTO: ${age} > 18   → false when age is blank
 Stata:      age > 18      → TRUE  when age == .   (because . > any finite number)
 Stata:      age < 18      → FALSE when age == .   (because . > any finite number)
@@ -201,7 +203,7 @@ Second arg is a quoted integer code. Translation depends on question type.
 
 **`select_one`**: emit `var == N`
 
-```
+```text
 selected(${plot_use}, '2')          →  plot_use == 2
 selected(${empact_earnfreq}, '-66') →  empact_earnfreq == -66
 not(selected(${plot_use}, '4'))     →  !(plot_use == 4)
@@ -210,7 +212,7 @@ not(selected(${plot_use}, '4'))     →  !(plot_use == 4)
 **`select_multiple`**: construct column name using the sign-to-underscore rule (§1.1),
 then emit `colname == 1`
 
-```
+```text
 selected(${lstock_own_6m}, '1')    →  lstock_own_6m_1 == 1     (positive: single _)
 selected(${lstock_own_6m}, '-88')  →  lstock_own_6m__88 == 1   (negative: double __)
 selected(${lstock_own_6m}, '-66')  →  lstock_own_6m__66 == 1   (negative: double __)
@@ -224,7 +226,7 @@ clause (r(111) prevention).
 The first arg is a space-separated list of codes. After `string()` stripping:
 `selected('2 3 4', var)`. This means "is `var`'s value one of these codes?" → `inlist()`.
 
-```
+```text
 selected(string('2 3 4'), ${hhmem_status})     →  inlist(hhmem_status, 2, 3, 4)
 selected(string('1 2'), ${hhmem_relation})     →  inlist(hhmem_relation, 1, 2)
 not(selected('-99 0', ${plot_dispute}))        →  !inlist(plot_dispute, -99, 0)
@@ -242,7 +244,7 @@ Stata's `inlist()` accepts up to 250 arguments. For longer lists, nest:
 The second arg is a `${variable}` reference. Appears exclusively in repeat loops where
 a loop-level calculate field holds the current iteration's code at runtime.
 
-```
+```text
 selected(${lstock_own_6m}, ${lstock_value})      →  strip (DYNAMIC_SELECTED)
 selected(${hh_nothome_who}, ${hhmemnothome_pos}) →  strip (DYNAMIC_SELECTED)
 selected(${asset_own_list}, ${asset_value})       →  strip (DYNAMIC_SELECTED)
@@ -256,7 +258,7 @@ whose value varies by household — it is not a static code.
 Translates to the sum of all 0/1 exploded columns. Use `rowtotal()` (not `+`) because
 `rowtotal()` treats missing as 0 while `+` propagates missing.
 
-```
+```text
 // SurveyCTO: count-selected(${food_source}) >= 2
 // Stata:
 rowtotal(food_source_1 food_source_2 food_source_3 … food_source_K) >= 2
@@ -332,16 +334,18 @@ step, because `${var} = ''` must become `missing(var)`, not `missing(var ==)`.
 ### 7.2 `substr()` index translation
 
 SurveyCTO `substr(str, startindex, endindex)`:
+
 - `startindex`: 0-based (0 = first character)
 - `endindex`: exclusive (character at `endindex` is NOT included)
 
 Stata `substr(str, start, len)`:
+
 - `start`: 1-based (1 = first character)
 - `len`: number of characters to return
 
 Translation: `substr(str, s, e)` → `substr(str, s+1, e-s)`
 
-```
+```text
 substr(${phone}, 0, 3)   →  substr(phone, 1, 3)   // first 3 chars
 substr(${id}, 2, 5)      →  substr(id, 3, 3)       // chars at index 2,3,4
 ```
@@ -351,7 +355,7 @@ substr(${id}, 2, 5)      →  substr(id, 3, 3)       // chars at index 2,3,4
 In Stata, string concatenation with `+` requires both operands to be strings. If a
 numeric variable is concatenated with a string literal, Stata throws a type mismatch error.
 
-```
+```text
 // SurveyCTO: concat('Age: ', ${age})
 // Stata (broken):  "Age: " + age
 // Stata (correct): "Age: " + string(age)
@@ -518,7 +522,7 @@ only — not the entire condition.
 
 Every strip must emit one log line:
 
-```
+```text
 [STRIP] var=<varname>  clause=<original_clause>  reason=<reason_code>
 ```
 
@@ -528,7 +532,7 @@ Stripping a clause from a **top-level `AND` chain** only broadens the denominato
 
 **However, stripping inside `not()` is NOT safe.** Example:
 
-```
+```text
 not(position() = 1 and ${age} > 18)
 ```
 
@@ -641,5 +645,5 @@ assert convert("coalesce(${a}, ${b}, ${c})") == "cond(missing(a), cond(missing(b
 - `transformers/logic_converter.py` — implementation file. The `LogicConverter.validate_translations(conditions)` method scans a list of already-converted Stata skip-logic strings and reports how many still contain untranslated SurveyCTO calls — useful for spotting converter gaps after extending the form coverage.
 - `extractors/json_extractor.py` — caller that builds the `question_types` dict
 - [`surveycto_refs/expressions.md`](surveycto_refs/expressions.md) — in-house function-catalog primer (the converter's working reference for what each SurveyCTO function does)
-- SurveyCTO Expressions Reference: https://docs.surveycto.com/02-designing-forms/01-core-concepts/09.expressions.html
-- SurveyCTO Data Export Format: https://docs.surveycto.com/05-exporting-and-publishing-data/01-overview/09.data-format.html
+- SurveyCTO Expressions Reference: <https://docs.surveycto.com/02-designing-forms/01-core-concepts/09.expressions.html>
+- SurveyCTO Data Export Format: <https://docs.surveycto.com/05-exporting-and-publishing-data/01-overview/09.data-format.html>

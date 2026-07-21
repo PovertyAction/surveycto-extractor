@@ -3,6 +3,7 @@
 This document consolidates Stata-specific guidance for survey data cleaning pipelines. For language-independent cleaning principles, see [CLEANING.md](CLEANING.md). For SurveyCTO relevance translation rules, see [SURVEYCTO_RELEVANCE_TRANSLATION.md](SURVEYCTO_RELEVANCE_TRANSLATION.md).
 
 ## Table of Contents
+
 - [Batch Mode and Error Detection](#batch-mode-and-error-detection)
 - [Environment and Initialization](#environment-and-initialization)
 - [Coding Style](#coding-style)
@@ -20,7 +21,9 @@ This document consolidates Stata-specific guidance for survey data cleaning pipe
 **IMPORTANT: Stata batch mode (`-e` or `-b` flags) always exits with code 0**, even when errors occur. You cannot rely on the exit code to detect failures.
 
 ### Detecting Errors
+
 You must check the log file for error patterns like `r(601);`. If using a build tool, configure it to scan log output for `r(###);` patterns after each run:
+
 ```bash
 # Example: awk-based error detection after a Stata batch run
 stata-se -e -q do path/to/00_run.do module.do && \
@@ -28,13 +31,16 @@ stata-se -e -q do path/to/00_run.do module.do && \
 ```
 
 ### Manual Verification
+
 When running Stata directly, always inspect the log after running:
+
 ```bash
 stata-se -e -q do path/to/00_run.do module.do
 tail -n 40 run.log  # Look for r(###); error codes
 ```
 
 Common error codes:
+
 - `r(601)` - file not found
 - `r(198)` - invalid syntax or option
 - `r(111)` - variable not found
@@ -45,15 +51,19 @@ Common error codes:
 ## Environment and Initialization
 
 ### Reproducibility
+
 Use a consistent initialization pattern across all do-files to ensure reproducibility across machines:
+
 - Set a fixed random seed at the top of any module that uses random operations.
 - Use `version` to lock Stata's command syntax to a specific release.
 - Pin package versions (e.g., via a requirements file) rather than installing from SSC on the fly.
 
 ### `maxvar` Compatibility
+
 Stata/SE supports up to 32,767 variables. If your pipeline uses `set maxvar`, do not exceed the SE limit, or the script will fail on SE installations.
 
 ### Package Dependencies
+
 Track package dependencies explicitly (e.g., in a requirements file). Install packages to a local `ado/` directory checked into the repo rather than relying on users' global SSC installations. This ensures every collaborator uses the same package version.
 
 ---
@@ -61,6 +71,7 @@ Track package dependencies explicitly (e.g., in a requirements file). Install pa
 ## Coding Style
 
 ### Formatting
+
 - Indent Stata code with four spaces; align continuation lines beneath the originating command.
 - Use `*` for section headers and `//` for inline comments.
 - Keep globals in lowercase snake_case near the top of do-files.
@@ -68,7 +79,9 @@ Track package dependencies explicitly (e.g., in a requirements file). Install pa
 - Remember Stata varnames are capped at **32 characters**; plan suffixes accordingly.
 
 ### Line Continuation
+
 Use Stata's line continuation operator `///` at the physical end of a line:
+
 - Always place `///` as the very last characters on the line (avoid trailing spaces).
 - Do not use backslashes (`\`) — they are not Stata syntax.
 - Indent continuation lines for readability.
@@ -85,7 +98,9 @@ local loan_wide_stubs ///
 ```
 
 ### Dynamic Locals
+
 Use the single-nest expansion pattern rather than double-backtick forms:
+
 ```stata
 local scope_key `scope_key_`scope''
 ```
@@ -107,6 +122,7 @@ use hhid asset_amount_? asset_amount_?? ///
 This is more verbose (you need `?` for 1-digit, `??` for 2-digit, `???` for 3-digit suffixes) but prevents accidental inclusion of variables with non-numeric or longer suffixes. The same principle applies in `keep`, `drop`, `rename`, and local macro definitions — anywhere a varlist accepts wildcards.
 
 When you store wildcards in locals and need to iterate/confirm variables, expand them explicitly after the dataset is loaded:
+
 ```stata
 local all_outcomes "var_? var_?? var_amount_? var_amount_??"
 unab all_outcomes : `all_outcomes'
@@ -116,7 +132,9 @@ foreach v of local all_outcomes {
 ```
 
 ### No Silent `capture`
+
 Do not use `capture` to silently swallow errors. Either:
+
 1. **Use `capture` + check `_rc` explicitly** — e.g., `capture confirm file ...` / `if _rc { ... }` for conditional logic.
 2. **Don't use `capture` at all** — if the command already handles both cases (e.g., `label define ... , replace` works whether or not the label exists).
 
@@ -136,7 +154,9 @@ if _rc {
 ```
 
 ### Safe Destring
+
 When variables may arrive as string or numeric depending on the survey export, do **not** use `capture destring` (which silently swallows errors). Instead, filter to strings first and convert only those:
+
 ```stata
 ds var1 var2 var3, has(type string)
 qui destring `r(varlist)', replace
@@ -144,7 +164,9 @@ confirm numeric variable var1 var2 var3
 ```
 
 ### Saving Data Files
+
 Write directly to the destination path instead of using intermediate local variables:
+
 ```stata
 * Do this:
 qui compress
@@ -156,9 +178,11 @@ save `output_filepath', replace
 ```
 
 ### Tempvar Persistence
+
 `tempvar` in a do-file (not inside a `program`) creates variables that persist until the do-file finishes. If `save` is called before the do-file ends, the tempvar (named `__000000`, `__000001`, etc.) is written to the `.dta` file. This pollutes the output dataset with unintended variables.
 
 Prefer `tempvar` helper variables to avoid name collisions, and always `drop` them after use (before any `save`):
+
 ```stata
 * Do this:
 tempvar mi_any
@@ -176,7 +200,9 @@ replace score = . if `mi_any' > 0
 ```
 
 ### Magic Number Avoidance
+
 Define scaling constants and repeated numeric literals as named locals at the top of the module:
+
 ```stata
 * Define scaling factors at module top
 local weeks_per_month  4.3    // 7-day recall → monthly
@@ -190,7 +216,9 @@ gen exp_foodcons_12m = exp_foodcons_1m * `months_per_year'
 This makes the intent clear, centralizes update points, and prevents inconsistent uses of the same constant across a module.
 
 ### Standard File Ending for Cleaning Scripts
+
 At the end of each cleaning `.do` file, after the `save` command:
+
 ```stata
 *for logs:
 describe, fullnames
@@ -204,28 +232,35 @@ su
 Non-negotiable rules to prevent silent-failure bugs in the pipeline.
 
 ### Command Abbreviation
+
 **Never abbreviate dangerous commands** — always spell out fully:
 `save`, `merge`, `append`, `sort`, `drop`, `keep`, `rename`, `replace`, `assert`
 
 **Safe to abbreviate**: `gen`, `reg`, `tab`, `sum`, `qui`, `di`, `cap`, `bys`
 
 ### No Interactive Commands in Pipeline Modules
+
 Never use `pause`, `set trace on`, `browse`, or `edit` in committed pipeline modules. These block automated batch runs and require manual intervention. If you need to inspect state during development, use `display` or logging, then remove the interactive command before committing.
 
 ### Never `clear all` in Pipeline Modules
+
 `clear all` deletes programs loaded by any shared program file, causing downstream modules to fail with "command not recognized" errors. Use `clear` or `use ..., clear` instead.
 
 ### Merge Safety
+
 - **Never `merge ..., force`** — it silently coerces types and overwrites data. Fix the underlying type mismatch instead.
 - **No `merge m:m`** — it is non-deterministic. Use `joinby` + `collapse` or reshape to get a proper key structure. See [CLEANING.md > Deterministic Joins](CLEANING.md#deterministic-joins).
 - **Assert after every merge** — check `_merge` values explicitly before dropping:
+
 ```stata
 merge 1:1 hhid using "${analysis_data}/baseline_vars.dta"
 assert inlist(_merge, 1, 3)  // expect master-only or matched
 drop _merge
 ```
+
 - **Always clean `_merge` before saving** — a stray `_merge` variable in a saved `.dta` file will cause the next module's merge to fail with `_merge already defined`. Even when using `nogen`, verify no leftover `_merge` from a prior merge remains in the dataset before `save`.
 - **Use `keepus()` when merging auxiliary data** — load only the variables you need to prevent name collisions with variables already in memory. Define the needed variables in a local for traceability:
+
 ```stata
 * Good: explicit variable list, traceable
 local hh_vars hhmembers_count adult_equivalents children_0_14 adults_15plus
@@ -234,10 +269,13 @@ merge 1:1 hhid using "${working_data}/household_characteristics.dta", ///
 assert _merge == 3
 drop _merge
 ```
+
 When you genuinely need all variables from the using dataset, omitting `keepus()` is fine — but that should be the exception, not the default.
 
 ### Final Merge Cardinality
+
 In the final merge script, assert expected sample sizes at every step:
+
 ```stata
 * Start from known frame
 use "${input_data}/sampling_frame.dta", clear
@@ -254,7 +292,9 @@ drop _m_*
 > For the principle, see [CLEANING.md > Final Merge Cardinality Checks](CLEANING.md#final-merge-cardinality-checks).
 
 ### `isid` Before Saving
+
 Verify the expected unique identifier before writing any dataset:
+
 ```stata
 isid hhid
 qui compress
@@ -262,12 +302,15 @@ save "${analysis_data}/05_loans.dta", replace
 ```
 
 ### One-Off Data Corrections
+
 Avoid hard-coded ID patch rules. Prefer structural/value signatures (e.g., label + quantity + amount) with explicit `count`/`assert` guards on expected match counts. This keeps corrections valid after ID tokenization and fails loudly if data drift changes match cardinality. See [CLEANING.md > One-Off Data Corrections](CLEANING.md#one-off-data-corrections).
 
 ### Path Separators
+
 Always use forward slashes (`/`) in Stata path strings. On Linux, Stata treats backslashes (`\`) as literal filename characters, creating files like `for_analysis\file.dta` instead of navigating directories. Windows Stata handles both, so `/` works everywhere.
 
 ### Macro Name Length
+
 Stata macro names are limited to **32 characters**. Registry-style names like `deid_required_<long_dataset_id>` will fail with `invalid name` (`r(198)`). Plan naming conventions with headroom for suffixes.
 
 ---
@@ -275,13 +318,17 @@ Stata macro names are limited to **32 characters**. Registry-style names like `d
 ## Testing Guidelines
 
 ### Validation Approach
+
 There is no automated test suite. Validation is done via:
+
 - Stata `assert` / `isid` checks embedded in each module (the pipeline halts on failure).
 - Log review: after running, scan per-module logs for `r(#)` errors, unexpected replace counts, and WARNING messages.
 - Baseline comparison: optionally maintain a known-good snapshot of key output variables and compare against it after refactoring.
 
 ### Test Isolation
+
 When writing tests that include shared program files, start the test do-file with `program drop _all` (after `clear`) to prevent `r(110)` program redefinition errors when running multiple tests in sequence:
+
 ```stata
 clear
 program drop _all
@@ -289,7 +336,9 @@ set more off
 ```
 
 ### Global Checking
+
 Do NOT use `capture confirm global name` — this is invalid Stata syntax. Use string comparison:
+
 ```stata
 * Correct:
 if "$analysis_data" == "" {
@@ -302,7 +351,9 @@ if _rc { ... }
 ```
 
 ### Data State Management
+
 Use `preserve` and `restore` when tests load auxiliary datasets (like threshold files) to ensure the original dataset is available for subsequent steps:
+
 ```stata
 preserve
 use "`thresh_file'", clear
@@ -313,10 +364,13 @@ restore
 ```
 
 ### Log Management
+
 Do NOT use `capture log close` in individual test files when running under a test runner, as it interferes with the runner's logging. The test runner manages logs centrally.
 
 ### Collinearity Checks
+
 When checking if a variable was dropped due to collinearity, inspect `_se[var]` (it will be 0 or missing) rather than relying on `colnames e(b)`, as Stata often retains omitted variables in the matrix with zero coefficients:
+
 ```stata
 * Correct:
 local x2_se = _se[x2]
@@ -336,6 +390,7 @@ local x2_dropped = !strpos("`colnames'", "x2")  // May incorrectly report presen
 > For the conceptual framework (philosophy, core patterns, two-phase workflow, tolerances), see [CLEANING.md > Assertions](CLEANING.md#assertions) and [CLEANING.md > Two-Phase Workflow](CLEANING.md#two-phase-workflow).
 
 ### Stata `assert` and `isid`
+
 ```stata
 * Gateway zeroing
 assert loan_owned_size == 0 if loan_owned != 1 & !mi(loan_owned)
@@ -353,6 +408,7 @@ assert loansize_12m_1 > 0 if !mi(loansize_12m_1)
 ```
 
 ### Documenting Special Code Proportions
+
 ```stata
 count if loan_amount == -99
 local dk = r(N)
@@ -401,12 +457,14 @@ assert !mi(interest_rate_12m_1) if interest_percent_1 == 1
 > For the principle (when to apply, multi-level patterns), see [CLEANING.md > Zero-by-Logic](CLEANING.md#zero-by-logic).
 
 **Simple case** — single gateway, single downstream variable:
+
 ```stata
 * No animals owned --> set has_<animal_type> to zero for all animal types
 replace has_cattle = 0 if owns_any_animals == 0
 ```
 
 **Gateway loop** — when a numbered set of downstream variables depends on per-item and top-level gateways:
+
 ```stata
 * Load gateway variables alongside downstream vars
 use hhid asset_amount_? asset_amount_?? ///
@@ -426,6 +484,7 @@ forvalues i = 1/62 {
     }
 }
 ```
+
 This replaces the anti-pattern of blanket `replace x = 0 if missing(x)` at the end of a calculation, which destroys the distinction between "doesn't own" (should be 0) and "refused/don't know" (should stay `.r`/`.d`). Always set zeroes from the survey logic, not from the absence of data.
 
 ### Skip-Logic Violation Resolution (Gate vs. Downstream)
@@ -433,6 +492,7 @@ This replaces the anti-pattern of blanket `replace x = 0 if missing(x)` at the e
 > For the principle (75% rule, tolerance, gate-flip logic), see [CLEANING.md > Skip-Logic Violation Resolution](CLEANING.md#skip-logic-violation-resolution-gate-vs-downstream).
 
 Stata reference implementation:
+
 ```stata
 * Count violations against relevant denominator
 count if house_improved == 0 & !mi(house_improved)
@@ -457,6 +517,7 @@ replace house_improved_amt = 0 if house_improved == 0 & !mi(house_improved)
 > For the principle (blank=missing, priority ordering, absence responses, QC table), see [CLEANING.md > Other-Specify Classification](CLEANING.md#other-specify-classification).
 
 Stata reference implementation:
+
 ```stata
 * 1. Lowercase and trim the text
 gen strL _osp_lc = lower(strtrim(some_var_osp))
@@ -486,6 +547,7 @@ replace outcome = 0 if gate_var == -66 & osp_map == "unimproved"
 ```
 
 QC table:
+
 ```stata
 di as text "QC: Other-specify keyword mapping"
 preserve
@@ -505,11 +567,13 @@ restore
 **Do NOT use `rowtotal(...), missing`.** Its semantics (missing only when *all* components are missing, treats individual missings as zero) conflict with strict propagation and are easily misinterpreted. All aggregates must use strict propagation: missing if *any* component is missing.
 
 For few summands (<=5), just sum directly:
+
 ```stata
 gen sumvar = summand1 + summand2 + summand3
 ```
 
 For many summands, use `rowtotal` (without `, missing`) + an any-missing check:
+
 ```stata
 tempvar mi_any
 egen `mi_any' = rowmiss(var1 var2 var3 var4 var5 var6 var7 var8 var9)
@@ -523,6 +587,7 @@ drop `mi_any'
 `rowmiss()` counts system missing (`.`) across variables but **cannot distinguish structural missing from data-quality missing (`.d`/`.r`)**. When components are 80-98% structurally missing due to skip logic, `rowmiss() > 0` triggers for nearly everyone, making the aggregate missing for thousands of observations that should be zero.
 
 **Use flag-based `.d`/`.r` tracking instead:**
+
 ```stata
 * Wrong: rowmiss treats structural missing and .d/.r the same
 egen mi_count = rowmiss(comp_1 comp_2 comp_3 comp_4)
@@ -559,6 +624,7 @@ gen mi_na_var = (var == -77)   // not applicable
 ```
 
 Use `.x` when initializing variables empty (to distinguish from other extended missings):
+
 ```stata
 gen newvar = .x
 ```
@@ -586,6 +652,7 @@ Once sentinel codes are recoded to extended missings (`.r`, `.d`, `.n`, `.o`), t
 ```
 
 Direct assignment preserves extended missing; arithmetic does not:
+
 ```stata
 gen y = x           // if x == .d, then y == .d  (preserved)
 gen z = x * 4.3     // if x == .d, then z == .   (destroyed)
@@ -614,11 +681,13 @@ This applies to all arithmetic: multiplication (`*`), addition (`+`), division (
 Some data collection platforms partially convert integer sentinel codes (-99, -88) to Stata extended missing (`.d`, `.r`) during field data collection. However, this conversion is often incomplete. The result is that **within the same dataset, some variables have integer sentinels and others have extended missing codes**.
 
 This means:
+
 - `payment_1m` might already have `.d`/`.r` (platform-converted) while `work_days_7d` still has -99/-88 (missed by the platform)
 - A recode line like `recode var (-99 = .d) (-88 = .r)` is harmless on variables that were already converted (no -99/-88 to match)
 - But relying on `if var < 0` to detect all sentinels will miss variables where the platform already converted them to extended missing
 
 **Always check for both formats** when auditing a variable for sentinels:
+
 ```stata
 * Check for integer sentinels
 tab var if var < 0
@@ -629,6 +698,7 @@ count if var == .r
 ```
 
 In Python, extended missing codes appear as `NaN` by default. Use `pyreadstat` with `user_missing=True` to detect them:
+
 ```python
 df, meta = pyreadstat.read_dta('file.dta', usecols=['var'], user_missing=True)
 # Extended missings show as string tags: 'd', 'r', etc.
@@ -640,6 +710,7 @@ ext_miss = df['var'][df['var'].apply(lambda x: isinstance(x, str))]
 > For the principle (when to decompose, workflow), see [CLEANING.md > Select-Multiple Decomposition](CLEANING.md#select-multiple-decomposition).
 
 When a select-multiple variable stores responses as a space-delimited string (e.g., `"2 4 5"`), parse it into binary indicators by padding the string with spaces and searching for each choice value:
+
 ```stata
 * Create binary indicator for choice value `i' in select-multiple variable
 gen byte varname_`i' = 0 if !mi(select_multiple_var)
@@ -650,6 +721,7 @@ replace varname_`i' = . if mi(select_multiple_var)
 The space padding (`" " + var + " "`) prevents partial matches (e.g., searching for `" 2 "` won't match `"12"`).
 
 **"None of the above" inversion** (see [CLEANING.md > "None of the Above" Option Inversion](CLEANING.md#none-of-the-above-option-inversion)):
+
 ```stata
 * Option 0 = "None" in select-multiple → invert to has_any indicator
 gen byte has_any = (select_none_0 == 0)   // produces 0/1
@@ -657,7 +729,9 @@ gen byte has_any = (select_none_0 == 0)   // produces 0/1
 ```
 
 ### Frame-Based Reshape Isolation
+
 When a reshape is needed for intermediate cleaning (e.g., wide-to-long for per-item validation, then back to wide), use Stata frames to isolate the reshape from the main dataset. This avoids losing variables that don't participate in the reshape:
+
 ```stata
 frame copy default my_frame
 frame change my_frame
@@ -671,7 +745,9 @@ frame drop my_frame
 ```
 
 ### ID Verification
+
 After opening a dataset or changing the data structure (e.g., reshape), confirm uniqueness of ID:
+
 ```stata
 use "${data}/mydata.dta", clear
 isid hhid
@@ -682,6 +758,7 @@ isid hhid loan_index
 ```
 
 ### Verifying `.dta` Output Parity
+
 To confirm a refactor didn't change a `.dta` output, compare old vs new using `datasignature` (after sorting on the key) and optionally `cf _all`. Note: `cf` does not support `id()`, so ensure both datasets are identically sorted (or save a sorted tempfile) before running `cf`.
 
 **Caveat: `rowtotal` masks intermediate changes.** `rowtotal` (without `, missing`) treats individual missings as 0. If a refactor changes a component from 0 to missing (or vice versa), the row total is identical — output parity checks will not detect the change. Always pair output comparison with line-by-line code review when reviewing refactored modules that use `rowtotal`.
@@ -689,6 +766,7 @@ To confirm a refactor didn't change a `.dta` output, compare old vs new using `d
 ### String/Tokenized ID Handling
 
 When household IDs are tokenized strings (e.g., after de-identification), panel commands like `xtset` fail because they require numeric IDs. Create a temporary numeric group variable:
+
 ```stata
 * Panel commands with string ID
 egen long id_panel = group(hhid)
@@ -698,12 +776,14 @@ drop id_panel
 ```
 
 Related rules:
+
 - **Use `missing()` not `== .`** to test for missing values. `missing()` works for both string and numeric types; `== .` fails silently on strings.
 - **Update hardcoded ID lists** when migrating from numeric to tokenized IDs. Search for `inlist(hhid, ...)` patterns and replace numeric values with their tokenized equivalents.
 
 ### Short-Survey Dual Versioning
 
 Create parallel variables for short- and long-survey households:
+
 ```stata
 * Calculate aggregate for all observations
 egen total_value = rowtotal(comp1 comp2 comp3)
@@ -723,6 +803,7 @@ label var total_value "Total value (long survey, full detail)"
 ### Preserve+Tempfile for Split-and-Recombine
 
 When processing must diverge by subgroup (e.g., different strata that each require a different merge partner), use preserve+tempfile:
+
 ```stata
 preserve
     keep if stratum == 1
@@ -741,6 +822,7 @@ isid hhid
 ### Stratum-Specific Calculations
 
 When computing reference values (medians, means) for imputation, stratify by the variables that define experimental or sampling strata to preserve study structure:
+
 ```stata
 preserve
     keep if unit_price > 0 & !mi(unit_price)
@@ -757,6 +839,7 @@ label var imputed_value "Value (imputed via arm×stratum median where missing)"
 ### All-or-Missing Aggregation
 
 When summing components into a category total, flag observations with ANY missing component and set the total to missing for them:
+
 ```stata
 * Step 1: Flag missing components
 gen byte ag_missing = is_ag_asset & missing(asset_amount)
@@ -783,6 +866,7 @@ This three-step pattern (flag → propagate → enforce) is more reliable than `
 ### `fillin` with Origin Tracking
 
 After `fillin` creates placeholder observations, always track which rows are synthetic:
+
 ```stata
 fillin hhid activity
 gen byte is_fillin = _fillin
@@ -838,7 +922,7 @@ only the indexed names exist in the exported dataset.
 This broadens the `tabstat` condition but is safe: respondents who did not qualify under the
 stripped clause have structurally missing values.
 
-**Extension:** The check also covers variables used as _arguments_ inside `inlist()` and
+**Extension:** The check also covers variables used as *arguments* inside `inlist()` and
 `rowtotal()`, not just the left side of comparison operators.
 
 ### `tabstat if` with Always-False Conditions → r(2000)
@@ -848,17 +932,20 @@ skip logic converts to `(consent==1) & (0)`, the effective condition is always f
 tabstat finds zero observations and raises `r(2000)` ("too few observations").
 
 **Fix (two-part):**
+
 1. Exclude disabled variables from the numeric universe entirely (filter `disabled == False`).
 2. As a safety net, strip any clause matching `(0)` literally from the condition string.
 
 ### `selected()` — Resolved via Question-Type Dict
 
 **Problem:** SurveyCTO `selected(var, 'N')` translates differently depending on question type:
+
 - `select_one`: should become `var == N`
 - `select_multiple`: should become `var_N == 1`
 
 **Fix:** `json_extractor.py` passes a `{var_name: question_type}` dict to `LogicConverter` at
 extraction time. The converter emits:
+
 - `select_one` → `var == N`
 - `select_multiple` → `var_N == 1`  (e.g., `food_source_3 == 1`)
 - Dynamic second argument (another variable) → stripped (untranslatable)
@@ -873,6 +960,7 @@ numeric literals. In Stata, single quotes delimit macros; bare `'-55'` is invali
 causes a macro expansion error.
 
 **Fix (Step 3b in `logic_converter.py`):**
+
 - For `select_multiple` var: `var != '-55'` → `var__55 != 1`
   (negative code: `-` → `_`, yielding double underscore prefix)
 - For other vars: strip the single quotes → `var != -55`
@@ -895,17 +983,21 @@ translation problems before running in Stata:
 ### Understanding `if` in Stata: Command vs. Qualifier
 
 **The `if` command (block if)**: Evaluates the expression based **only on the first observation**:
+
 ```stata
 if some_condition == 1 {
     replace my_variable = 100  // Applies to ALL obs if first obs meets condition
 }
 ```
+
 Use for controlling flow of execution, not for row-wise conditional data changes.
 
 **The `if` qualifier (inline if)**: Applies the command only to observations where expression is true:
+
 ```stata
 replace my_variable = 100 if some_condition == 1  // Only where condition is true
 ```
+
 This is the correct method for conditional data transformations.
 
 **Common Pitfall**: Writing `if shortsurvey == 1 { replace x = 0 }` intending to set `x` to 0 only where `shortsurvey` is 1. This actually replaces `x` for *all* observations if the *first* observation has `shortsurvey == 1`.
@@ -918,18 +1010,21 @@ This is the correct method for conditional data transformations.
 2. **Test by Running**: Execute your Stata script.
 3. **Inspect Log on Failure**: Review which assertion failed and how many contradictions.
 4. **Examine Contradictory Data**:
-```stata
-* If 'assert cost == 0 if gateway == 2' failed
-preserve
-keep if gateway == 2
-list hhid cost gateway if cost != 0 & !missing(cost)
-restore
-```
+
+   ```stata
+   * If 'assert cost == 0 if gateway == 2' failed
+   preserve
+   keep if gateway == 2
+   list hhid cost gateway if cost != 0 & !missing(cost)
+   restore
+   ```
+
 5. **Cross-Reference Documentation**: Consult the survey instrument, codebooks, etc.
 6. **Refine Assertion or Code**: Based on investigation.
 7. **Re-run and Iterate**: Until all assertions pass.
 
 ### General Guidance
+
 - Code concisely but descriptively. Avoid frequent `di "..."` statements; let Stata code and console output speak for itself.
 - Don't check existence of columns/files; just let the script fail and review logs.
 
@@ -949,6 +1044,7 @@ use "`income_total_file'", clear
 ## Redundancy to Avoid
 
 Avoid useless pieces of code in `if` conditions:
+
 ```stata
 * Redundant - !mi() is implied by <0
 assert lstock_total == -99 if lstock_total < 0 & !mi(lstock_total)
