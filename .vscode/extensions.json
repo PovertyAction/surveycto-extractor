@@ -1,0 +1,12 @@
+{
+    "recommendations": [
+        "ms-python.python",
+        "charliermarsh.ruff",
+        "tamasfe.even-better-toml",
+        "davidanson.vscode-markdownlint",
+        "github.vscode-pull-request-github",
+        "skellock.just",
+        "redhat.vscode-yaml",
+        "yzhang.markdown-all-in-one"
+    ]
+}

@@ -330,9 +330,9 @@ def main():
     """Run the extract CLI entry point."""
     if config is None:
         print(
-            "ERROR: config.py not found in the current directory. Run "
-            "`surveycto-init` to create one (or copy sample/config.example.py "
-            "to config.py for the bundled sample), then fill in SURVEYS/DATASETS."
+            "ERROR: config.toml not found in the current directory. Run "
+            "`surveycto-init` to create one (or copy sample/config.example.toml "
+            "to config.toml for the bundled sample), then fill in SURVEYS/DATASETS."
         )
         sys.exit(1)
     survey_keys = list(config.SURVEYS.keys())

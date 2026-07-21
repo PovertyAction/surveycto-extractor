@@ -1,7 +1,7 @@
-"""``surveycto-init`` -- write a starter ``config.py`` into the current directory.
+"""``surveycto-init`` -- write a starter ``config.toml`` into the current directory.
 
 The blank template ships bundled inside the package (``templates/``); this copies
-it into the working directory as ``config.py`` for the user to fill in. It never
+it into the working directory as ``config.toml`` for the user to fill in. It never
 overwrites an existing config without ``--force``.
 """
 
@@ -13,21 +13,21 @@ from pathlib import Path
 
 def _template_text() -> str:
     return (
-        resources.files("surveycto_extractor.templates") / "config.template.py"
+        resources.files("surveycto_extractor.templates") / "config.template.toml"
     ).read_text(encoding="utf-8")
 
 
 def main() -> None:
-    """Write a starter config.py into the destination directory."""
+    """Write a starter config.toml into the destination directory."""
     parser = argparse.ArgumentParser(
         prog="surveycto-init",
-        description="Write a starter config.py into the current directory.",
+        description="Write a starter config.toml into the current directory.",
     )
     parser.add_argument(
         "-o",
         "--output",
-        default="config.py",
-        help="destination path (default: ./config.py)",
+        default="config.toml",
+        help="destination path (default: ./config.toml)",
     )
     parser.add_argument(
         "-f",

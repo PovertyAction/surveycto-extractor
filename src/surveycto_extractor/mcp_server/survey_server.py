@@ -5,28 +5,28 @@ Drop-in complement to the search_survey.py skill when query
 volume is high (10-50+ lookups per cleaning module).
 
 Graceful degradation:
-  - No config.py          -> server starts, tools explain what's needed
+  - No config             -> server starts, tools explain what's needed
   - DATASETS empty        -> same
   - JSON files missing    -> skips that survey, loads what's available
   - Malformed JSON        -> skips with warning
   - Some surveys loaded   -> tools work on what's available
 
 Setup:
-  1. pip install "mcp[cli]"
+  1. uv sync --extra mcp
   2. Add to your project's .mcp.json:
      {
        "mcpServers": {
          "survey-expert": {
-           "command": "python",
-           "args": ["<path-to>/surveycto_extractor/mcp_server/survey_server.py"]
+           "command": "uv",
+           "args": ["run", "--extra", "mcp", "python", "-m",
+                    "surveycto_extractor.mcp_server.survey_server"]
          }
        }
      }
-  3. The server auto-discovers config.py in its parent directory.
-     Override with SURVEY_CONFIG env var if needed.
+  3. The server discovers config.toml (preferred) or config.py in the current
+     working directory. Override with SURVEYCTO_CONFIG if needed.
 """
 
-import importlib.util
 import json
 import math
 import os
@@ -51,42 +51,31 @@ except ImportError:
 # ---------------------------------------------------------------------------
 
 
-def _find_config() -> Path | None:
-    """Locate config.py: env var (SURVEYCTO_CONFIG / SURVEY_CONFIG), else
-    ./config.py in the current working directory. The server is packaged now, so
-    it can no longer resolve config relative to its own file -- launch it from
-    your project directory, or set SURVEYCTO_CONFIG to an explicit path.
+def _load_user_config():
+    """Discover + load the project config via the shared package loader.
+
+    Handles config.toml (preferred) and config.py, resolving from SURVEYCTO_CONFIG
+    or the current working directory. Returns the config object, or None when it is
+    absent or broken -- an always-on server must start empty, not crash. Launch the
+    server from your project directory, or set SURVEYCTO_CONFIG to a config path.
     """
-    env = os.environ.get("SURVEYCTO_CONFIG") or os.environ.get("SURVEY_CONFIG")
-    if env:
-        p = Path(env)
-        if p.exists():
-            return p
-        print(
-            f"[survey-expert] WARNING: config env var set to {env}, not found",
-            file=sys.stderr,
-        )
-    default = Path.cwd() / "config.py"
-    if default.exists():
-        return default
-    print(
-        f"[survey-expert] config.py not found at {default}. "
-        f"Server will start with no data. Set SURVEYCTO_CONFIG, launch from your "
-        f"project directory, or run Phase 4 (surveycto-vardict) first.",
-        file=sys.stderr,
-    )
-    return None
-
-
-def _load_config_module(path: Path) -> object | None:
-    """Import config.py dynamically. Returns None on failure."""
+    # SURVEY_CONFIG is a legacy alias for SURVEYCTO_CONFIG.
+    if "SURVEYCTO_CONFIG" not in os.environ and os.environ.get("SURVEY_CONFIG"):
+        os.environ["SURVEYCTO_CONFIG"] = os.environ["SURVEY_CONFIG"]
     try:
-        spec = importlib.util.spec_from_file_location("config", str(path))
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
-        return mod
-    except Exception as exc:
-        print(f"[survey-expert] Failed to load {path}: {exc}", file=sys.stderr)
+        from surveycto_extractor.config_loader import config_path, load_config
+
+        cfg = load_config()
+        if cfg is None:
+            print(
+                f"[survey-expert] no config found at {config_path()}. Server starts "
+                f"with no data. Set SURVEYCTO_CONFIG, launch from your project "
+                f"directory, or run surveycto-vardict first.",
+                file=sys.stderr,
+            )
+        return cfg
+    except Exception as exc:  # broken config -> start empty rather than crash
+        print(f"[survey-expert] failed to load config: {exc}", file=sys.stderr)
         return None
 
 
@@ -345,9 +334,9 @@ class SurveyStore:
         if not self._config:
             return (
                 "No survey data loaded.\n\n"
-                "The MCP server could not find config.py or DATASETS is empty.\n"
+                "The MCP server could not find config.toml/config.py or DATASETS is empty.\n"
                 "To fix:\n"
-                "  1. Ensure config.py exists (run `surveycto-init` to create one)\n"
+                "  1. Ensure config.toml exists (run `surveycto-init` to create one)\n"
                 "  2. Add entries to DATASETS with questions_json and output_json paths\n"
                 "  3. Run `surveycto-vardict` to generate the JSON files\n"
                 "  4. Restart the Claude Code session to reload the MCP server"
@@ -1687,23 +1676,18 @@ def _get_store() -> SurveyStore:
     """Get or create the survey store. Never raises."""
     global _store
     if _store is None:
-        config_path = _find_config()
-        datasets = {}
-        if config_path:
-            mod = _load_config_module(config_path)
-            if mod:
-                datasets = getattr(mod, "DATASETS", {})
-                if datasets:
-                    print(
-                        f"[survey-expert] Config: {config_path} "
-                        f"({len(datasets)} dataset(s))",
-                        file=sys.stderr,
-                    )
-                else:
-                    print(
-                        "[survey-expert] Config loaded but DATASETS is empty.",
-                        file=sys.stderr,
-                    )
+        cfg = _load_user_config()
+        datasets = getattr(cfg, "DATASETS", {}) if cfg is not None else {}
+        if datasets:
+            print(
+                f"[survey-expert] Config loaded ({len(datasets)} dataset(s))",
+                file=sys.stderr,
+            )
+        elif cfg is not None:
+            print(
+                "[survey-expert] Config loaded but DATASETS is empty.",
+                file=sys.stderr,
+            )
         _store = SurveyStore(datasets)
     return _store
 

@@ -1710,6 +1710,7 @@ dependencies = [
     { name = "pandas", version = "3.0.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "pyarrow" },
     { name = "pyreadstat" },
+    { name = "tomli", marker = "python_full_version < '3.11'" },
 ]
 
 [package.optional-dependencies]
@@ -1736,6 +1737,7 @@ requires-dist = [
     { name = "pyreadstat", specifier = ">=1.2.0,<2" },
     { name = "pytest", marker = "extra == 'dev'" },
     { name = "ruff", marker = "extra == 'dev'" },
+    { name = "tomli", marker = "python_full_version < '3.11'", specifier = ">=2.0.1" },
 ]
 provides-extras = ["mcp", "dev"]
 

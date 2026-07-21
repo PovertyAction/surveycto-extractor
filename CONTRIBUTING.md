@@ -5,9 +5,9 @@ Contributions are welcome. Please read this before opening a PR.
 ## Ground rules
 
 - **No project-specific data or paths.** All code must be project-agnostic.
-  `config.template.py` is the only place project-specific structure is documented,
+  `config.template.toml` is the only place project-specific structure is documented,
   and it uses only placeholder values.
-- **No `config.py` commits.** It is blocked by `.gitignore` for good reason.
+- **No `config.toml` / `config.py` commits.** Both are blocked by `.gitignore` for good reason.
 - **No survey data.** Do not include `.dta`, instrument `.xlsx`, or generated
   output files (JSON, CSV, do-files) as examples or test fixtures. The one
   exception is the bundled `sample/` directory, which carries the public

@@ -18,7 +18,7 @@ Usage:
     --no-enrich-xml  Skip the optional compiled-XForm contract overlay.
 
 Config:
-    Edit config.py to add survey entries to the DATASETS dict. Add an optional
+    Edit config.toml to add survey entries to the DATASETS dict. Add an optional
     "xml_path" to a dataset to enable the deterministic XML-contract overlay
     (see surveycto-enrich).
 """
@@ -2119,7 +2119,7 @@ def main():
     args = parser.parse_args()
 
     if not DATASETS:
-        print("ERROR: config.DATASETS is empty. Add survey entries to config.py.")
+        print("ERROR: config.DATASETS is empty. Add survey entries to config.toml.")
         sys.exit(1)
 
     if args.validate_only:

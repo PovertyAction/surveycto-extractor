@@ -1,0 +1,25 @@
+# Sample config for the bundled household survey demo.
+#
+# Copy this to config.toml at the repo root, then run from the repo root:
+#   cp sample/config.example.toml config.toml
+#   uv run surveycto-extract --survey household_survey
+#   uv run surveycto-vardict  --survey household_survey --xlsx
+#
+# Paths are resolved relative to the config file's directory. Copied to the repo
+# root as config.toml, the "sample/..." paths below resolve against the repo root.
+
+[surveys.household_survey]
+input_file        = "sample/Household_Survey.xlsx"
+output_dir        = "sample/output"
+sections_dir      = "sample/output/sections"
+name              = "Household Survey (IPA HFC sample)"
+max_section_depth = 3
+# geo_bbox = [-1.5, 4.2, 29.5, 35.0]   # a study-area box makes synthetic GPS realistic
+
+[datasets.household_survey]
+data           = "sample/household_survey.dta"
+questions_json = "sample/output/household_survey_questions.json"
+output_json    = "sample/output/household_survey_variable_dictionary.json"
+output_xlsx    = "sample/output/household_survey_variable_dictionary.xlsx"
+# The sample form uses 3-digit sentinels (-999/-888/...) in its choice lists,
+# which are project data (not recode targets), so no [sentinels] override is set.

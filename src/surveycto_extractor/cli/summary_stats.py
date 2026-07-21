@@ -27,7 +27,7 @@ Usage
 
 Config
 ------
-    Edit config.py to add survey entries to the DATASETS dict, then run:
+    Edit config.toml to add survey entries to the DATASETS dict, then run:
         uv run surveycto-vardict --survey <key>   # Phase 4
         uv run surveycto-summary-stats  --survey <key>   # Phase 5
 """

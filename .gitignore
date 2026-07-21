@@ -1,8 +1,9 @@
 # ============================================================
 # CRITICAL: never commit project-specific config
 # ============================================================
-# config.py is copied from config.template.py and contains
+# config.toml (or a legacy config.py) is the per-project config with
 # project-specific file paths. It must NEVER be committed.
+config.toml
 config.py
 
 # .mcp.json registers the survey-expert MCP server locally;
@@ -28,7 +29,7 @@ data/
 # Allow the bundled sample files (public IPA HFC training data)
 !sample/household_survey.dta
 !sample/Household_Survey.xlsx
-!sample/config.example.py
+!sample/config.example.toml
 
 # Survey instrument XLSX files (contain project-specific content)
 # The tool reads these at runtime; they should live outside this repo.
@@ -100,7 +101,9 @@ venv.bak/
 Thumbs.db
 desktop.ini
 
-.vscode/
+# Ignore local editor settings but keep the shared recommended-extensions list.
+.vscode/*
+!.vscode/extensions.json
 .idea/
 *.swp
 *.swo

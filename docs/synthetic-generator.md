@@ -117,19 +117,16 @@ Equivalently, an answer sheet may carry `"directives": {"case_pool": {"prefix": 
 A filter that matches no caseid is a hard error (you asked for a context that
 isn't in the table).
 
-Configure search dirs per-survey in `config.py`:
+Configure search dirs per-survey in `config.toml`:
 
-```python
-SURVEYS = {
-    "my_survey": {
-        "input_file": Path("path/to/My_Survey.xlsx"),
-        # ...
-        "pulldata_search_dirs": [
-            Path("path/to/forms/My Survey-media"),  # the SurveyCTO form-media bundle
-            Path("path/to/forms"),                  # fallback
-        ],
-    },
-}
+```toml
+[surveys.my_survey]
+input_file = "path/to/My_Survey.xlsx"
+# ...
+pulldata_search_dirs = [
+    "path/to/forms/My Survey-media",  # the SurveyCTO form-media bundle
+    "path/to/forms",                  # fallback
+]
 ```
 
 CSV filenames must match the bare name from the `pulldata()` call: a form
@@ -377,15 +374,12 @@ URL placeholders:
 Geopoint fields are sampled within a bounding box. Default is the global
 `(-90, 90, -180, 180)` which lands many synthetic submissions in the
 ocean — fine for "geopoint exists" checks but breaks "GPS within enumeration
-zone" HFC checks. Set a country bbox per survey in `config.py`:
+zone" HFC checks. Set a country bbox per survey in `config.toml`:
 
-```python
-SURVEYS = {
-    "my_uganda_survey": {
-        # ...
-        "geo_bbox": (-1.5, 4.2, 29.5, 35.0),  # (lat_min, lat_max, lon_min, lon_max)
-    },
-}
+```toml
+[surveys.my_uganda_survey]
+# ...
+geo_bbox = [-1.5, 4.2, 29.5, 35.0]  # [lat_min, lat_max, lon_min, lon_max]
 ```
 
 ## Strip log

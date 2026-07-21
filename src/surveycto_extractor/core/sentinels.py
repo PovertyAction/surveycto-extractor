@@ -4,8 +4,9 @@ A "sentinel" is a numeric code standing in for a non-response reason
 (don't-know, refused, ...). The mapping from code to human label and Stata
 extended-missing is a **project convention**, not a fixed standard -- IPA
 commonly uses -99/-88/..., but another team may use an entirely different set.
-So the table is overridable: define ``SENTINEL_MEANINGS`` in your ``config.py``
-to replace the default wholesale.
+So the table is overridable: set ``[sentinels.meanings]`` in your ``config.toml``
+(or ``SENTINEL_MEANINGS`` in a legacy ``config.py``) to replace the default
+wholesale; an empty table disables sentinel recoding entirely.
 
 Both ``surveycto-vardict`` (labels choice codes, scans data for
 sentinel cells) and ``load_survey_metadata.py`` (emits the Stata ``mvdecode``
@@ -17,7 +18,7 @@ Format: ``{code:int -> (label:str, stata_missing:str)}``. ``stata_missing`` is
 the Stata extended-missing target (``.d``, ``.r``, ...) used by ``mvdecode``.
 """
 
-# IPA default convention. Override by defining SENTINEL_MEANINGS in config.py.
+# IPA default convention. Override via [sentinels.meanings] in config.toml.
 DEFAULT_SENTINEL_MEANINGS: dict[int, tuple[str, str]] = {
     -99: ("Don't know", ".d"),
     -88: ("Refused to answer", ".r"),
@@ -28,7 +29,7 @@ DEFAULT_SENTINEL_MEANINGS: dict[int, tuple[str, str]] = {
 
 # Codes scanned/counted in the data as sentinels but NOT recoded (no Stata
 # missing target). Kept for continuity with the historical scan list, which
-# included -98. Override with SENTINEL_SCAN_ONLY in config.py.
+# included -98. Override via [sentinels] scan_only in config.toml.
 DEFAULT_SCAN_ONLY: list[int] = [-98]
 
 
