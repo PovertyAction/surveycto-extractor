@@ -2,9 +2,9 @@ name: Pre-commit
 
 on:
   pull_request:
-    branches: [master]
+    branches: [main]
   push:
-    branches: [master, dev]
+    branches: [main, dev]
 
 jobs:
   pre-commit:
