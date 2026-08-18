@@ -10,7 +10,7 @@ dependencies = [
     "numpy>=1.26,<3",
     "openpyxl>=3.1.5,<4",
     "pyreadstat>=1.2.0,<2",
-    "pyarrow>=15.0.0",
+    "pyarrow>=25.0.1",
     "networkx>=3.0,<4",
     "tomli>=2.0.1; python_version < '3.11'",  # config.toml parsing (tomllib is stdlib on 3.11+)
 ]
