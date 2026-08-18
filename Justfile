@@ -6,6 +6,11 @@ set windows-shell := ["powershell.exe", "-NoLogo", "-Command"]
 venv_dir := ".venv"
 python := venv_dir + if os_family() == "windows" { "/Scripts/python.exe" } else { "/bin/python3" }
 
+# Directory of the shared `dep-accept` harness checkout, used by `accept-deps`.
+# Override with DEP_ACCEPT pointing at the directory, not at the script inside it.
+home_dir := env('USERPROFILE', env('HOME', '.'))
+dep_accept_dir := env('DEP_ACCEPT', home_dir / ".claude/skills/dep-accept")
+
 # List recipes (default)
 default:
     @just --list
@@ -51,12 +56,12 @@ test:
 # Each PR head gets its own worktree + venv and is diffed against main on tests,
 # the sample end-to-end outputs (see .dep-accept.toml) and the MCP smoke test.
 # Pass PR numbers to narrow it. The engine is the project-agnostic `dep-accept`
-# harness, kept outside this repo so every project shares one copy -- point
-# DEP_ACCEPT at your checkout if it is not in the default location.
+# harness, kept outside this repo so every project shares one copy -- set
+# DEP_ACCEPT to that checkout's DIRECTORY if it is not in the default location.
 
 # Verify the open Dependabot PRs before merging (see CONTRIBUTING.md)
 accept-deps *ARGS:
-    uv run --no-project python -u "{{ env('DEP_ACCEPT', env('USERPROFILE', env('HOME', '.')) / '.claude/skills/dep-accept/scripts/accept_dep_prs.py') }}" {{ ARGS }}
+    uv run --no-project python -u "{{ dep_accept_dir / 'scripts/accept_dep_prs.py' }}" {{ ARGS }}
 
 # Remove the virtual environment
 clean:

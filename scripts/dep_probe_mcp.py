@@ -8,8 +8,10 @@ the `main` baseline.
 
 The optional `mcp` extra is the part of this toolkit no file comparison can
 cover: the server has to *import* and answer. Importing is the check that matters
-most for an `mcp` bump -- the 2.x line moved `mcp.server.fastmcp`, so a version
-range that looks harmless in a lockfile breaks the server outright.
+most for an `mcp` bump, because the SDK has already relocated its server class
+once -- 1.x's `mcp.server.fastmcp.FastMCP` became 2.x's
+`mcp.server.mcpserver.MCPServer` -- so a version range that looks harmless in a
+lockfile can break the server outright.
 
 Keys ending in `_raw` or starting with `info_` are reported by the harness but
 never counted as drift, so the resolved mcp version is recorded without making
@@ -72,8 +74,8 @@ def probe() -> dict:
         result["lookup_len"] = len(text)
         result["lookup_found"] = "not found" not in text.lower()
 
-    # Tool registration goes through FastMCP itself, so listing the tools proves
-    # the decorator side of the API still works.
+    # Tool registration goes through MCPServer itself, so listing the tools
+    # proves the decorator side of the API still works.
     try:
         import asyncio
 

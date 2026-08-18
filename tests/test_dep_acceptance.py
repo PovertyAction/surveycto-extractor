@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-DEP_ACCEPT = REPO_ROOT / ".dep-accept.toml"
+DEP_ACCEPT_TOML = REPO_ROOT / ".dep-accept.toml"
 
 try:
     import tomllib
@@ -74,18 +74,20 @@ class TestDepAcceptConfig:
     def test_config_exists_and_parses(self):
         # A bot branch is cut from main, so this file has to be committed for
         # future bump PRs to be measurable at all.
-        assert DEP_ACCEPT.is_file(), ".dep-accept.toml is missing from the repo root"
-        assert _load(DEP_ACCEPT)
+        assert DEP_ACCEPT_TOML.is_file(), (
+            ".dep-accept.toml is missing from the repo root"
+        )
+        assert _load(DEP_ACCEPT_TOML)
 
     def test_e2e_file_sources_exist(self):
-        config = _load(DEP_ACCEPT)
+        config = _load(DEP_ACCEPT_TOML)
         for dest, source in (config.get("e2e", {}).get("files") or {}).items():
             assert (REPO_ROOT / source).is_file(), (
                 f".dep-accept.toml copies {source} -> {dest}, but {source} is absent"
             )
 
     def test_e2e_commands_are_declared_entry_points(self):
-        config = _load(DEP_ACCEPT)
+        config = _load(DEP_ACCEPT_TOML)
         scripts = set(_load(REPO_ROOT / "pyproject.toml")["project"]["scripts"])
         for argv in config.get("e2e", {}).get("commands") or []:
             assert argv[0] in scripts, (
@@ -95,7 +97,7 @@ class TestDepAcceptConfig:
 
     def test_synthetic_run_is_seeded(self):
         # Digest comparison is only meaningful if the stochastic phase is pinned.
-        config = _load(DEP_ACCEPT)
+        config = _load(DEP_ACCEPT_TOML)
         extract = [
             argv
             for argv in config.get("e2e", {}).get("commands") or []
@@ -106,7 +108,7 @@ class TestDepAcceptConfig:
             assert "--seed" in argv, f"{argv} must pass --seed for reproducibility"
 
     def test_probe_script_exists(self):
-        config = _load(DEP_ACCEPT)
+        config = _load(DEP_ACCEPT_TOML)
         script = config.get("probe", {}).get("script")
         if script:
             assert (REPO_ROOT / script).is_file(), f"probe script {script} is absent"
@@ -117,7 +119,7 @@ class TestDepAcceptConfig:
     def test_metric_globs_target_the_configured_output_dir(self, key):
         # Every metric path must point under the sample output dir the e2e writes
         # to; a stale prefix would silently match nothing and measure nothing.
-        config = _load(DEP_ACCEPT)
+        config = _load(DEP_ACCEPT_TOML)
         for pattern in config.get("metrics", {}).get(key) or []:
             assert pattern.startswith("sample/output/"), (
                 f"metrics.{key} entry {pattern!r} does not point at sample/output/"

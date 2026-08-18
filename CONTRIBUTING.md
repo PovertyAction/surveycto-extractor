@@ -56,8 +56,13 @@ is only what is specific to this toolkit:
 | `scripts/dep_probe_mcp.py` | the MCP-server smoke test, which no file comparison covers |
 | `tests/test_dep_acceptance.py` | the repo invariants the harness relies on |
 
-`just accept-deps` finds the engine at `~/.claude/skills/dep-accept/`; set
-`DEP_ACCEPT` to override the path.
+`just accept-deps` looks for that checkout in the directory
+`~/.claude/skills/dep-accept/` and runs `scripts/accept_dep_prs.py` inside it. To
+use a checkout elsewhere, set `DEP_ACCEPT` to its **directory** (not to the script):
+
+```sh
+DEP_ACCEPT=/path/to/dep-accept just accept-deps
+```
 
 Two verdicts need a human:
 
