@@ -32,7 +32,7 @@ repos:
     # Pinned to match the ruff in [project.optional-dependencies].dev so local
     # `uv run ruff` and the CI pre-commit hook never disagree (the template's
     # older v0.12.2 still enforced UP038, which newer ruff dropped).
-    rev: v0.15.22
+    rev: v0.16.3
     hooks:
       - id: ruff-check
         args: [--fix, --exit-non-zero-on-fix]

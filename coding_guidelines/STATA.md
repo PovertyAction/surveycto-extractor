@@ -700,9 +700,9 @@ count if var == .r
 In Python, extended missing codes appear as `NaN` by default. Use `pyreadstat` with `user_missing=True` to detect them:
 
 ```python
-df, meta = pyreadstat.read_dta('file.dta', usecols=['var'], user_missing=True)
+df, meta = pyreadstat.read_dta("file.dta", usecols=["var"], user_missing=True)
 # Extended missings show as string tags: 'd', 'r', etc.
-ext_miss = df['var'][df['var'].apply(lambda x: isinstance(x, str))]
+ext_miss = df["var"][df["var"].apply(lambda x: isinstance(x, str))]
 ```
 
 ### Select-Multiple String Parsing
