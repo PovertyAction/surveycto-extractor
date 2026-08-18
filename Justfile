@@ -48,6 +48,16 @@ pre-commit-run:
 test:
     uv run --all-extras pytest -q
 
+# Each PR head gets its own worktree + venv and is diffed against main on tests,
+# the sample end-to-end outputs (see .dep-accept.toml) and the MCP smoke test.
+# Pass PR numbers to narrow it. The engine is the project-agnostic `dep-accept`
+# harness, kept outside this repo so every project shares one copy -- point
+# DEP_ACCEPT at your checkout if it is not in the default location.
+
+# Verify the open Dependabot PRs before merging (see CONTRIBUTING.md)
+accept-deps *ARGS:
+    uv run --no-project python -u "{{ env('DEP_ACCEPT', env('USERPROFILE', env('HOME', '.')) / '.claude/skills/dep-accept/scripts/accept_dep_prs.py') }}" {{ ARGS }}
+
 # Remove the virtual environment
 clean:
     rm -rf .venv
