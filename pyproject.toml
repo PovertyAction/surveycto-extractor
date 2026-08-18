@@ -17,7 +17,7 @@ dependencies = [
 
 [project.optional-dependencies]
 # MCP server (survey-expert). Installed on demand: `uv sync --extra mcp`.
-mcp = ["mcp[cli]>=1.28.1,<2"]
+mcp = ["mcp[cli]>=2.0.0,<3"]
 dev = ["pytest", "ruff", "codespell", "pre-commit"]
 
 [project.scripts]

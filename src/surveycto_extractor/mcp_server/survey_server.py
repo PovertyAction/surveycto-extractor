@@ -36,7 +36,7 @@ import time
 import unicodedata
 from pathlib import Path
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 try:
     import networkx as nx
@@ -1646,7 +1646,7 @@ class SurveyStore:
 # MCP Server
 # ---------------------------------------------------------------------------
 
-server = FastMCP(
+server = MCPServer(
     "survey-expert",
     instructions=(
         "Survey metadata lookup server for SurveyCTO-based research projects. "
