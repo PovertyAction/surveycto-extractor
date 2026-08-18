@@ -7,6 +7,14 @@ updates:
       interval: "weekly"
     commit-message:
       prefix: "chore(deps)"
+    # Bump uv.lock only; never rewrite the specifiers in pyproject.toml.
+    # The default strategy raises a direct dependency's declared floor to the
+    # new version, which for a published toolkit silently narrows the install
+    # range downstream users have available (it proposed
+    # pyarrow>=15.0.0 -> >=25.0.1, a ten-major jump, for a release nothing here
+    # depends on). Floors should move when we actually start requiring a newer
+    # release -- a deliberate edit, not a side effect of a bot noticing a tag.
+    versioning-strategy: "lockfile-only"
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:

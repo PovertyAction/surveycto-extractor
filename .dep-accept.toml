@@ -1,0 +1,77 @@
+# Measurement definition for the `dep-accept` harness, which decides whether an
+# automated dependency-bump PR is safe to merge. See CONTRIBUTING.md.
+#
+# The harness runs `main` as a baseline and each PR head in its own worktree and
+# venv, then diffs the numbers below. Identical numbers mean the bump changed
+# nothing observable -- so nothing here is a hardcoded expectation (no "236
+# questions"), which is why it survives instrument and fixture changes.
+#
+# Keep this committed: a bot branch is cut from `main`, so committing it is what
+# makes future bump PRs measurable.
+
+[checks]
+# --all-extras, so the optional `mcp` extra is installed and its tests run.
+extras = "all"
+
+[e2e]
+# config.toml is gitignored (it is per-project and may point at real survey data),
+# so the sample config is copied in as the one this run uses.
+files = { "config.toml" = "sample/config.example.toml" }
+
+# Pin config discovery inside the worktree. A fresh worktree has no config.py, but
+# this makes it impossible for any ambient config elsewhere to be picked up --
+# the run can only ever touch the bundled public sample.
+env = { SURVEYCTO_CONFIG = "{worktree}/config.toml" }
+
+# `--seed 0` is required: the synthetic CSV is stochastic, and digest comparison
+# only means something if the same seed gives byte-identical output.
+commands = [
+    ["surveycto-extract", "--survey", "household_survey", "--seed", "0"],
+    ["surveycto-vardict", "--survey", "household_survey", "--xlsx"],
+]
+
+[metrics]
+# Content digests, CRLF-normalized. These are the pipeline's real products: a
+# pandas/numpy bump that shifted typing or rounding shows up here first.
+digest = [
+    "sample/output/*_questions.json",
+    "sample/output/*_structure.txt",
+    "sample/output/*_synthetic.csv",
+    "sample/output/*_variable_dictionary.json",
+    "sample/output/*_variable_graph.json",
+]
+
+# Quote-aware row/column counts (labels contain embedded newlines).
+csv_shape = [
+    "sample/output/*_survey.csv",
+    "sample/output/*_choices.csv",
+    "sample/output/*_synthetic.csv",
+]
+
+# Question count, without asserting what it should be.
+json_len = ["sample/output/*_questions.json"]
+
+# Not digested: XLSX archives embed timestamps, so byte comparison is useless.
+# This is also the output that shipped broken once, so its shape is worth watching.
+xlsx_shape = ["sample/output/*_variable_dictionary.xlsx"]
+
+# Per-section markdown/text files.
+dir_count = ["sample/output/sections"]
+
+[metrics.json_paths]
+# The dictionary's own summary is the sharpest signal available: the
+# question-match rate is exactly what a pandas/pyreadstat bump would perturb if
+# column typing or Stata name normalization shifted underneath it.
+"sample/output/*_variable_dictionary.json" = [
+    "summary.total_variables",
+    "summary.matched_to_questions",
+    "summary.unmatched",
+    "summary.from_repeat_groups",
+    "summary.select_multiple_choices",
+]
+# networkx-backed traversal output.
+"sample/output/*_variable_graph.json" = ["nodes", "edges"]
+
+[probe]
+# The MCP server has to import and answer -- no file comparison covers that.
+script = "scripts/dep_probe_mcp.py"

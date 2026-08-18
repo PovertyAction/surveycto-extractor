@@ -155,7 +155,7 @@ Step 2: selected(food_source, '3') → food_source == 3    (select_one)
 The Python regex for safe single-`=` replacement:
 
 ```python
-re.sub(r'(?<![!><=])=(?!=)', '==', expr)
+re.sub(r"(?<![!><=])=(?!=)", "==", expr)
 ```
 
 The negative lookbehind `(?<![!><=])` prevents firing on `!=`, `>=`, `<=`, and the
@@ -634,7 +634,10 @@ assert convert("if(${age} > 18, 1, 0)") == "cond(age > 18 & !missing(age), 1, 0)
 
 # coalesce
 assert convert("coalesce(${a}, ${b})") == "cond(missing(a), b, a)"
-assert convert("coalesce(${a}, ${b}, ${c})") == "cond(missing(a), cond(missing(b), c, b), a)"
+assert (
+    convert("coalesce(${a}, ${b}, ${c})")
+    == "cond(missing(a), cond(missing(b), c, b), a)"
+)
 ```
 
 ---
