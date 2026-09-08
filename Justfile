@@ -11,45 +11,45 @@ python := venv_dir + if os_family() == "windows" { "/Scripts/python.exe" } else 
 home_dir := env('USERPROFILE', env('HOME', '.'))
 dep_accept_dir := env('DEP_ACCEPT', home_dir / ".claude/skills/dep-accept")
 
-# List recipes (default)
+[doc("List recipes (default)")]
 default:
     @just --list
 
-# Display system information
+[doc("Display system information")]
 system-info:
     @echo "CPU architecture: {{ arch() }}"
     @echo "Operating system: {{ os() }}"
 
-# Create/refresh the virtual environment + install the pre-commit hooks
+[doc("Create/refresh the virtual environment + install the pre-commit hooks")]
 venv:
     uv sync --all-extras
     uv run pre-commit install
 
-# First-time setup (alias for venv)
+[doc("First-time setup (alias for venv)")]
 get-started: venv
 
-# Update the lockfile + pre-commit hook versions
+[doc("Update the lockfile + pre-commit hook versions")]
 update-reqs:
     uv lock
     uv run pre-commit autoupdate
 
-# Lint (ruff)
+[doc("Lint (ruff)")]
 lint-py:
     uv run ruff check
 
-# Format (ruff)
+[doc("Format (ruff)")]
 fmt-python:
     uv run ruff format
 
-# Format a single python file, "f"
+[doc("Format a single python file, \"f\"")]
 fmt-py f:
     uv run ruff format {{ f }}
 
-# Run all pre-commit hooks over all files
+[doc("Run all pre-commit hooks over all files")]
 pre-commit-run:
     uv run pre-commit run --all-files
 
-# Run the test suite (all extras, so the MCP tests run too)
+[doc("Run the test suite (all extras, so the MCP tests run too)")]
 test:
     uv run --all-extras pytest -q
 
@@ -58,11 +58,16 @@ test:
 # Pass PR numbers to narrow it. The engine is the project-agnostic `dep-accept`
 # harness, kept outside this repo so every project shares one copy -- set
 # DEP_ACCEPT to that checkout's DIRECTORY if it is not in the default location.
-
-# Verify the open Dependabot PRs before merging (see CONTRIBUTING.md)
+#
+# `just` interpolates *ARGS unquoted, so an argument containing a space is split
+# into two. That bites on `--json` with a path under a home directory whose name
+# has a space in it. For those, call the script directly:
+#   uv run --no-project python -u "$DEP_ACCEPT/scripts/accept_dep_prs.py" \
+#       --json "/some path/report.json"
+[doc("Verify the open Dependabot PRs before merging (see CONTRIBUTING.md)")]
 accept-deps *ARGS:
     uv run --no-project python -u "{{ dep_accept_dir / 'scripts/accept_dep_prs.py' }}" {{ ARGS }}
 
-# Remove the virtual environment
+[doc("Remove the virtual environment")]
 clean:
     rm -rf .venv
