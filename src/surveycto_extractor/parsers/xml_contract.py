@@ -89,6 +89,25 @@ _COMPOSITE_INT = re.compile(r"\d+(?:_\d+)+")
 _SANITISE_RE = re.compile(r"[^A-Za-z0-9_]")
 
 
+def _coerce_choice_value(value: str):
+    """Return a bare-integer choice value as an int, anything else unchanged.
+
+    The dictionary has always carried numeric choice codes as ints, so both
+    decode paths run through this -- otherwise `-88` would come back as `-88` when
+    the choice CSV shipped and `-88` as an int when it did not, i.e. a type that
+    depends on the environment rather than on the form.
+
+    A LEADING ZERO stays a string: `01` and `1` are distinct choice codes in
+    SurveyCTO, and int() would silently merge them.
+    """
+    if not re.fullmatch(r"-?\d+", value):
+        return value
+    digits = value.lstrip("-")
+    if len(digits) > 1 and digits[0] == "0":
+        return value
+    return int(value)
+
+
 def sanitize_choice_value(value: str) -> str:
     """Render a choice value the way SurveyCTO renders it into a wide column name.
 
@@ -320,23 +339,21 @@ class FormContract:
 
         Prefers the injected choice universe, the only thing that can undo
         sanitisation (`AB-12` and `AB_12` both render `AB_12`). Falls back to the
-        two shapes recoverable from the token alone: a dash->underscore negative
-        sentinel (`_66` -> -66) and a bare integer, both kept as the ints the
-        dictionary has always carried. Anything else is carried verbatim -- lossy,
-        but never wrong about WHICH choice it is.
+        one shape recoverable from the token alone: a dash->underscore negative
+        sentinel (`_66` -> `-66`), since a leading underscore is impossible in a
+        bare number. Anything else is carried verbatim -- lossy, but never wrong
+        about WHICH choice it is.
+
+        Both paths finish through the same coercion, so a numeric code does not
+        change type depending on whether the choice CSV happened to ship.
         """
         hit = self.choice_index.get(node.path, {}).get(token)
         if hit is not None:
-            return hit
+            return _coerce_choice_value(hit[0]), hit[1]
         m = _NEG_TOKEN_RE.fullmatch(token)
         if m:  # only a negative number sanitises to a leading underscore
-            raw = m.group(1)
-            neg = ("-" + raw) if len(raw) > 1 and raw[0] == "0" else -int(raw)
-            return neg, None
-        if token.isdigit():
-            # A leading zero is a distinct choice code, so keep it as a string.
-            return (token if len(token) > 1 and token[0] == "0" else int(token)), None
-        return token, None
+            return _coerce_choice_value("-" + m.group(1)), None
+        return _coerce_choice_value(token), None
 
     def map_column(self, col: str) -> dict:
         """Resolve a wide column to its node + repeat iterations + choice code.
