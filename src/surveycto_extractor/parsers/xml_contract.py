@@ -77,6 +77,29 @@ def is_system_column(col: str) -> bool:
     return col in _SYS_EXACT or col.startswith(_SYS_PREFIX) or col.endswith("-Comment")
 
 
+# Wide-column suffix grammar (see FormContract.map_column).
+# Only a NEGATIVE number sanitises to a leading underscore, so `_66` is -66.
+_NEG_TOKEN_RE = re.compile(r"_(\d+)")
+# `1_1` -- all-integer tokens. On a non-select node this marks formdef index
+# drift; on a select_multiple whose universe does not contain it, it marks an
+# unknowable choice/index boundary, because a real numeric choice value
+# sanitises to exactly ONE token.
+_ALL_INT = re.compile(r"\d+(?:_\d+)*")
+_COMPOSITE_INT = re.compile(r"\d+(?:_\d+)+")
+_SANITISE_RE = re.compile(r"[^A-Za-z0-9_]")
+
+
+def sanitize_choice_value(value: str) -> str:
+    """Render a choice value the way SurveyCTO renders it into a wide column name.
+
+    Every character outside `[A-Za-z0-9_]` becomes an underscore, which is why a
+    sanitised token cannot be reversed without the form's own choice universe --
+    `AB-12` and `AB_12` both arrive as `AB_12`. Callers building a choice index
+    for `FormContract.choice_index` must key it through this function.
+    """
+    return _SANITISE_RE.sub("_", value)
+
+
 @dataclass
 class Node:
     """One stored node in the compiled form (a field, or a bound group)."""
@@ -213,12 +236,24 @@ class FormContract:
     """The compiled-form node model + the wide-column -> node resolver."""
 
     def __init__(
-        self, formid: str, formdef_version: str | None, nodes: dict[str, Node]
+        self,
+        formid: str,
+        formdef_version: str | None,
+        nodes: dict[str, Node],
+        choice_index: dict | None = None,
     ):
         """Store the node model and build the deterministic leaf-name resolver index."""
         self.formid = formid
         self.formdef_version = formdef_version
         self.nodes: dict[str, Node] = nodes
+        # {node_path: {sanitised token: (original value, label|None)}}, for
+        # de-sanitising a string-valued select_multiple choice back to the value the
+        # form actually declared. Optional and injected by the caller: resolving a
+        # `search()` choice universe needs the form's attached CSVs, which this
+        # parser deliberately knows nothing about (`cli/enrich.py` already resolves
+        # them for labels via `_resolve_search_choices`). Absent, a sanitised token
+        # is carried verbatim -- lossy but never wrong about which choice it is.
+        self.choice_index: dict = choice_index or {}
         # leaf token -> [paths], used to resolve a de-indexed wide base name.
         # Built from sorted paths so resolution is DETERMINISTIC: nodes is keyed
         # off a set union (hash-seed-dependent iteration), so without sorting the
@@ -238,125 +273,172 @@ class FormContract:
                     seen.append(r)
         return seen
 
+    def _longest_node_prefix(self, col: str) -> str | None:
+        """Return the longest node NAME `col` starts with on an `_` boundary.
+
+        Longest-first, so a node whose own name ends in digits or underscores
+        (`q1_2`) wins over the shorter prefix that would strand its own tail.
+        """
+        toks = col.split("_")
+        for k in range(len(toks), 0, -1):
+            cand = "_".join(toks[:k])
+            if cand in self._by_name:
+                return cand
+        return None
+
+    def _pick_node(self, name: str, n_tokens: int) -> Node:
+        """Disambiguate a repeated leaf token by how well its depth fits the suffix.
+
+        Preference order mirrors the wide-column grammar: an exact-depth fit (the
+        node's own column) beats a select_multiple choice binary, which beats a
+        string-keyed runtime column, which beats a short/partial index run. Ties
+        keep the first path, and `_by_name` is built from sorted paths, so the
+        tie-break is deterministic across processes.
+        """
+        best, best_score = None, 99
+        for path in self._by_name[name]:
+            node = self.nodes[path]
+            depth = node.repeat_depth
+            if n_tokens == depth:
+                score = 0
+            elif n_tokens > depth:
+                score = 1 if node.is_select_multiple else 2
+            else:
+                score = 3
+            if score < best_score:
+                best, best_score = node, score
+        return best
+
+    def _decode_choice(self, node: Node, token: str):
+        """Sanitised token -> (choice value, label|None).
+
+        Prefers the injected choice universe, the only thing that can undo
+        sanitisation (`AB-12` and `AB_12` both render `AB_12`). Falls back to the
+        two shapes recoverable from the token alone: a dash->underscore negative
+        sentinel (`_66` -> -66) and a bare integer, both kept as the ints the
+        dictionary has always carried. Anything else is carried verbatim -- lossy,
+        but never wrong about WHICH choice it is.
+        """
+        hit = self.choice_index.get(node.path, {}).get(token)
+        if hit is not None:
+            return hit
+        m = _NEG_TOKEN_RE.fullmatch(token)
+        if m:  # only a negative number sanitises to a leading underscore
+            raw = m.group(1)
+            neg = ("-" + raw) if len(raw) > 1 and raw[0] == "0" else -int(raw)
+            return neg, None
+        if token.isdigit():
+            # A leading zero is a distinct choice code, so keep it as a string.
+            return (token if len(token) > 1 and token[0] == "0" else int(token)), None
+        return token, None
+
     def map_column(self, col: str) -> dict:
         """Resolve a wide column to its node + repeat iterations + choice code.
 
         Returns {kind, ...}. kind is one of: 'system', 'matched', 'unmapped'.
         For 'matched': node_path, repeat_iterations (list of (group, index)),
-        choice_code (int|None), is_select_multiple.
+        choice_code (int|str|None), is_select_multiple, and optionally
+        choice_label, string_key, ambiguous_choice, ragged.
+
+        Anchors on the NODE first, then on its repeat depth: exactly `depth`
+        trailing integer tokens are iteration indices, and whatever precedes them
+        is the (sanitised) choice value. The previous parser instead peeled EVERY
+        trailing integer and required the remainder to be a node name, which holds
+        only when the choice value is a bare positive integer -- so a string-valued
+        choice (`langs_ES`, or a `search()`-sourced key whose own digits look like
+        suffixes) fell into a fallback that hardcoded `choice_code = None` and,
+        worse, reported the value's own digits as the repeat iteration. `vardict`
+        gates per-choice resolution on `choice_code`, so those binaries were
+        labelled with their question's whole choice list instead of their choice.
         """
         if is_system_column(col):
             return {"kind": "system"}
 
-        # Peel trailing _<int> groups right-to-left, then reverse to outer->inner.
-        # Track the raw digit strings in parallel so a leading-zero choice code
-        # (`field_01`) can be preserved as a string instead of collapsing to 1.
-        idxs: list[int] = []
-        raws: list[str] = []
-        base = col
-        while True:
-            m = re.search(r"_(\d+)$", base)
-            if not m:
-                break
-            raws.append(m.group(1))
-            idxs.append(int(m.group(1)))
-            base = base[: m.start()]
-        idxs.reverse()
-        raws.reverse()
+        name = self._longest_node_prefix(col)
+        if name is None:
+            return {"kind": "unmapped", "base": col, "indices": []}
 
-        candidates = self._by_name.get(base) or self._by_name.get(col)
+        rest = col[len(name) :]
+        rest = rest[1:] if rest.startswith("_") else rest
+        toks = rest.split("_") if rest else []
+        node = self._pick_node(name, len(toks))
+        depth = node.repeat_depth
 
-        # Negative select_multiple choice code: SurveyCTO writes `-66` as a
-        # dash->underscore `field__66`, so the positive peel above leaves a base
-        # ending in `_` (e.g. `field_`) with the code as idxs[0]. Re-interpret
-        # against the real base with a negated leading code. (#23.1)
-        neg_choice = False
-        if not candidates and base.endswith("_") and idxs:
-            real_base = base[:-1]
-            real_cands = self._by_name.get(real_base)
-            if real_cands and any(self.nodes[p].is_select_multiple for p in real_cands):
-                candidates = real_cands
-                base = real_base
-                neg_choice = True
+        # Consume trailing integer tokens as repeat indices, at most `depth` of them.
+        n = 0
+        while n < depth and n < len(toks) and toks[len(toks) - 1 - n].isdigit():
+            n += 1
+        head = toks[: len(toks) - n]
+        # An EMPTY choice is impossible, so if the head vanished while the suffix
+        # still carries more tokens than the node has depth, hand an index back: a
+        # negative sentinel's own leading underscore produced that empty first
+        # token (`x__77_2` is choice -77 at one index, not choice "" at iterations
+        # 77 and 2). When len(toks) == depth there is no choice at all -- that is
+        # the select_multiple's own parent column, which the export writes empty.
+        while n > 0 and len(toks) > depth and not "_".join(head):
+            n -= 1
+            head = toks[: len(toks) - n]
+        token = "_".join(head) if head else None
 
-        if not candidates:
-            # String-keyed runtime columns: `<node>_<studyID>` or a trailing `_`
-            # (per-study dynamic calculates). Only attempted after exact + numeric
-            # matching miss, so it cannot shadow a distinct node like `Pre_treatList`.
-            m2 = re.search(r"_([^_]*)$", base)
-            if m2 and self._by_name.get(base[: m2.start()]):
-                node = self.nodes[self._by_name[base[: m2.start()]][0]]
-                return {
-                    "kind": "matched",
-                    "node_path": node.path,
-                    "name": node.name,
-                    "repeat_iterations": list(
-                        zip(node.repeat_path, idxs[: node.repeat_depth])
-                    ),
-                    "choice_code": None,
-                    "is_select_multiple": node.is_select_multiple,
-                    "string_key": m2.group(1),
-                    "ambiguous": False,
-                }
-            return {"kind": "unmapped", "base": base, "indices": idxs}
+        # A node with no choices cannot have a numeric head: a purely numeric
+        # surplus is formdef drift (the column was written while the node sat in
+        # one more repeat) and the surplus index is the INNER one, so the node's
+        # own coordinates are the LEADING tokens. Reading the trailing `depth`
+        # instead would shift every repeat group by one.
+        drift = bool(
+            token is not None
+            and not node.is_select_multiple
+            and _ALL_INT.fullmatch(token)
+        )
+        if drift:
+            n = min(depth, len(toks))
+            token = None
+        idx_toks = toks[:n] if drift else (toks[len(toks) - n :] if n else [])
+        iters = list(zip(node.repeat_path, [int(t) for t in idx_toks]))
 
-        # SurveyCTO wide-column convention for a select_multiple inside repeat(s):
-        #   base_<choice>_<outer>_..._<inner>   -- the choice code is the FIRST
-        # suffix, then the repeat-iteration chain (outer->inner) follows. This
-        # matches the production Phase-4 matcher (surveycto-vardict:
-        # double_match groups choice=first/repeat=last) and the concordance-
-        # validated synthetic generator (synthetic_data.py: `_<choice>{repeat
-        # suffix}`). A plain repeat field carries only the iteration chain.
-        # Prefer the candidate whose repeat depth (+1 for a select_multiple choice
-        # binary) consumes exactly the indices we peeled.
-        def _choice_value(i: int) -> int | str:
-            """Choice code at position i: preserve a leading-zero raw string
-            (`01`), else int; negate for the dash->underscore negative form.
-            """
-            raw = raws[i] if i < len(raws) else str(idxs[i])
-            if len(raw) > 1 and raw[0] == "0":
-                return ("-" + raw) if neg_choice else raw
-            return (-idxs[i]) if neg_choice else idxs[i]
-
-        chosen = None
-        choice = None
-        rep_idxs = idxs  # iteration indices left after a leading choice is removed
-        for path in candidates:
-            node = self.nodes[path]
-            depth = node.repeat_depth
-            if len(idxs) == depth and not neg_choice:
-                chosen, choice, rep_idxs = node, None, idxs
-                break
-            if node.is_select_multiple and len(idxs) == depth + 1:
-                chosen, choice, rep_idxs = node, _choice_value(0), idxs[1:]
-                break
-        if chosen is None:
-            # Fall back to the first candidate; treat a leading surplus index as the
-            # choice code if it is select_multiple, else leave iterations partial.
-            chosen = self.nodes[candidates[0]]
-            if chosen.is_select_multiple and len(idxs) == chosen.repeat_depth + 1:
-                choice, rep_idxs = _choice_value(0), idxs[1:]
+        choice = label = string_key = None
+        ambiguous_choice = False
+        if token is not None:
+            if node.is_select_multiple:
+                choice, label = self._decode_choice(node, token)
+                # An unresolved MULTI-token all-integer choice is not a choice: a
+                # real numeric value sanitises to exactly ONE token. This is the
+                # same drift as above but on a select_multiple, where the
+                # choice/index boundary is genuinely unknowable from the contract.
+                # Abstain and say so, rather than emit a fabricated out-of-domain
+                # code that downstream would then try to look up.
+                if choice == token and _COMPOSITE_INT.fullmatch(token):
+                    choice, label, ambiguous_choice = None, None, True
             else:
-                choice, rep_idxs = (_choice_value(0) if neg_choice else None), idxs
+                # Per-study dynamic calculates: `<node>_<studyID>`, no choice.
+                string_key = token
 
-        n_iter = chosen.repeat_depth
-        iters = list(zip(chosen.repeat_path, rep_idxs[:n_iter]))
         result = {
             "kind": "matched",
-            "node_path": chosen.path,
-            "name": chosen.name,
+            "node_path": node.path,
+            "name": node.name,
             "repeat_iterations": iters,
             "choice_code": choice,
-            "is_select_multiple": chosen.is_select_multiple,
-            "ambiguous": len(candidates) > 1,
+            "is_select_multiple": node.is_select_multiple,
+            "ambiguous": len(self._by_name[name]) > 1,
         }
-        # Ragged: the number of repeat indices doesn't match the node's repeat
-        # depth. SurveyCTO normally emits exactly one index per level, so flag a
-        # mismatch instead of silently truncating (over-indexed: the zip above
-        # drops surplus indices) or under-assigning levels. Was `< n_iter`, which
-        # missed the over-indexed case (e.g. member_age_3_4 on a depth-1 field
-        # dropped the trailing 4 with no flag). (#23.2 / review #11)
-        if len(rep_idxs) != n_iter:
+        if label is not None:
+            result["choice_label"] = label
+        if string_key is not None:
+            result["string_key"] = string_key
+        if ambiguous_choice:
+            # Load-bearing, not decorative: without it a select_multiple with
+            # choice_code None is indistinguishable from the parent column, which
+            # is the confusion this whole change exists to remove.
+            result["ambiguous_choice"] = True
+        # Ragged: the column CARRIED a different number of repeat indices than the
+        # node's depth. SurveyCTO normally emits exactly one index per level, so a
+        # mismatch is flagged rather than silently truncated (over-indexed) or
+        # under-assigned (#23.2 / review #11). Counted from what the column
+        # supplied, not from what was consumed: the drift branch above absorbs the
+        # surplus index deliberately, and counting consumed tokens there would
+        # report a tidy match for the very shape the flag exists to surface.
+        if (len(toks) if drift else n) != depth:
             result["ragged"] = True
         return result
 
