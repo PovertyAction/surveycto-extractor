@@ -275,9 +275,11 @@ def sweep_1(rep: Report) -> None:
     rep.check("none of them is ignored by git", not ignored, ", ".join(ignored[:10]))
     # Ablation: two paths this repo ignores ON PURPOSE. If the sweep cannot see
     # these, it cannot see an accidental ignore either.
-    abl = _ignored_among(["config.toml", ".mcp.json"])
+    injected = _ignored_among(["config.toml", ".mcp.json"])
     rep.check(
-        "ABLATION: the sweep DOES report known-ignored paths", len(abl) == 2, str(abl)
+        "ABLATION: the sweep DOES report known-ignored paths",
+        len(injected) == 2,
+        str(injected),
     )
 
 
@@ -313,10 +315,10 @@ def sweep_2(rep: Report) -> None:
         encoding="utf-8",
     )
     try:
-        abl_hits = _referenced(extra=("docs/_ablation_probe.md",))
+        probe_hits = _referenced(extra=("docs/_ablation_probe.md",))
         named = [
             r
-            for r in abl_hits
+            for r in probe_hits
             if r.endswith("module_that_never_existed.py") and not _resolves(r, disk)
         ]
         rep.check(
