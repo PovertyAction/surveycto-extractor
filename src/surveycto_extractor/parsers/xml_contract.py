@@ -298,62 +298,108 @@ class FormContract:
                     seen.append(r)
         return seen
 
-    def _longest_node_prefix(self, col: str) -> str | None:
-        """Return the longest node NAME `col` starts with on an `_` boundary.
-
-        Longest-first, so a node whose own name ends in digits or underscores
-        (`q1_2`) wins over the shorter prefix that would strand its own tail.
-        """
+    def _candidate_names(self, col: str):
+        """Every node NAME `col` starts with on an `_` boundary, longest first."""
         toks = col.split("_")
         for k in range(len(toks), 0, -1):
             cand = "_".join(toks[:k])
             if cand in self._by_name:
-                return cand
-        return None
+                yield cand
 
-    def _pick_node(self, name: str, n_tokens: int) -> Node:
-        """Disambiguate a repeated leaf token by how well its depth fits the suffix.
+    @staticmethod
+    def _trailing_int_count(toks: list[str]) -> int:
+        """How many trailing tokens of `toks` could be repeat-iteration indices."""
+        n = 0
+        while n < len(toks) and toks[len(toks) - 1 - n].isdigit():
+            n += 1
+        return n
 
-        Preference order mirrors the wide-column grammar: an exact-depth fit (the
-        node's own column) beats a select_multiple choice binary, which beats a
-        string-keyed runtime column, which beats a short/partial index run. Ties
-        keep the first path, and `_by_name` is built from sorted paths, so the
-        tie-break is deterministic across processes.
+    def _resolve_node(self, col: str):
+        """Pick (name, node, suffix tokens) for a wide column, or None.
+
+        Scores every (name prefix, node) pair rather than committing to the
+        longest name first, because NAME LENGTH ALONE PICKS IMPOSSIBLE NODES.
+        Two ways that went wrong, both found by adversarial review of the first
+        version of this parser:
+
+        - A node literally named `x_1` sitting two repeats deep would steal the
+          column `x_1` from a depth-0 select_multiple named `x`. A depth-2 node's
+          column always carries exactly two trailing index tokens (`x_1_1_1`), so
+          bare `x_1` cannot be its column at all -- while it is exactly `x`'s
+          choice-1 binary.
+        - Scoring by token COUNT ignored whether a token could be an integer.
+          With a homonym leaf inside a repeat, `langs_ES` resolved to the depth-1
+          `hh/langs` and lost the choice entirely, because `n_tokens == depth`
+          scored a perfect fit without ever asking whether `ES` is a number.
+
+        So feasibility comes first: a node needs at least `repeat_depth` trailing
+        INTEGER tokens available, or it cannot own the column. Among feasible
+        candidates the preference mirrors the wide-column grammar -- the node's
+        own column, then a select_multiple choice binary, then a string-keyed
+        runtime column. An infeasible candidate is kept only as a last resort, so
+        an under-indexed column still resolves (and gets flagged `ragged`) rather
+        than falling out as unmapped.
         """
-        best, best_score = None, 99
-        for path in self._by_name[name]:
-            node = self.nodes[path]
-            depth = node.repeat_depth
-            if n_tokens == depth:
-                score = 0
-            elif n_tokens > depth:
-                score = 1 if node.is_select_multiple else 2
-            else:
-                score = 3
-            if score < best_score:
-                best, best_score = node, score
-        return best
+        best = None
+        for name in self._candidate_names(col):
+            rest = col[len(name) :]
+            rest = rest[1:] if rest.startswith("_") else rest
+            toks = rest.split("_") if rest else []
+            avail = self._trailing_int_count(toks)
+            for path in self._by_name[name]:
+                node = self.nodes[path]
+                depth = node.repeat_depth
+                head_empty = avail >= depth and len(toks) == depth
+                if avail < depth:
+                    score = 3  # cannot supply its own indices: under-indexed
+                elif head_empty:
+                    score = 0  # the node's own column
+                elif node.is_select_multiple:
+                    score = 1  # choice binary
+                else:
+                    score = 2  # string key, or formdef index drift
+                # Longer name wins ties, matching the previous longest-first rule;
+                # `_by_name` is built from sorted paths, so the final tie-break is
+                # deterministic across processes.
+                key = (score, -len(name), path)
+                if best is None or key < best[0]:
+                    best = (key, name, node, toks)
+        if best is None:
+            return None
+        return best[1], best[2], best[3]
 
     def _decode_choice(self, node: Node, token: str):
-        """Sanitised token -> (choice value, label|None).
+        """Sanitised token -> (choice value, label|None, resolved-by-index).
 
         Prefers the injected choice universe, the only thing that can undo
         sanitisation (`AB-12` and `AB_12` both render `AB_12`). Falls back to the
         one shape recoverable from the token alone: a dash->underscore negative
         sentinel (`_66` -> `-66`), since a leading underscore is impossible in a
-        bare number. Anything else is carried verbatim -- lossy, but never wrong
-        about WHICH choice it is.
+        bare number. Anything else is carried verbatim.
+
+        The verbatim fallback is NOT "never wrong about which choice it is", as an
+        earlier version of this docstring claimed. When two declared values
+        sanitise to one token the index records it as ambiguous (a `None` entry),
+        and this returns no value at all -- because the fallback would otherwise
+        hand back a token that is itself one of the colliding values, silently
+        picking a winner.
+
+        The third element says whether the index resolved it, so the caller can
+        trust an index hit instead of second-guessing it as unknowable.
 
         Both paths finish through the same coercion, so a numeric code does not
         change type depending on whether the choice CSV happened to ship.
         """
-        hit = self.choice_index.get(node.path, {}).get(token)
-        if hit is not None:
-            return _coerce_choice_value(hit[0]), hit[1]
+        universe = self.choice_index.get(node.path, {})
+        if token in universe:
+            hit = universe[token]
+            if hit is None:  # known-ambiguous: two values sanitise to this token
+                return None, None, True
+            return _coerce_choice_value(hit[0]), hit[1], True
         m = _NEG_TOKEN_RE.fullmatch(token)
         if m:  # only a negative number sanitises to a leading underscore
-            return _coerce_choice_value("-" + m.group(1)), None
-        return _coerce_choice_value(token), None
+            return _coerce_choice_value("-" + m.group(1)), None, False
+        return _coerce_choice_value(token), None, False
 
     def map_column(self, col: str) -> dict:
         """Resolve a wide column to its node + repeat iterations + choice code.
@@ -377,14 +423,10 @@ class FormContract:
         if is_system_column(col):
             return {"kind": "system"}
 
-        name = self._longest_node_prefix(col)
-        if name is None:
+        picked = self._resolve_node(col)
+        if picked is None:
             return {"kind": "unmapped", "base": col, "indices": []}
-
-        rest = col[len(name) :]
-        rest = rest[1:] if rest.startswith("_") else rest
-        toks = rest.split("_") if rest else []
-        node = self._pick_node(name, len(toks))
+        name, node, toks = picked
         depth = node.repeat_depth
 
         # Consume trailing integer tokens as repeat indices, at most `depth` of them.
@@ -402,6 +444,12 @@ class FormContract:
             n -= 1
             head = toks[: len(toks) - n]
         token = "_".join(head) if head else None
+        # A token made only of underscores is not a choice value: sanitisation maps
+        # a real value's characters into the alphabet, so at least one alphanumeric
+        # survives. `x___` was reporting a choice of `__`. A negative sentinel's
+        # `_66` keeps its digits and is unaffected.
+        if token is not None and not token.strip("_"):
+            token = None
 
         # A node with no choices cannot have a numeric head: a purely numeric
         # surplus is formdef drift (the column was written while the node sat in
@@ -423,14 +471,20 @@ class FormContract:
         ambiguous_choice = False
         if token is not None:
             if node.is_select_multiple:
-                choice, label = self._decode_choice(node, token)
-                # An unresolved MULTI-token all-integer choice is not a choice: a
-                # real numeric value sanitises to exactly ONE token. This is the
-                # same drift as above but on a select_multiple, where the
-                # choice/index boundary is genuinely unknowable from the contract.
-                # Abstain and say so, rather than emit a fabricated out-of-domain
-                # code that downstream would then try to look up.
-                if choice == token and _COMPOSITE_INT.fullmatch(token):
+                choice, label, from_index = self._decode_choice(node, token)
+                if choice is None and from_index:
+                    # The index knows this token maps to two different declared
+                    # values, so which choice it is cannot be recovered.
+                    ambiguous_choice = True
+                elif not from_index and _COMPOSITE_INT.fullmatch(token):
+                    # An UNRESOLVED multi-token all-integer choice is not a
+                    # choice: a real numeric value sanitises to exactly ONE token.
+                    # This is the same drift as above but on a select_multiple,
+                    # where the choice/index boundary is unknowable from the
+                    # contract. Abstain rather than emit a fabricated code.
+                    # Gated on `not from_index`: when the universe actually
+                    # contains a value like `1_2`, that is a real choice and
+                    # discarding it would throw away the answer we just looked up.
                     choice, label, ambiguous_choice = None, None, True
             else:
                 # Per-study dynamic calculates: `<node>_<studyID>`, no choice.
