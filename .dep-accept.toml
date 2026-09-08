@@ -23,10 +23,10 @@ files = { "config.toml" = "sample/config.example.toml" }
 # the run can only ever touch the bundled public sample.
 env = { SURVEYCTO_CONFIG = "{worktree}/config.toml" }
 
-# `--seed 0` is required: the synthetic CSV is stochastic, and digest comparison
-# only means something if the same seed gives byte-identical output.
+# No seed pinning: the synthetic generator was the pipeline's only stochastic
+# phase, and it is gone, so every artifact below is byte-comparable on its own.
 commands = [
-    ["surveycto-extract", "--survey", "household_survey", "--seed", "0"],
+    ["surveycto-extract", "--survey", "household_survey"],
     ["surveycto-vardict", "--survey", "household_survey", "--xlsx"],
 ]
 
@@ -36,7 +36,6 @@ commands = [
 digest = [
     "sample/output/*_questions.json",
     "sample/output/*_structure.txt",
-    "sample/output/*_synthetic.csv",
     "sample/output/*_variable_dictionary.json",
     "sample/output/*_variable_graph.json",
 ]
@@ -45,7 +44,6 @@ digest = [
 csv_shape = [
     "sample/output/*_survey.csv",
     "sample/output/*_choices.csv",
-    "sample/output/*_synthetic.csv",
 ]
 
 # Question count, without asserting what it should be.

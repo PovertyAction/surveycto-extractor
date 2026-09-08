@@ -28,6 +28,26 @@ def _load(path):
     return tomllib.loads(path.read_text(encoding="utf-8"))
 
 
+# Console script -> the module whose `main()` builds its argparse parser. Read as
+# source rather than invoked: every one of these CLIs exits on a missing
+# config.toml *before* argparse sees `--help`, so a subprocess check would pass
+# locally (config.py present) and fail on CI's clean checkout.
+_CLI_SOURCES = {
+    "surveycto-extract": "src/surveycto_extractor/cli/extract.py",
+    "surveycto-vardict": "src/surveycto_extractor/cli/vardict.py",
+    "surveycto-summary-stats": "src/surveycto_extractor/cli/summary_stats.py",
+    "surveycto-enrich": "src/surveycto_extractor/cli/enrich.py",
+}
+
+
+def _declared_flags(script_name):
+    """Return the `--flags` a CLI module passes to add_argument()."""
+    src = (REPO_ROOT / _CLI_SOURCES[script_name]).read_text(encoding="utf-8")
+    # Match the flag only in first-argument position, so a flag named inside
+    # another option's help text does not count as declared.
+    return set(re.findall(r"add_argument\(\s*[\"'](--[\w-]+)[\"']", src))
+
+
 # Tools pinned TWICE -- once as a pre-commit hook `rev`, once as a locked Python
 # dependency -- and moved by two different mechanisms (Dependabot moves the lock,
 # `pre-commit autoupdate` moves the rev). Every such pair needs the parity check;
@@ -112,17 +132,32 @@ class TestDepAcceptConfig:
                 "acceptance e2e would fail to launch it"
             )
 
-    def test_synthetic_run_is_seeded(self):
-        # Digest comparison is only meaningful if the stochastic phase is pinned.
+    def test_e2e_command_flags_are_declared_by_their_cli(self):
+        # Replaces the old `--seed` check. That flag guarded determinism, which
+        # the synthetic generator's removal now gives for free -- but it left the
+        # sharper invariant unguarded: the harness declares its commands in TOML,
+        # so a flag later removed from a CLI turns every candidate into the same
+        # FAIL, and the run then reports nothing at all about the bump.
         config = _load(DEP_ACCEPT_TOML)
-        extract = [
-            argv
-            for argv in config.get("e2e", {}).get("commands") or []
-            if argv[0] == "surveycto-extract"
-        ]
-        assert extract, "no surveycto-extract command declared"
-        for argv in extract:
-            assert "--seed" in argv, f"{argv} must pass --seed for reproducibility"
+        commands = config.get("e2e", {}).get("commands") or []
+        assert commands, "no e2e commands declared"
+        for argv in commands:
+            declared = _declared_flags(argv[0])
+            for flag in (a for a in argv[1:] if a.startswith("--")):
+                assert flag in declared, (
+                    f".dep-accept.toml passes {flag} to {argv[0]}, which does not "
+                    f"declare it -- the acceptance e2e would fail for every "
+                    f"candidate and measure nothing. Declared: {sorted(declared)}"
+                )
+
+    def test_e2e_flag_check_actually_fires(self):
+        # Ablation: the check above is worthless unless a bad flag trips it.
+        declared = _declared_flags("surveycto-extract")
+        assert "--survey" in declared, "positive control: a real flag must be seen"
+        assert "--seed" not in declared, (
+            "negative control: --seed went with the synthetic generator, so the "
+            "detector must not report it as declared"
+        )
 
     def test_probe_script_exists(self):
         config = _load(DEP_ACCEPT_TOML)
