@@ -39,11 +39,15 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import re
 import sys
 from collections import Counter
 from pathlib import Path
 
-from surveycto_extractor.parsers.xml_contract import parse_contract
+from surveycto_extractor.parsers.xml_contract import (
+    parse_contract,
+    sanitize_choice_value,
+)
 
 _CSV_CACHE: dict[str, list] = {}
 
@@ -82,6 +86,88 @@ def _resolve_search_choices(attachment_dirs, data_source: dict | None) -> list |
             if val != "":
                 out.append({"value": val, "label": (row.get("label") or "").strip()})
     return out or None
+
+
+def _search_csv_rows(attachment_dirs, dataset: str) -> list:
+    """Rows of the CSV a `search()` names, or [] when it is not shipped."""
+    for d in attachment_dirs:
+        for path in sorted(Path(d).glob(f"{dataset}*.csv")):
+            return _load_csv_rows(path)
+    return []
+
+
+def _build_choice_index(nodes: dict, attachment_dirs) -> dict:
+    """{node_path: {sanitised token: (original value, label|None)}} for every select.
+
+    This is what lets `map_column` turn a wide column's choice token back into the
+    value the form declared. Sanitisation is lossy -- `AB-12` and `AB_12` both
+    render `AB_12` -- so the only way back is the form's own choice universe.
+
+    Deliberately NOT `_resolve_search_choices`, which serves a different need. That
+    one resolves the options for ONE question and applies the literal filter, which
+    is right for labelling. An index has to span the WHOLE universe, because the
+    wide column names do: a `search()` filtered on a per-submission node ref
+    produces columns for every value that ref ever took, so a node-ref filter is
+    read but left unapplied. Literal filter pairs ARE applied, so one shared
+    choices CSV does not leak another list's values in.
+
+    A `search()` node's non-numeric item value is a COLUMN NAME, not a choice --
+    the XML names which columns of the attached CSV hold the values and labels. An
+    unresolvable one contributes NOTHING rather than registering the column name
+    itself as a choice value. A token that two different values sanitise to is
+    dropped: an ambiguous de-sanitisation is worse than carrying the token
+    verbatim, which is what `map_column` falls back to.
+    """
+    index: dict[str, dict] = {}
+    for path, node in nodes.items():
+        if not node.choice_items:
+            continue
+        ds = node.data_source or {}
+        rows: list = []
+        if ds.get("kind") == "search":
+            rows = _search_csv_rows(attachment_dirs, ds["dataset"])
+            static = {
+                k: v for k, v in (ds.get("filter") or {}).items() if v is not None
+            }
+            if static:
+                rows = [
+                    r
+                    for r in rows
+                    if all((r.get(k) or "").strip() == v for k, v in static.items())
+                ]
+        cols = set(rows[0]) if rows else set()
+
+        pairs: list[tuple] = []
+        for item in node.choice_items:
+            val = (item.get("value") or "").strip()
+            lab = item.get("label")
+            if not val:
+                continue
+            if re.fullmatch(
+                r"-?\d+", val
+            ):  # a real literal code (a sentinel, or 1/2/3)
+                pairs.append((val, lab))
+                continue
+            if val not in cols:  # a column reference we cannot expand
+                continue
+            for row in rows:
+                v = (row.get(val) or "").strip()
+                if v:
+                    label = (row.get(lab) or "").strip() or None if lab in cols else lab
+                    pairs.append((v, label))
+
+        seen: dict[str, tuple] = {}
+        clashed: set[str] = set()
+        for val, lab in pairs:
+            tok = sanitize_choice_value(val)
+            if tok in seen and seen[tok][0] != val:
+                clashed.add(tok)
+            seen.setdefault(tok, (val, lab))
+        for tok in clashed:
+            seen.pop(tok, None)
+        if seen:
+            index[path] = seen
+    return index
 
 
 def _load_questions_index(questions_json_path) -> dict:
@@ -156,6 +242,10 @@ def enrich_contract(
 
     d = json.loads(dict_path.read_text(encoding="utf-8"))
     contract = parse_contract(xml_path)
+    # Hand the parser the choice universe it deliberately knows nothing about,
+    # so a string-valued select_multiple choice resolves to the value the form
+    # declared instead of the sanitised token from the column name.
+    contract.choice_index = _build_choice_index(contract.nodes, attachment_dirs)
     qidx = _load_questions_index(questions_json)
     versions = _formdef_version_counts(data_path)
 

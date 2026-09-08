@@ -274,3 +274,77 @@ class TestCorrectionHeuristicIdempotence:
         assert (
             second["variables"]["Pre_xyz"]["contract"]["resolved_by"] == "xml-heuristic"
         )
+
+
+# A `search()` select whose choice VALUES are dashed strings, with the XML naming
+# the value/label COLUMNS of the attached CSV rather than listing literals -- the
+# shape that made a sanitised wide column irreversible without the form's own
+# choice universe. `-88` sits alongside as a genuine literal extra.
+_STRCHOICE_XML = """<?xml version="1.0"?>
+<h:html xmlns="http://www.w3.org/2002/xforms"
+        xmlns:h="http://www.w3.org/1999/xhtml"
+        xmlns:jr="http://openrosa.org/javarosa">
+  <h:head>
+    <model>
+      <instance>
+        <sform id="sform" version="1">
+          <sites/>
+        </sform>
+      </instance>
+      <bind nodeset="/sform/sites" type="select"/>
+    </model>
+  </h:head>
+  <h:body>
+    <select ref="/sform/sites"
+            appearance="search('sitelist', 'matches', 'list_name', 'active')">
+      <label>Sites</label>
+      <item><label>site_label</label><value>site_id</value></item>
+      <item><label>Other</label><value>-88</value></item>
+    </select>
+  </h:body>
+</h:html>
+"""
+
+# `AB-12` sanitises to `AB_12`; the inactive row must NOT enter the universe,
+# because the literal `list_name='active'` filter is applied.
+_SITES_CSV = (
+    "list_name,site_id,site_label\n"
+    "active,AB-12,Alpha Beta 12\n"
+    "active,CD-34,Charlie Delta 34\n"
+    "inactive,ZZ-99,Should Not Appear\n"
+)
+
+
+class TestChoiceIndexFromAttachedCsv:
+    """The choice index built from the real `search()` CSV, not an injected stub."""
+
+    @pytest.fixture
+    def contract(self, tmp_path):
+        from surveycto_extractor.cli.enrich import _build_choice_index
+        from surveycto_extractor.parsers.xml_contract import parse_contract
+
+        (tmp_path / "sform.xml").write_text(_STRCHOICE_XML, encoding="utf-8")
+        (tmp_path / "sitelist.csv").write_text(_SITES_CSV, encoding="utf-8")
+        c = parse_contract(tmp_path / "sform.xml")
+        c.choice_index = _build_choice_index(c.nodes, [tmp_path])
+        return c
+
+    def test_dashed_value_recovers_original_and_label(self, contract):
+        m = contract.map_column("sites_AB_12")
+        assert m["kind"] == "matched"
+        # Without the index this is the sanitised token "AB_12"; the CSV is the
+        # only thing that knows the dash.
+        assert m["choice_code"] == "AB-12"
+        assert m["choice_label"] == "Alpha Beta 12"
+
+    def test_literal_extra_alongside_a_column_reference(self, contract):
+        # `-88` is a real literal item, not a column name, so it stays a code.
+        assert contract.map_column("sites__88")["choice_code"] == -88
+
+    def test_literal_filter_keeps_another_list_out(self, contract):
+        # The inactive row is filtered out, so its token is unknown and the
+        # mapper falls back to carrying it verbatim rather than inventing a value.
+        assert contract.map_column("sites_ZZ_99")["choice_code"] == "ZZ_99"
+
+    def test_column_name_never_becomes_a_choice_value(self, contract):
+        assert "site_id" not in [v for v, _ in contract.choice_index["sites"].values()]

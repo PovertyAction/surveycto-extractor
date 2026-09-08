@@ -30,7 +30,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 # pulldata()/search() args are parsed by the balanced, quote-aware
@@ -89,6 +89,25 @@ _COMPOSITE_INT = re.compile(r"\d+(?:_\d+)+")
 _SANITISE_RE = re.compile(r"[^A-Za-z0-9_]")
 
 
+def _coerce_choice_value(value: str):
+    """Return a bare-integer choice value as an int, anything else unchanged.
+
+    The dictionary has always carried numeric choice codes as ints, so both
+    decode paths run through this -- otherwise `-88` would come back as `-88` when
+    the choice CSV shipped and `-88` as an int when it did not, i.e. a type that
+    depends on the environment rather than on the form.
+
+    A LEADING ZERO stays a string: `01` and `1` are distinct choice codes in
+    SurveyCTO, and int() would silently merge them.
+    """
+    if not re.fullmatch(r"-?\d+", value):
+        return value
+    digits = value.lstrip("-")
+    if len(digits) > 1 and digits[0] == "0":
+        return value
+    return int(value)
+
+
 def sanitize_choice_value(value: str) -> str:
     """Render a choice value the way SurveyCTO renders it into a wide column name.
 
@@ -124,6 +143,12 @@ class Node:
     # Where the field's content/options come from, parsed from search()/pulldata():
     #   {kind:"search", dataset, mode, filter} | {kind:"pulldata", dataset, value, key}
     data_source: dict | None = None
+    # The select's `<item>` pairs verbatim from the body. For a plain select these
+    # are literal choices; for a `search()` select the value/label instead NAME the
+    # CSV COLUMNS holding the real universe, and only the extras are literal (a
+    # `-88` "Other" alongside a column reference). Needed to build the choice index
+    # that de-sanitises a wide column's choice token back to its declared value.
+    choice_items: list[dict] = field(default_factory=list)
 
 
 # search('dataset','mode','col','val'[,'col2','val2'...]) on a select's appearance.
@@ -314,23 +339,21 @@ class FormContract:
 
         Prefers the injected choice universe, the only thing that can undo
         sanitisation (`AB-12` and `AB_12` both render `AB_12`). Falls back to the
-        two shapes recoverable from the token alone: a dash->underscore negative
-        sentinel (`_66` -> -66) and a bare integer, both kept as the ints the
-        dictionary has always carried. Anything else is carried verbatim -- lossy,
-        but never wrong about WHICH choice it is.
+        one shape recoverable from the token alone: a dash->underscore negative
+        sentinel (`_66` -> `-66`), since a leading underscore is impossible in a
+        bare number. Anything else is carried verbatim -- lossy, but never wrong
+        about WHICH choice it is.
+
+        Both paths finish through the same coercion, so a numeric code does not
+        change type depending on whether the choice CSV happened to ship.
         """
         hit = self.choice_index.get(node.path, {}).get(token)
         if hit is not None:
-            return hit
+            return _coerce_choice_value(hit[0]), hit[1]
         m = _NEG_TOKEN_RE.fullmatch(token)
         if m:  # only a negative number sanitises to a leading underscore
-            raw = m.group(1)
-            neg = ("-" + raw) if len(raw) > 1 and raw[0] == "0" else -int(raw)
-            return neg, None
-        if token.isdigit():
-            # A leading zero is a distinct choice code, so keep it as a string.
-            return (token if len(token) > 1 and token[0] == "0" else int(token)), None
-        return token, None
+            return _coerce_choice_value("-" + m.group(1)), None
+        return _coerce_choice_value(token), None
 
     def map_column(self, col: str) -> dict:
         """Resolve a wide column to its node + repeat iterations + choice code.
@@ -527,6 +550,7 @@ def parse_contract(xml_path) -> FormContract:
     #    the deterministic choice-source (dataset + filter) -> data_source.
     controls: dict[str, str] = {}
     appearances: dict[str, str] = {}
+    items: dict[str, list[dict]] = {}
     body = next((c for c in root if _ln(c.tag) == "body"), None)
     if body is not None:
         for el in body.iter():
@@ -537,6 +561,19 @@ def parse_contract(xml_path) -> FormContract:
             ctl = _ln(el.tag)
             if ctl in ("select", "select1", "input", "upload", "trigger", "range"):
                 controls[rel] = ctl
+            if ctl in ("select", "select1"):
+                items[rel] = [
+                    {
+                        "label": next(
+                            (c.text for c in it if _ln(c.tag) == "label"), None
+                        ),
+                        "value": next(
+                            (c.text for c in it if _ln(c.tag) == "value"), None
+                        ),
+                    }
+                    for it in el
+                    if _ln(it.tag) == "item"
+                ]
             ap = el.get("appearance")
             if ap:
                 appearances[rel] = ap
@@ -565,6 +602,7 @@ def parse_contract(xml_path) -> FormContract:
             xml_type=b.get("type"),
             control=_SELECT_CONTROL.get(ctl, ctl),
             is_select_multiple=select_multiple,
+            choice_items=items.get(path, []),
             calculate=b.get("calculate"),
             relevant=b.get("relevant"),
             constraint=b.get("constraint"),
