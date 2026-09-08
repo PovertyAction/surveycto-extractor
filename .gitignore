@@ -45,8 +45,6 @@ data/
 *_survey.csv
 *_choices.csv
 *_ord.dta
-*_synthetic.csv
-*_synthetic.strip.log
 sections/
 sample/output/
 

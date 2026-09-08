@@ -13,7 +13,11 @@ import json
 import re
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
+# src/surveycto_extractor/generators/build_type_catalog.py -> repo root.
+# This was `.parent.parent` while the module sat at generators/ in the flat
+# layout; the src/ migration left it resolving to src/surveycto_extractor/,
+# so the script has been raising FileNotFoundError ever since.
+REPO_ROOT = Path(__file__).resolve().parents[3]
 SOURCE = REPO_ROOT / "coding_guidelines" / "surveycto_refs" / "xlsform.md"
 OUTPUT = REPO_ROOT / "coding_guidelines" / "surveycto_refs" / "_type_catalog.json"
 
