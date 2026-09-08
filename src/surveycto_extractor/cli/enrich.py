@@ -53,10 +53,29 @@ _CSV_CACHE: dict[str, list] = {}
 
 
 def _load_csv_rows(path) -> list:
-    key = str(path)
+    """Rows of an attachment CSV, cached by absolute path.
+
+    `utf-8-sig` because SurveyCTO's exported attachments routinely carry a BOM,
+    which otherwise lands inside the FIRST header name (`﻿list_name`) and
+    makes every lookup on that column miss silently. Header names are also
+    stripped, since a padded header (`list_name, site_id`) fails the same way,
+    and a duplicate header keeps its FIRST column rather than the last one
+    csv.DictReader would leave -- a later duplicate was overwriting real values
+    with a neighbouring column's.
+    """
+    key = str(Path(path).resolve())
     if key not in _CSV_CACHE:
-        with open(path, encoding="utf-8", errors="replace", newline="") as fh:
-            _CSV_CACHE[key] = list(csv.DictReader(fh))
+        with open(path, encoding="utf-8-sig", errors="replace", newline="") as fh:
+            reader = csv.reader(fh)
+            header = next(reader, [])
+            names, seen = [], set()
+            for i, raw in enumerate(header):
+                nm = (raw or "").strip()
+                # Keep the first of a repeated name; give later ones an unusable
+                # key so they cannot shadow it.
+                names.append(nm if nm and nm not in seen else f"__dup{i}__")
+                seen.add(nm)
+            _CSV_CACHE[key] = [dict(zip(names, row)) for row in reader]
     return _CSV_CACHE[key]
 
 
@@ -89,10 +108,21 @@ def _resolve_search_choices(attachment_dirs, data_source: dict | None) -> list |
 
 
 def _search_csv_rows(attachment_dirs, dataset: str) -> list:
-    """Rows of the CSV a `search()` names, or [] when it is not shipped."""
+    """Rows of the CSV a `search()` names, or [] when it is not shipped.
+
+    An EXACT `<dataset>.csv` wins over the prefix glob. Without that, a
+    same-prefix neighbour can hijack the universe purely on sort order:
+    `sitelist-2024.csv` sorts before `sitelist.csv` (`-` is 0x2D, `.` is 0x2E),
+    so the glob's first match was the wrong file. The glob is still the fallback,
+    because SurveyCTO ships attachments with a version suffix.
+    """
     for d in attachment_dirs:
+        exact = Path(d) / f"{dataset}.csv"
+        if exact.is_file():
+            return _load_csv_rows(exact)
         for path in sorted(Path(d).glob(f"{dataset}*.csv")):
-            return _load_csv_rows(path)
+            if path.is_file():
+                return _load_csv_rows(path)
     return []
 
 
@@ -111,12 +141,19 @@ def _build_choice_index(nodes: dict, attachment_dirs) -> dict:
     read but left unapplied. Literal filter pairs ARE applied, so one shared
     choices CSV does not leak another list's values in.
 
-    A `search()` node's non-numeric item value is a COLUMN NAME, not a choice --
-    the XML names which columns of the attached CSV hold the values and labels. An
-    unresolvable one contributes NOTHING rather than registering the column name
-    itself as a choice value. A token that two different values sanitise to is
-    dropped: an ambiguous de-sanitisation is worse than carrying the token
-    verbatim, which is what `map_column` falls back to.
+    On a `search()` node ONLY, a non-numeric item value is a COLUMN NAME rather
+    than a choice -- the XML names which columns of the attached CSV hold the
+    values and labels -- and an unresolvable one contributes NOTHING rather than
+    registering the column name itself as a choice value. On a PLAIN select the
+    items are the choices and their labels are literal, so they are taken as-is;
+    applying the column rule there discarded every string-valued choice on the
+    commonest XLSForm shape.
+
+    A token that two different declared values sanitise to is recorded as
+    `None` -- known-ambiguous. It is deliberately NOT deleted: a missing entry
+    sends `map_column` to its verbatim fallback, which would hand back a token
+    that may itself be one of the colliding values, silently picking a winner.
+    `None` makes the mapper abstain and flag `ambiguous_choice` instead.
     """
     index: dict[str, dict] = {}
     for path, node in nodes.items():
@@ -137,15 +174,19 @@ def _build_choice_index(nodes: dict, attachment_dirs) -> dict:
                 ]
         cols = set(rows[0]) if rows else set()
 
+        is_search = ds.get("kind") == "search"
         pairs: list[tuple] = []
         for item in node.choice_items:
             val = (item.get("value") or "").strip()
             lab = item.get("label")
             if not val:
                 continue
-            if re.fullmatch(
-                r"-?\d+", val
-            ):  # a real literal code (a sentinel, or 1/2/3)
+            # The "non-numeric value names a COLUMN" rule holds ONLY on a
+            # `search()` node. On a plain select the items ARE the choices, and
+            # their labels are literal -- reading them as column references threw
+            # away every string-valued choice and its label on the commonest
+            # XLSForm shape there is.
+            if not is_search or re.fullmatch(r"-?\d+", val):
                 pairs.append((val, lab))
                 continue
             if val not in cols:  # a column reference we cannot expand
@@ -153,7 +194,11 @@ def _build_choice_index(nodes: dict, attachment_dirs) -> dict:
             for row in rows:
                 v = (row.get(val) or "").strip()
                 if v:
-                    label = (row.get(lab) or "").strip() or None if lab in cols else lab
+                    # `lab` names a column here; when that column is absent the
+                    # label is unknown, NOT the column's own name.
+                    label = (
+                        (row.get(lab) or "").strip() or None if lab in cols else None
+                    )
                     pairs.append((v, label))
 
         seen: dict[str, tuple] = {}
@@ -163,8 +208,14 @@ def _build_choice_index(nodes: dict, attachment_dirs) -> dict:
             if tok in seen and seen[tok][0] != val:
                 clashed.add(tok)
             seen.setdefault(tok, (val, lab))
+        # A clashed token is recorded as KNOWN-AMBIGUOUS rather than deleted.
+        # Dropping it outright made the mapper fall back to the verbatim token,
+        # which is indistinguishable from a resolved code and can even be one of
+        # the two real colliding values -- so it silently picked a winner. `None`
+        # tells `map_column` to abstain and flag it, the same treatment the
+        # composite-integer case already gets.
         for tok in clashed:
-            seen.pop(tok, None)
+            seen[tok] = None
         if seen:
             index[path] = seen
     return index
@@ -298,6 +349,11 @@ def enrich_contract(
             # Column carried a different number of repeat indices than the node's
             # depth (#23.2).
             entry["contract"]["ragged"] = True
+        if m.get("choice_label") is not None:
+            # The mapper resolved the label from the choice index. Carried here
+            # because the MCP server reads `contract.choice_label`, so without
+            # this the index resolved a label and the dictionary threw it away.
+            entry["contract"]["choice_label"] = m["choice_label"]
         if m.get("ambiguous_choice"):
             # A select_multiple binary whose choice/index boundary is not
             # recoverable from the contract, so the mapper abstained rather than
@@ -388,7 +444,12 @@ def enrich_contract(
                 entry["survey"]["choices"] = resolved
                 entry["survey"]["choice_list"] = node.data_source["dataset"]
                 code = m["choice_code"]
-                if code is not None:
+                if code is not None and "choice_label" not in entry["contract"]:
+                    # Only as a FALLBACK. The mapper's label (set above) comes from
+                    # the choice index, which reads the value/label columns the XML
+                    # actually names; this path assumes columns literally called
+                    # `value`/`label`. When a CSV happens to carry both, the two
+                    # disagreed and this one, being second, used to win.
                     entry["contract"]["choice_label"] = next(
                         (c["label"] for c in resolved if c["value"] == str(code)), None
                     )

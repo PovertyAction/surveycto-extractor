@@ -348,3 +348,137 @@ class TestChoiceIndexFromAttachedCsv:
 
     def test_column_name_never_becomes_a_choice_value(self, contract):
         assert "site_id" not in [v for v, _ in contract.choice_index["sites"].values()]
+
+
+_PLAIN_SM_XML = """<?xml version="1.0"?>
+<h:html xmlns="http://www.w3.org/2002/xforms"
+        xmlns:h="http://www.w3.org/1999/xhtml"
+        xmlns:jr="http://openrosa.org/javarosa">
+  <h:head><model>
+    <instance><f id="f" version="1"><sites/></f></instance>
+    <bind nodeset="/f/sites" type="select"/>
+  </model></h:head>
+  <h:body>
+    <select ref="/f/sites"><label>S</label>
+      <item><label>Wheat flour</label><value>wheat-flour</value></item>
+      <item><label>Other</label><value>-88</value></item>
+    </select>
+  </h:body>
+</h:html>
+"""
+
+_SEARCH_SM_XML = """<?xml version="1.0"?>
+<h:html xmlns="http://www.w3.org/2002/xforms"
+        xmlns:h="http://www.w3.org/1999/xhtml"
+        xmlns:jr="http://openrosa.org/javarosa">
+  <h:head><model>
+    <instance><f id="f" version="1"><sites/></f></instance>
+    <bind nodeset="/f/sites" type="select"/>
+  </model></h:head>
+  <h:body>
+    <select ref="/f/sites"
+            appearance="search('sitelist', 'matches', 'list_name', 'active')">
+      <label>S</label>
+      <item><label>site_label</label><value>site_id</value></item>
+      <item><label>Other</label><value>-88</value></item>
+    </select>
+  </h:body>
+</h:html>
+"""
+
+
+class TestChoiceIndexHardCases:
+    """Cases from adversarial review; each one defeated the first version."""
+
+    def _build(self, tmp_path, xml, csv_text=None, extra=None):
+        from surveycto_extractor.cli.enrich import _build_choice_index
+        from surveycto_extractor.parsers.xml_contract import parse_contract
+
+        (tmp_path / "f.xml").write_text(xml, encoding="utf-8")
+        if csv_text is not None:
+            (tmp_path / "sitelist.csv").write_text(csv_text, encoding="utf-8")
+        for nm, txt in (extra or {}).items():
+            (tmp_path / nm).write_text(txt, encoding="utf-8")
+        c = parse_contract(tmp_path / "f.xml")
+        c.choice_index = _build_choice_index(c.nodes, [tmp_path])
+        return c
+
+    def test_plain_select_keeps_its_literal_string_choices(self, tmp_path):
+        # The "non-numeric value names a COLUMN" rule holds only for search();
+        # applied to a plain select it discarded every string-valued choice.
+        c = self._build(tmp_path, _PLAIN_SM_XML)
+        m = c.map_column("sites_wheat_flour")
+        assert m["choice_code"] == "wheat-flour"
+        assert m["choice_label"] == "Wheat flour"
+        assert c.map_column("sites__88")["choice_code"] == -88
+
+    def test_sanitisation_collision_abstains_instead_of_guessing(self, tmp_path):
+        # `A-B` and `A.B` both render `A_B`. Dropping the entry sent the mapper to
+        # its verbatim fallback, which returns `A_B` -- indistinguishable from a
+        # resolved code, and possibly one of the two colliding values.
+        c = self._build(
+            tmp_path,
+            _SEARCH_SM_XML,
+            "list_name,site_id,site_label\nactive,A-B,One\nactive,A.B,Two\nactive,OK-1,Three\n",
+        )
+        m = c.map_column("sites_A_B")
+        assert m["choice_code"] is None
+        assert m["ambiguous_choice"] is True
+        assert c.map_column("sites_OK_1")["choice_code"] == "OK-1"
+
+    def test_absent_label_column_is_not_used_as_the_label(self, tmp_path):
+        c = self._build(tmp_path, _SEARCH_SM_XML, "list_name,site_id\nactive,AB-12\n")
+        m = c.map_column("sites_AB_12")
+        assert m["choice_code"] == "AB-12"
+        assert m.get("choice_label") is None
+
+    @pytest.mark.parametrize(
+        ("label", "csv_text"),
+        [
+            ("bom", "﻿list_name,site_id,site_label\nactive,AB-12,Alpha\n"),
+            ("padded", "list_name, site_id ,site_label\nactive,AB-12,Alpha\n"),
+            ("dup", "list_name,site_id,site_id,site_label\nactive,AB-12,ZZ-99,Alpha\n"),
+        ],
+    )
+    def test_csv_header_pathologies(self, tmp_path, label, csv_text):
+        # Each of these silently emptied or corrupted the index: a BOM lands
+        # inside the first header name, a padded name fails every lookup, and a
+        # duplicate name let a neighbouring column overwrite real values.
+        c = self._build(tmp_path, _SEARCH_SM_XML, csv_text)
+        assert c.map_column("sites_AB_12")["choice_code"] == "AB-12", label
+
+    def test_exact_dataset_csv_beats_a_same_prefix_decoy(self, tmp_path):
+        # `sitelist-2024.csv` sorts BEFORE `sitelist.csv`, so the glob's first
+        # match was the wrong file and the whole universe came from the decoy.
+        c = self._build(
+            tmp_path,
+            _SEARCH_SM_XML,
+            "list_name,site_id,site_label\nactive,AB-12,Alpha\n",
+            extra={
+                "sitelist-2024.csv": "list_name,site_id,site_label\nactive,DECOY-1,No\n"
+            },
+        )
+        assert c.map_column("sites_AB_12")["choice_code"] == "AB-12"
+
+    def test_index_resolved_composite_integer_is_kept(self, tmp_path):
+        # A declared value of `1_2` is a real choice. The composite-int
+        # abstention must apply only when the index did NOT resolve the token,
+        # or it discards the answer it just looked up.
+        c = self._build(
+            tmp_path,
+            _SEARCH_SM_XML,
+            "list_name,site_id,site_label\nactive,1_2,Composite\n",
+        )
+        m = c.map_column("sites_1_2")
+        assert m["choice_code"] == "1_2"
+        assert m.get("ambiguous_choice") is None
+
+    def test_unresolved_composite_integer_still_abstains(self, tmp_path):
+        c = self._build(
+            tmp_path,
+            _SEARCH_SM_XML,
+            "list_name,site_id,site_label\nactive,AB-12,Alpha\n",
+        )
+        m = c.map_column("sites_9_9")
+        assert m["choice_code"] is None
+        assert m["ambiguous_choice"] is True
