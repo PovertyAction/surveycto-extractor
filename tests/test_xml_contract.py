@@ -269,9 +269,12 @@ class TestNestedRepeats:
         # SurveyCTO wide export orders the choice code FIRST, then the repeat
         # chain: base_<choice>_<outer>_<inner>. This is NOT the code's own
         # assumption -- it is the convention the production Phase-4 matcher
-        # (create_variable_dictionaries.py:745-752, choice=first group) and the
-        # concordance-validated synthetic generator (synthetic_data.py emits
-        # `_<choice>{repeat suffix}`) both use against real exports. So for
+        # (create_variable_dictionaries.py:745-752, choice=first group) uses
+        # against real exports. It was independently corroborated by the
+        # concordance-validated synthetic generator, which emitted
+        # `_<choice>{repeat suffix}`; that generator has since moved to
+        # surveycto-deploy-gate, so the matcher is now the sole witness here.
+        # So for
         # choice=7 in repeat (hh=2, member=3) the column is `mlangs_7_2_3`.
         m = nested.map_column("mlangs_7_2_3")
         assert m["choice_code"] == 7

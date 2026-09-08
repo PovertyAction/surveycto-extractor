@@ -1,7 +1,7 @@
 [project]
 name = "surveycto-extractor"
 version = "0.1.0"
-description = "Toolkit for extracting SurveyCTO instrument structure and generating Stata-ready outputs, docs, synthetic exports, and a variable dictionary."
+description = "Toolkit for extracting SurveyCTO instrument structure and generating Stata-ready outputs, docs, and a variable dictionary."
 readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.10"

@@ -423,9 +423,10 @@ class JSONExtractor:
         # appearance is a presentation column but carries the SurveyCTO
         # ``search('CSV', 'matches', col, val, ...)`` directive that
         # dynamically populates a select's choice list from a media-bundle
-        # CSV. The synthetic generator uses this to expand placeholder
-        # choice lists (e.g. peer rosters, enumerator lists) at run time
-        # against the actual pulldata table.
+        # CSV -- so a select whose choices look like a single placeholder in
+        # the XLSForm (peer rosters, enumerator lists) really has the CSV's
+        # rows as its choice universe. surveycto-enrich reads it to build the
+        # choice index that decodes those wide columns.
         appearance = row.get("appearance", None) or None
 
         # For calculate type, use calculation expression as label fallback

@@ -886,7 +886,7 @@ def adjust_variable_refs(
         # A select_multiple ref is NOT iteration-suffixed here: the converter
         # turns selected(${sm}, C) into the choice indicator sm_C, and the
         # canonical wide column for an SM-in-repeat is base_<choice>_<repeat>
-        # (choice-first, per the Phase-4 matcher + synthetic generator). Pre-
+        # (choice-first, per the Phase-4 matcher). Pre-
         # suffixing the iteration would make the converter emit sm_<repeat>_C
         # -- the exact transposition PR #21's blocker fixed. So we leave SM refs
         # to the converter (their per-iteration column is not represented in
