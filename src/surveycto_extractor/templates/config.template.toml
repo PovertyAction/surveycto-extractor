@@ -7,7 +7,7 @@
 #
 # Paths are RESOLVED RELATIVE TO THIS FILE's directory (absolute paths work too).
 #
-#   [surveys.KEY]  -> instrument day: surveycto-extract (csv/json/sections/synthetic)
+#   [surveys.KEY]  -> instrument day: surveycto-extract (csv/json/sections)
 #   [datasets.KEY] -> data day:       surveycto-vardict, surveycto-summary-stats
 # Each [datasets.KEY] must share its KEY with a [surveys.KEY].
 # Uncomment and fill in the tables below.
@@ -21,9 +21,6 @@
 # name              = "My Survey Full Name"
 # max_section_depth = 3
 # external_choices_csv = ""                             # or "path/to/choices.csv"
-# # Optional synthetic-phase settings:
-# # pulldata_search_dirs = ["data/form_attachments"]    # dirs holding pulldata CSVs
-# # geo_bbox = [-1.5, 4.2, 29.5, 35.0]                  # [lat_min, lat_max, lon_min, lon_max]
 
 # --- Data side: one [datasets.KEY] table per collected dataset --------------
 # [datasets.my_survey]
