@@ -30,7 +30,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 # pulldata()/search() args are parsed by the balanced, quote-aware
@@ -124,6 +124,12 @@ class Node:
     # Where the field's content/options come from, parsed from search()/pulldata():
     #   {kind:"search", dataset, mode, filter} | {kind:"pulldata", dataset, value, key}
     data_source: dict | None = None
+    # The select's `<item>` pairs verbatim from the body. For a plain select these
+    # are literal choices; for a `search()` select the value/label instead NAME the
+    # CSV COLUMNS holding the real universe, and only the extras are literal (a
+    # `-88` "Other" alongside a column reference). Needed to build the choice index
+    # that de-sanitises a wide column's choice token back to its declared value.
+    choice_items: list[dict] = field(default_factory=list)
 
 
 # search('dataset','mode','col','val'[,'col2','val2'...]) on a select's appearance.
@@ -527,6 +533,7 @@ def parse_contract(xml_path) -> FormContract:
     #    the deterministic choice-source (dataset + filter) -> data_source.
     controls: dict[str, str] = {}
     appearances: dict[str, str] = {}
+    items: dict[str, list[dict]] = {}
     body = next((c for c in root if _ln(c.tag) == "body"), None)
     if body is not None:
         for el in body.iter():
@@ -537,6 +544,19 @@ def parse_contract(xml_path) -> FormContract:
             ctl = _ln(el.tag)
             if ctl in ("select", "select1", "input", "upload", "trigger", "range"):
                 controls[rel] = ctl
+            if ctl in ("select", "select1"):
+                items[rel] = [
+                    {
+                        "label": next(
+                            (c.text for c in it if _ln(c.tag) == "label"), None
+                        ),
+                        "value": next(
+                            (c.text for c in it if _ln(c.tag) == "value"), None
+                        ),
+                    }
+                    for it in el
+                    if _ln(it.tag) == "item"
+                ]
             ap = el.get("appearance")
             if ap:
                 appearances[rel] = ap
@@ -565,6 +585,7 @@ def parse_contract(xml_path) -> FormContract:
             xml_type=b.get("type"),
             control=_SELECT_CONTROL.get(ctl, ctl),
             is_select_multiple=select_multiple,
+            choice_items=items.get(path, []),
             calculate=b.get("calculate"),
             relevant=b.get("relevant"),
             constraint=b.get("constraint"),
