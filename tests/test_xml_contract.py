@@ -364,3 +364,131 @@ class TestPureHelpers:
         assert s["dataset"] == "choices"
         assert s["filter"] == {"list_name": "crops"}
         assert _parse_search("minimal") is None
+
+
+# A select_multiple whose choice VALUES are strings, not codes. SurveyCTO renders
+# a choice value into a wide column name by replacing every [^A-Za-z0-9_] with an
+# underscore, so a `search()`-sourced key like `AB-12` arrives as `AB_12` -- and a
+# value that contains digits arrives with those digits looking exactly like repeat
+# iteration suffixes. `tags` sits inside a repeat so the two can collide.
+_XML_STRING_CHOICES = """<?xml version="1.0"?>
+<h:html xmlns="http://www.w3.org/2002/xforms"
+        xmlns:h="http://www.w3.org/1999/xhtml"
+        xmlns:jr="http://openrosa.org/javarosa">
+  <h:head>
+    <h:title>Str Form</h:title>
+    <model>
+      <instance>
+        <strform id="strform" version="2026010101">
+          <langs/>
+          <members jr:template="">
+            <tags/>
+          </members>
+          <meta><instanceID/></meta>
+        </strform>
+      </instance>
+      <bind nodeset="/strform/langs" type="select"/>
+      <bind nodeset="/strform/members/tags" type="select"/>
+      <bind nodeset="/strform/meta/instanceID" type="string"/>
+    </model>
+  </h:head>
+  <h:body>
+    <select ref="/strform/langs"
+            appearance="search('choices', 'matches', 'list_name', 'langlist')">
+      <label>Languages</label>
+    </select>
+    <group ref="/strform/members">
+      <repeat nodeset="/strform/members">
+        <select ref="/strform/members/tags"
+                appearance="search('tagsets', 'matches', 'list_name', 'taglist')">
+          <label>Tags</label>
+        </select>
+      </repeat>
+    </group>
+  </h:body>
+</h:html>
+"""
+
+
+@pytest.fixture
+def strform(tmp_path) -> FormContract:
+    p = tmp_path / "strform.xml"
+    p.write_text(_XML_STRING_CHOICES, encoding="utf-8")
+    return parse_contract(p)
+
+
+class TestStringValuedChoiceCodes:
+    """A select_multiple choice value that is not a bare integer.
+
+    The old mapper peeled EVERY trailing `_<int>` as a repeat index before it
+    looked at the node, then required the remainder to be a node name. That holds
+    only when the choice value is a bare positive integer, so a string-valued
+    choice fell into a fallback that hardcoded `choice_code = None` -- and, when
+    the value contained digits, read the value's OWN digits as repeat iterations.
+    Downstream, `vardict` gates per-choice resolution on `choice_code` being
+    non-null, so the binary was labelled with its question's whole choice list
+    instead of its own choice.
+    """
+
+    def test_string_choice_is_reported_not_discarded(self, strform):
+        m = strform.map_column("langs_ES")
+        assert m["kind"] == "matched"
+        assert m["is_select_multiple"] is True
+        # Was None, with the value demoted to a `string_key` heuristic.
+        assert m["choice_code"] == "ES"
+
+    def test_multi_token_string_choice_still_matches(self, strform):
+        # Was `unmapped` outright: `langs_en` is not a node, so nothing matched.
+        m = strform.map_column("langs_en_GB")
+        assert m["kind"] == "matched"
+        assert m["node_path"] == "langs"
+        assert m["choice_code"] == "en_GB"
+
+    def test_choice_digits_are_not_read_as_repeat_iterations(self, strform):
+        """The regression that corrupts rather than merely omits.
+
+        `tags` has repeat depth 1, so exactly ONE trailing integer token is an
+        iteration index. The old mapper peeled `3013` (part of the choice value)
+        and reported it as the iteration, silently dropping the real one.
+        """
+        m = strform.map_column("tags_KAR2019_3013_2")
+        assert m["kind"] == "matched"
+        assert m["repeat_iterations"] == [("members", 2)]
+        assert m["choice_code"] == "KAR2019_3013"
+
+    def test_numeric_choice_codes_are_unchanged(self, strform):
+        # The shapes that already worked must keep their exact previous values,
+        # ints included -- this is what keeps the dictionary output stable.
+        assert strform.map_column("langs_1")["choice_code"] == 1
+        assert strform.map_column("langs__66")["choice_code"] == -66
+        assert strform.map_column("langs_01")["choice_code"] == "01"
+        inner = strform.map_column("tags_1_2")
+        assert inner["choice_code"] == 1
+        assert inner["repeat_iterations"] == [("members", 2)]
+
+    def test_unknowable_choice_index_boundary_abstains(self, strform):
+        """`tags_1_1_2`: depth 1, so `1_1` is left over as the choice value.
+
+        A real numeric choice value sanitises to exactly ONE token, so a
+        multi-token all-integer remainder means the choice/index boundary cannot
+        be recovered from the contract. Abstain and say so rather than emit a
+        fabricated out-of-domain code.
+        """
+        m = strform.map_column("tags_1_1_2")
+        assert m["choice_code"] is None
+        assert m["ambiguous_choice"] is True
+
+    def test_choice_index_recovers_the_original_value_and_label(self, tmp_path):
+        """With the choice universe supplied, the ORIGINAL value comes back.
+
+        The sanitised token is lossy (`AB-12` and `AB_12` both render `AB_12`),
+        so the parser stays dependency-free and the caller injects the universe
+        it already resolves for labels.
+        """
+        p = tmp_path / "strform.xml"
+        p.write_text(_XML_STRING_CHOICES, encoding="utf-8")
+        c = parse_contract(p)
+        c.choice_index = {"langs": {"AB_12": ("AB-12", "Alpha Beta 12")}}
+        m = c.map_column("langs_AB_12")
+        assert m["choice_code"] == "AB-12"
+        assert m["choice_label"] == "Alpha Beta 12"

@@ -205,8 +205,16 @@ def enrich_contract(
             "calculate": node.calculate,
         }
         if m.get("ragged"):
-            # Column carried fewer repeat indices than the node's depth (#23.2).
+            # Column carried a different number of repeat indices than the node's
+            # depth (#23.2).
             entry["contract"]["ragged"] = True
+        if m.get("ambiguous_choice"):
+            # A select_multiple binary whose choice/index boundary is not
+            # recoverable from the contract, so the mapper abstained rather than
+            # emit a fabricated code. Carried through so a consumer can tell this
+            # apart from the select_multiple's own (choice-less) parent column,
+            # which also has choice_code None.
+            entry["contract"]["ambiguous_choice"] = True
         if node.preload:
             entry["contract"]["preload"] = {
                 "type": node.preload,
