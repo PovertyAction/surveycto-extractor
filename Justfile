@@ -68,6 +68,15 @@ test:
 accept-deps *ARGS:
     uv run --no-project python -u "{{ dep_accept_dir / 'scripts/accept_dep_prs.py' }}" {{ ARGS }}
 
+# Three sweeps, each ablated in the same run: nothing the toolkit needs is
+# gitignored, no tracked file cites a path that does not exist, every module
+# under src/ parses and imports. Needs --all-extras, because sweep 3 imports the
+# optional `mcp` extra's server module. Writes a HEAD-stamped report to
+# data/_integrity/ so a clean result can be tied to the commit it describes.
+[doc("Check repo integrity: hidden files, dead path references, unimportable modules")]
+integrity-check:
+    uv run --all-extras python scripts/integrity_check.py
+
 [doc("Remove the virtual environment")]
 clean:
     rm -rf .venv
