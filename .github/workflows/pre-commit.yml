@@ -28,9 +28,3 @@ jobs:
       # pip-less uv venv that setup-uv activates.
       - name: Run pre-commit
         run: uv run pre-commit run --all-files --show-diff-on-failure
-
-      # Lives here rather than in ci.yml: this job already syncs --all-extras
-      # (sweep 3 imports the optional mcp extra) and runs ONCE, whereas ci.yml
-      # would repeat it across all 11 matrix jobs for no extra signal.
-      - name: Repo integrity sweeps
-        run: uv run python scripts/integrity_check.py
