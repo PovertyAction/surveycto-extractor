@@ -5,8 +5,8 @@ carries its own `--selftest` for its parsers. What belongs here is the handful o
 repo-local facts that engine relies on, so a dependency PR that breaks one fails
 CI instead of slipping through green:
 
-- the ruff pin parity that `.pre-commit-config.yaml` documents in a comment but
-  nothing enforced;
+- the hook-vs-lockfile pin parity that `.pre-commit-config.yaml` documents in a
+  comment but nothing enforced (ruff, codespell);
 - `.dep-accept.toml` staying valid and in step with the real project layout.
 """
 
@@ -28,10 +28,25 @@ def _load(path):
     return tomllib.loads(path.read_text(encoding="utf-8"))
 
 
-PRECOMMIT_RUFF_RX = re.compile(
-    r"repo:\s*https://github\.com/astral-sh/ruff-pre-commit.*?rev:\s*v?([0-9][^\s]*)",
-    re.DOTALL,
-)
+# Tools pinned TWICE -- once as a pre-commit hook `rev`, once as a locked Python
+# dependency -- and moved by two different mechanisms (Dependabot moves the lock,
+# `pre-commit autoupdate` moves the rev). Every such pair needs the parity check;
+# a hook whose tool is not also a locked dependency (validate-pyproject,
+# markdownlint-cli, pre-commit-hooks) cannot drift and is not listed.
+DOUBLE_PINNED = [
+    ("astral-sh/ruff-pre-commit", "ruff"),
+    ("codespell-project/codespell", "codespell"),
+]
+
+
+def _precommit_rev(repo_slug):
+    """The `rev` pinned for a pre-commit repo, or None if that repo is absent."""
+    hook = re.search(
+        rf"repo:\s*https://github\.com/{re.escape(repo_slug)}.*?rev:\s*v?([0-9][^\s]*)",
+        (REPO_ROOT / ".pre-commit-config.yaml").read_text(encoding="utf-8"),
+        re.DOTALL,
+    )
+    return hook.group(1) if hook else None
 
 
 def _locked_version(package):
@@ -49,24 +64,26 @@ def _locked_version(package):
 
 
 class TestRuffPinParity:
-    def test_precommit_rev_matches_the_locked_ruff(self):
-        """The pre-commit ruff rev must match the ruff the lockfile resolves.
+    @pytest.mark.parametrize(("repo_slug", "package"), DOUBLE_PINNED)
+    def test_precommit_rev_matches_the_locked_version(self, repo_slug, package):
+        """A pre-commit hook rev must match the version the lockfile resolves.
 
-        `.pre-commit-config.yaml` pins this deliberately so `uv run ruff` and the
-        CI hook never disagree. A lock-only ruff bump breaks it silently -- CI
+        `.pre-commit-config.yaml` pins these deliberately so `uv run <tool>` and
+        the CI hook never disagree. A lock-only bump breaks it silently -- CI
         stays green while local runs start reformatting files -- which is exactly
         what a Dependabot PR does. Assert it so the drift cannot land unnoticed.
+
+        Ruff is the one that actually drifted (PR #59, caught here on all 11
+        matrix jobs); codespell is the same shape and was simply unguarded.
         """
-        hook = PRECOMMIT_RUFF_RX.search(
-            (REPO_ROOT / ".pre-commit-config.yaml").read_text(encoding="utf-8")
-        )
-        assert hook, "no ruff-pre-commit hook found in .pre-commit-config.yaml"
-        locked = _locked_version("ruff")
-        assert locked, "ruff not found in uv.lock"
-        assert hook.group(1) == locked, (
-            f"ruff pin drift: .pre-commit-config.yaml rev v{hook.group(1)} vs locked "
-            f"ruff {locked}. Bump the hook rev in the same commit as the lock, and "
-            "commit whatever the new version reformats."
+        rev = _precommit_rev(repo_slug)
+        assert rev, f"no {repo_slug} hook found in .pre-commit-config.yaml"
+        locked = _locked_version(package)
+        assert locked, f"{package} not found in uv.lock"
+        assert rev == locked, (
+            f"{package} pin drift: .pre-commit-config.yaml rev v{rev} vs locked "
+            f"{package} {locked}. Bump the hook rev in the same commit as the lock, "
+            "and commit whatever the new version reformats."
         )
 
 

@@ -364,3 +364,242 @@ class TestPureHelpers:
         assert s["dataset"] == "choices"
         assert s["filter"] == {"list_name": "crops"}
         assert _parse_search("minimal") is None
+
+
+# A select_multiple whose choice VALUES are strings, not codes. SurveyCTO renders
+# a choice value into a wide column name by replacing every [^A-Za-z0-9_] with an
+# underscore, so a `search()`-sourced key like `AB-12` arrives as `AB_12` -- and a
+# value that contains digits arrives with those digits looking exactly like repeat
+# iteration suffixes. `tags` sits inside a repeat so the two can collide.
+_XML_STRING_CHOICES = """<?xml version="1.0"?>
+<h:html xmlns="http://www.w3.org/2002/xforms"
+        xmlns:h="http://www.w3.org/1999/xhtml"
+        xmlns:jr="http://openrosa.org/javarosa">
+  <h:head>
+    <h:title>Str Form</h:title>
+    <model>
+      <instance>
+        <strform id="strform" version="2026010101">
+          <langs/>
+          <members jr:template="">
+            <tags/>
+          </members>
+          <meta><instanceID/></meta>
+        </strform>
+      </instance>
+      <bind nodeset="/strform/langs" type="select"/>
+      <bind nodeset="/strform/members/tags" type="select"/>
+      <bind nodeset="/strform/meta/instanceID" type="string"/>
+    </model>
+  </h:head>
+  <h:body>
+    <select ref="/strform/langs"
+            appearance="search('choices', 'matches', 'list_name', 'langlist')">
+      <label>Languages</label>
+    </select>
+    <group ref="/strform/members">
+      <repeat nodeset="/strform/members">
+        <select ref="/strform/members/tags"
+                appearance="search('tagsets', 'matches', 'list_name', 'taglist')">
+          <label>Tags</label>
+        </select>
+      </repeat>
+    </group>
+  </h:body>
+</h:html>
+"""
+
+
+@pytest.fixture
+def strform(tmp_path) -> FormContract:
+    p = tmp_path / "strform.xml"
+    p.write_text(_XML_STRING_CHOICES, encoding="utf-8")
+    return parse_contract(p)
+
+
+class TestStringValuedChoiceCodes:
+    """A select_multiple choice value that is not a bare integer.
+
+    The old mapper peeled EVERY trailing `_<int>` as a repeat index before it
+    looked at the node, then required the remainder to be a node name. That holds
+    only when the choice value is a bare positive integer, so a string-valued
+    choice fell into a fallback that hardcoded `choice_code = None` -- and, when
+    the value contained digits, read the value's OWN digits as repeat iterations.
+    Downstream, `vardict` gates per-choice resolution on `choice_code` being
+    non-null, so the binary was labelled with its question's whole choice list
+    instead of its own choice.
+    """
+
+    def test_string_choice_is_reported_not_discarded(self, strform):
+        m = strform.map_column("langs_ES")
+        assert m["kind"] == "matched"
+        assert m["is_select_multiple"] is True
+        # Was None, with the value demoted to a `string_key` heuristic.
+        assert m["choice_code"] == "ES"
+
+    def test_multi_token_string_choice_still_matches(self, strform):
+        # Was `unmapped` outright: `langs_en` is not a node, so nothing matched.
+        m = strform.map_column("langs_en_GB")
+        assert m["kind"] == "matched"
+        assert m["node_path"] == "langs"
+        assert m["choice_code"] == "en_GB"
+
+    def test_choice_digits_are_not_read_as_repeat_iterations(self, strform):
+        """The regression that corrupts rather than merely omits.
+
+        `tags` has repeat depth 1, so exactly ONE trailing integer token is an
+        iteration index. The old mapper peeled `3013` (part of the choice value)
+        and reported it as the iteration, silently dropping the real one.
+        """
+        m = strform.map_column("tags_KAR2019_3013_2")
+        assert m["kind"] == "matched"
+        assert m["repeat_iterations"] == [("members", 2)]
+        assert m["choice_code"] == "KAR2019_3013"
+
+    def test_numeric_choice_codes_are_unchanged(self, strform):
+        # The shapes that already worked must keep their exact previous values,
+        # ints included -- this is what keeps the dictionary output stable.
+        assert strform.map_column("langs_1")["choice_code"] == 1
+        assert strform.map_column("langs__66")["choice_code"] == -66
+        assert strform.map_column("langs_01")["choice_code"] == "01"
+        inner = strform.map_column("tags_1_2")
+        assert inner["choice_code"] == 1
+        assert inner["repeat_iterations"] == [("members", 2)]
+
+    def test_unknowable_choice_index_boundary_abstains(self, strform):
+        """`tags_1_1_2`: depth 1, so `1_1` is left over as the choice value.
+
+        A real numeric choice value sanitises to exactly ONE token, so a
+        multi-token all-integer remainder means the choice/index boundary cannot
+        be recovered from the contract. Abstain and say so rather than emit a
+        fabricated out-of-domain code.
+        """
+        m = strform.map_column("tags_1_1_2")
+        assert m["choice_code"] is None
+        assert m["ambiguous_choice"] is True
+
+    def test_choice_index_recovers_the_original_value_and_label(self, tmp_path):
+        """With the choice universe supplied, the ORIGINAL value comes back.
+
+        The sanitised token is lossy (`AB-12` and `AB_12` both render `AB_12`),
+        so the parser stays dependency-free and the caller injects the universe
+        it already resolves for labels.
+        """
+        p = tmp_path / "strform.xml"
+        p.write_text(_XML_STRING_CHOICES, encoding="utf-8")
+        c = parse_contract(p)
+        c.choice_index = {"langs": {"AB_12": ("AB-12", "Alpha Beta 12")}}
+        m = c.map_column("langs_AB_12")
+        assert m["choice_code"] == "AB-12"
+        assert m["choice_label"] == "Alpha Beta 12"
+
+
+# Node selection must consider whether the leftover tokens COULD be integer
+# indices, not just how many there are. Both forms below come from adversarial
+# review of the first version of this mapper; each defeated it.
+_XML_HOMONYM = """<?xml version="1.0"?>
+<h:html xmlns="http://www.w3.org/2002/xforms"
+        xmlns:h="http://www.w3.org/1999/xhtml"
+        xmlns:jr="http://openrosa.org/javarosa">
+  <h:head><model>
+    <instance>
+      <f id="f" version="1">
+        <langs/>
+        <hh jr:template=""><langs/></hh>
+      </f>
+    </instance>
+    <bind nodeset="/f/langs" type="select"/>
+    <bind nodeset="/f/hh/langs" type="string"/>
+  </model></h:head>
+  <h:body>
+    <select ref="/f/langs"><label>L</label></select>
+    <group ref="/f/hh"><repeat nodeset="/f/hh">
+      <input ref="/f/hh/langs"><label>L2</label></input>
+    </repeat></group>
+  </h:body>
+</h:html>
+"""
+
+_XML_SUFFIX_NAME = """<?xml version="1.0"?>
+<h:html xmlns="http://www.w3.org/2002/xforms"
+        xmlns:h="http://www.w3.org/1999/xhtml"
+        xmlns:jr="http://openrosa.org/javarosa">
+  <h:head><model>
+    <instance>
+      <f id="f" version="1">
+        <x/>
+        <H jr:template=""><J jr:template=""><x_1/></J></H>
+      </f>
+    </instance>
+    <bind nodeset="/f/x" type="select"/>
+    <bind nodeset="/f/H/J/x_1" type="string"/>
+  </model></h:head>
+  <h:body>
+    <select ref="/f/x"><label>X</label></select>
+    <group ref="/f/H"><repeat nodeset="/f/H">
+      <group ref="/f/H/J"><repeat nodeset="/f/H/J">
+        <input ref="/f/H/J/x_1"><label>X1</label></input>
+      </repeat></group>
+    </repeat></group>
+  </h:body>
+</h:html>
+"""
+
+
+class TestNodeSelectionFeasibility:
+    """A candidate node needs enough trailing INTEGER tokens to own the column."""
+
+    def _c(self, tmp_path, xml):
+        p = tmp_path / "f.xml"
+        p.write_text(xml, encoding="utf-8")
+        return parse_contract(p)
+
+    def test_homonym_in_repeat_does_not_steal_a_string_choice(self, tmp_path):
+        """`langs_ES`: `ES` can never be an iteration index.
+
+        Scoring by token COUNT gave the depth-1 `hh/langs` a perfect fit and lost
+        the choice entirely -- reproducing, with a homonym present, the exact bug
+        the node-anchored rewrite was written to fix.
+        """
+        c = self._c(tmp_path, _XML_HOMONYM)
+        m = c.map_column("langs_ES")
+        assert m["node_path"] == "langs"
+        assert m["choice_code"] == "ES"
+        assert m.get("string_key") is None
+        assert c.map_column("langs_KAR2019")["choice_code"] == "KAR2019"
+
+    def test_exact_depth_fit_still_wins_when_the_token_is_an_integer(self, tmp_path):
+        # `langs_1` is genuinely ambiguous -- choice 1 of the depth-0 select, or
+        # iteration 1 of the depth-1 homonym. The exact-depth fit is preferred,
+        # which is the pre-existing behaviour and stays deliberate.
+        c = self._c(tmp_path, _XML_HOMONYM)
+        m = c.map_column("langs_1")
+        assert m["node_path"] == "hh/langs"
+        assert m["repeat_iterations"] == [("hh", 1)]
+
+    def test_suffix_shaped_node_name_does_not_steal_a_choice_binary(self, tmp_path):
+        """`x_1` cannot belong to a depth-2 node named `x_1`.
+
+        That node's columns always carry two trailing index tokens (`x_1_1_1`),
+        so bare `x_1` is the depth-0 select_multiple's choice-1 binary. Taking the
+        longest name match unconditionally got this wrong in both directions.
+        """
+        c = self._c(tmp_path, _XML_SUFFIX_NAME)
+        m = c.map_column("x_1")
+        assert m["node_path"] == "x"
+        assert m["choice_code"] == 1
+
+    def test_the_deep_node_still_wins_when_its_indices_are_present(self, tmp_path):
+        c = self._c(tmp_path, _XML_SUFFIX_NAME)
+        m = c.map_column("x_1_1_1")
+        assert m["node_path"] == "H/J/x_1"
+        assert m["repeat_iterations"] == [("H", 1), ("J", 1)]
+
+    def test_underscore_only_token_is_not_a_choice(self, tmp_path):
+        # `x___` was reporting a choice value of `__`. Sanitisation always leaves
+        # at least one alphanumeric, so an all-underscore token is not a value.
+        c = self._c(tmp_path, _XML_HOMONYM)
+        assert c.map_column("langs___")["choice_code"] is None
+        assert c.map_column("langs_")["choice_code"] is None
+        # A negative sentinel keeps its digits and must be unaffected.
+        assert c.map_column("langs__66")["choice_code"] == -66
