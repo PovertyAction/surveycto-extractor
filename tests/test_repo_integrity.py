@@ -48,6 +48,14 @@ PATH_RE = re.compile(
 )
 READABLE = {".py", ".md", ".toml", ".yaml", ".yml", ".json", ".cfg", ".txt", ".example"}
 
+# This file is a REGISTRY of deliberately-fake paths (the ablation probes, the
+# negative controls, the case-wrong example), so scanning it makes the check
+# report itself -- 8 findings, all from here. It passed locally only because the
+# file was still untracked when the suite ran, and failed the moment it was
+# committed: the third time in one sitting that tracked-vs-untracked changed a
+# result. Excluded by name, which is what the script this replaced also did.
+SELF = "tests/test_repo_integrity.py"
+
 
 def _tracked() -> list[str]:
     out = subprocess.run(
@@ -79,6 +87,8 @@ def _dead_references(extra: tuple[str, ...] = ()) -> dict[str, set[str]]:
     disk = _on_disk()
     dead: dict[str, set[str]] = {}
     for rel in [*_tracked(), *extra]:
+        if rel == SELF:
+            continue
         path = REPO_ROOT / rel
         if path.suffix not in READABLE or not path.is_file():
             continue
