@@ -1,8 +1,12 @@
 name: Pre-commit
 
 on:
+  # `dev` is the integration branch: feature work is gated there before a single
+  # dev -> main review. Without `dev` here, a PR into dev would get the ci.yml
+  # test matrix (its `pull_request:` is unfiltered) but skip the hooks entirely,
+  # which would make the gate we moved to dev weaker than the one on main.
   pull_request:
-    branches: [main]
+    branches: [main, dev]
   push:
     branches: [main, dev]
 
