@@ -1,6 +1,6 @@
 """End-to-end pipeline test against the bundled sample.
 
-Runs instrument-day (cli.extract: csv/json/sections/synthetic) and Phase 4
+Runs instrument-day (cli.extract: csv/json/sections) and Phase 4
 (cli.vardict) over the sample form + dataset in a hermetic tmp dir, asserting
 the real outputs. Nothing exercised this before, which is why Phase 4 shipped
 broken on a fresh env (#25). The pipeline modules read module-global config, so
@@ -105,7 +105,7 @@ def sample_env(tmp_path, monkeypatch):
 def test_instrument_day_and_phase4(sample_env, monkeypatch):
     out, main, cvd = sample_env
 
-    # Instrument day: csv + json + sections + synthetic.
+    # Instrument day: csv + json + sections.
     monkeypatch.setattr(sys, "argv", ["main.py", "--survey", "household_survey"])
     main.main()
 
@@ -115,7 +115,6 @@ def test_instrument_day_and_phase4(sample_env, monkeypatch):
     assert len(questions) == 236  # sample form ground truth
     assert (out / "household_survey_structure.txt").exists()
     assert (out / "sections").is_dir()
-    assert (out / "household_survey_synthetic.csv").exists()
 
     # Phase 4: variable dictionary (+xlsx). Must not crash (the #25 regression).
     monkeypatch.setattr(

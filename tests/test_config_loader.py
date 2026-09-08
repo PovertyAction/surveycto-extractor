@@ -1,8 +1,8 @@
 """Tests for the config loader: config.toml (primary) + config.py (fallback).
 
-Covers path resolution relative to the config dir, sentinel/geo_bbox coercion,
-the empty-table-is-override rule, baked-in column defaults, the legacy .py
-fallback, and the absent/broken cases.
+Covers path resolution relative to the config dir (single paths and path lists),
+sentinel coercion, the empty-table-is-override rule, baked-in column defaults,
+the legacy .py fallback, and the absent/broken cases.
 """
 
 import sys
@@ -21,14 +21,13 @@ sections_dir = "out/hh/sections"
 name = "HH"
 max_section_depth = 3
 external_choices_csv = ""
-pulldata_search_dirs = ["media", "forms"]
-geo_bbox = [-1.5, 4.2, 29.5, 35.0]
 
 [datasets.hh]
 data = "data/hh.dta"
 questions_json = "out/hh/hh_questions.json"
 output_json = "out/hh/hh_vd.json"
 output_xlsx = "out/hh/hh_vd.xlsx"
+xml_attachments_dirs = ["media", "forms"]
 skip_ord_dta = true
 sumstats_dir_stata = "${root}/out/hh"
 
@@ -80,18 +79,20 @@ def test_non_path_and_empty_string_fields(tmp_path):
     assert s["name"] == "HH"  # str untouched
     assert s["max_section_depth"] == 3  # int untouched
     assert s["external_choices_csv"] is None  # "" -> None
-    assert s["pulldata_search_dirs"] == [
-        tmp_path.resolve() / "media",
-        tmp_path.resolve() / "forms",
-    ]
     d = cfg.DATASETS["hh"]
     assert d["skip_ord_dta"] is True
     assert d["sumstats_dir_stata"] == "${root}/out/hh"  # Stata literal, NOT resolved
 
 
-def test_geo_bbox_is_a_tuple(tmp_path):
+def test_path_lists_resolved_relative_to_config_dir(tmp_path):
+    # The only remaining path-*list* key. Nothing covered this branch before --
+    # it was reached solely via the survey-level pulldata_search_dirs, which went
+    # with the synthetic generator.
     cfg = config_loader.load_config(path=_write(tmp_path, _TOML))
-    assert cfg.SURVEYS["hh"]["geo_bbox"] == (-1.5, 4.2, 29.5, 35.0)
+    assert cfg.DATASETS["hh"]["xml_attachments_dirs"] == [
+        tmp_path.resolve() / "media",
+        tmp_path.resolve() / "forms",
+    ]
 
 
 def test_sentinels_parsed(tmp_path):

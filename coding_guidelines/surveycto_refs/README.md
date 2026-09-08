@@ -21,7 +21,7 @@ SurveyCTO's documentation is © SurveyCTO. We treat these primers as derivative 
 
 1. Edits are allowed and expected. These are living primers — refine them when the converter hits an XLSForm pattern they don't cover.
 2. When you edit, bump the `STATUS: regenerated <YYYY-MM-DD>` line at the top of the file so reviewers can see how fresh the content is.
-3. If `xlsform.md` changes in a way that affects the field-type table, rerun `python generators/build_type_catalog.py` to regenerate `_type_catalog.json`.
+3. If `xlsform.md` changes in a way that affects the field-type table, rerun `uv run python src/surveycto_extractor/generators/build_type_catalog.py` to regenerate `_type_catalog.json`.
 
 ## Refresh procedure
 
@@ -30,4 +30,4 @@ There is no automated refresh — these are written by hand against the current 
 1. Read the relevant pages on <https://docs.surveycto.com/02-designing-forms/01-core-concepts/> (XLSForm columns, field types, expressions, constraints, relevance, groups/repeats).
 2. Update the primer text to match.
 3. Bump the `STATUS: regenerated <YYYY-MM-DD>` line.
-4. Rerun `python generators/build_type_catalog.py` if `xlsform.md`'s field-type table changed.
+4. Rerun `uv run python src/surveycto_extractor/generators/build_type_catalog.py` if `xlsform.md`'s field-type table changed.

@@ -14,7 +14,6 @@ output_dir        = "sample/output"
 sections_dir      = "sample/output/sections"
 name              = "Household Survey (IPA HFC sample)"
 max_section_depth = 3
-# geo_bbox = [-1.5, 4.2, 29.5, 35.0]   # a study-area box makes synthetic GPS realistic
 
 [datasets.household_survey]
 data           = "sample/household_survey.dta"

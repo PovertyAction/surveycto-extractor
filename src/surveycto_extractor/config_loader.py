@@ -70,10 +70,12 @@ _DEFAULT_EXCLUDED_TYPES = [
 _DEFAULT_SYSTEM_PREFIXES = ["instanceID", "instanceName", "KEY", "SET-OF-"]
 
 # Per-entry keys that hold filesystem paths (resolved relative to the config dir).
-# Everything else (name, max_section_depth, geo_bbox, skip_ord_dta, and the Stata
-# global literal sumstats_dir_stata) passes through untouched.
+# Everything else (name, max_section_depth, skip_ord_dta, and the Stata global
+# literal sumstats_dir_stata) passes through untouched.
 _SURVEY_PATH_KEYS = {"input_file", "external_choices_csv", "output_dir", "sections_dir"}
-_SURVEY_PATHLIST_KEYS = {"pulldata_search_dirs"}
+# No survey-level path *lists* remain; kept so the surveys and datasets calls to
+# _resolve_entry stay parallel (datasets still has xml_attachments_dirs).
+_SURVEY_PATHLIST_KEYS: set[str] = set()
 _DATASET_PATH_KEYS = {
     "data",
     "questions_json",
@@ -190,6 +192,4 @@ def _resolve_entry(base: Path, entry: dict, path_keys: set, pathlist_keys: set) 
             out[k] = [
                 _resolve_path(base, x) for x in out[k] if x is not None and x != ""
             ]
-    if isinstance(out.get("geo_bbox"), list):
-        out["geo_bbox"] = tuple(out["geo_bbox"])
     return out

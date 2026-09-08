@@ -40,11 +40,11 @@ just accept-deps 52 53        # only these PRs
 Each candidate — `main` as the baseline, every PR head, and a "combined" branch
 modelling the post-merge end state — gets its own throwaway git worktree and its
 own venv synced from *that candidate's* lockfile, then runs the same battery:
-lockfile resolves, lint, full test suite, the bundled sample end to end
-(fixed seed), and the MCP smoke test. Every output is reduced to counts and
-digests and diffed against the baseline, so a bump that changes nothing
-observable reports `PASS` and one that shifts a single synthetic cell reports
-`DRIFT`.
+lockfile resolves, lint, full test suite, the bundled sample end to end, and the
+MCP smoke test. Every output is reduced to counts and digests and diffed against
+the baseline, so a bump that changes nothing observable reports `PASS` and one
+that shifts a single cell of the variable dictionary reports `DRIFT`. No seed
+pinning is needed: the pipeline has no stochastic phase left.
 
 The engine is project-agnostic and deliberately lives **outside** this repo, so
 one copy serves every project instead of drifting per repo. What is committed here
