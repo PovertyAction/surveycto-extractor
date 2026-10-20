@@ -11,6 +11,7 @@ run: an always-on server must not crash a session.
 
 import os
 import sys
+from pathlib import Path
 
 from mcp.server.mcpserver import MCPServer
 
@@ -83,7 +84,10 @@ def _get_store() -> SurveyStore:
                 "[survey-expert] Config loaded but DATASETS is empty.",
                 file=sys.stderr,
             )
-        _store = SurveyStore(datasets)
+        # flow.json sits in [project] output_dir (surveycto-flow); a legacy
+        # config.py has no PROJECT.
+        out_dir = (getattr(cfg, "PROJECT", None) or {}).get("output_dir")
+        _store = SurveyStore(datasets, Path(out_dir) / "flow.json" if out_dir else None)
     return _store
 
 
@@ -261,6 +265,18 @@ def trace_lineage(name: str, survey: str = "") -> str:
     Use the survey parameter to filter to a specific survey (partial match).
     """
     return _get_store().trace_lineage(name, survey=survey or None)
+
+
+@server.tool()
+def get_project() -> str:
+    """Say what the project is about and how its surveys connect.
+
+    Returns the user's description, the entities they named (each with its key and
+    the surveys carrying it), the datasets linking the surveys (who publishes and
+    who reads each) and the candidate keys not yet named. Call it first in a
+    session; when the project is not described yet, it says how to set it up.
+    """
+    return _get_store().get_project()
 
 
 def main() -> None:

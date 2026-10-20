@@ -371,11 +371,18 @@ class SurveyStore:
 
     _RELOAD_DEBOUNCE_SECS = 2.0  # min seconds between file-change checks
 
-    def __init__(self, datasets_config: dict | None = None):
-        """Initialize the store from a DATASETS config and load all surveys."""
+    def __init__(self, datasets_config: dict | None = None, flow_path=None):
+        """Initialize the store from a DATASETS config and load all surveys, and
+        the project's flow.json when ``flow_path`` names one.
+        """
         self._config = datasets_config or {}
         self._mtimes: dict[str, float] = {}
         self._last_reload_check: float = 0.0
+        self._flow_path = Path(flow_path) if flow_path else None
+        self._flow: dict | None = None
+        self._joins: dict[tuple[str, str], list[dict]] = {}
+        self._flow_error: str | None = None
+        self._load_flow()
 
         # Per-survey loaded data
         self._vardicts: dict[str, dict] = {}
@@ -723,11 +730,49 @@ class SurveyStore:
         """Return the column a shown name stands for."""
         return self._unalias.get(label, {}).get(name, name)
 
+    def _load_flow(self):
+        """Load flow.json (surveycto-flow) and index its joins by reader field.
+
+        Surveys are named by the store's labels: a config key under the MCP, the
+        dictionary file's label in the shell. A file that does not parse keeps the
+        previous flow (the server must not crash) and says so in get_project.
+        """
+        if self._flow_path is None or not self._flow_path.exists():
+            self._flow, self._joins, self._flow_error = None, {}, None
+            if self._flow_path is not None:
+                self._mtimes[str(self._flow_path)] = 0.0
+            return
+        self._mtimes[str(self._flow_path)] = self._mtime(self._flow_path)
+        try:
+            flow = json.loads(self._flow_path.read_text(encoding="utf-8"))
+            label_of = {s["key"]: s["label"] for s in flow["surveys"]}
+            joins: dict[tuple[str, str], list[dict]] = {}
+            for join in flow["joins"]:
+                hop = {
+                    **join,
+                    "reader": self._label(join["reader"], label_of),
+                    "publisher": self._label(join["publisher"], label_of),
+                }
+                joins.setdefault((hop["reader"], hop["field"]), []).append(hop)
+        except (json.JSONDecodeError, OSError, KeyError) as exc:
+            self._flow_error = f"{self._flow_path} could not be read ({exc!r})"
+            print(f"[survey-expert] WARNING: {self._flow_error}", file=sys.stderr)
+            return
+        self._flow, self._joins, self._flow_error = flow, joins, None
+
+    def _label(self, key: str, label_of: dict[str, str]) -> str:
+        """Return the store label of a flow.json survey key."""
+        return key if key in self._config else label_of[key]
+
     def _check_reload(self):
         now = time.monotonic()
         if now - self._last_reload_check < self._RELOAD_DEBOUNCE_SECS:
             return
         self._last_reload_check = now
+        if self._flow_path is not None and self._mtime(self._flow_path) != (
+            self._mtimes.get(str(self._flow_path), 0.0)
+        ):
+            self._load_flow()
         for label, cfg in self._config.items():
             # Skip empty config values (Path("") is Path(".") -- statting the
             # cwd would trigger a spurious reload every check). (#29.2)
@@ -2003,15 +2048,22 @@ class SurveyStore:
         return "\n\n".join(results)
 
     def _lineage(
-        self, label: str, q: dict, depth: int, seen: set[str], lines: list[str]
+        self,
+        label: str,
+        q: dict,
+        depth: int,
+        seen: set[tuple[str, str]],
+        lines: list[str],
     ) -> None:
         """Append one step of ``q``'s lineage, then the steps of what it reads."""
         pad = "  " * depth
         name = q["variable_name"]
-        if name in seen:
+        if (label, name) in seen:
             lines.append(f"{pad}{name} (traced above)")
             return
-        seen.add(name)
+        seen.add((label, name))
+        # flow.json's joins: a pulled column is a field of the survey publishing it.
+        hops = self._joins.get((label, name), [])
         q_index = self._q_index.get(label, {})
         qtype = q["type"]
         source = q["data_source"]
@@ -2025,6 +2077,27 @@ class SurveyStore:
             lines.append(f"{pad}{name} ({qtype}) = {q['calculation']}")
             if source:
                 lines.append(f"{pad}  <- {_source_line(source)}")
+            for hop in hops:
+                publisher, column = hop["publisher"], hop["column"]
+                lines.append(
+                    f"{pad}  <- {hop['dataset']} is published by {publisher}: "
+                    f"column {column} is its field [{publisher}] {column}"
+                )
+                if publisher not in self._q_index:
+                    lines.append(f"{pad}    ({publisher} is not loaded)")
+                elif column not in self._q_index[publisher]:
+                    lines.append(
+                        f"{pad}    ({publisher} has no field {column} now; re-run "
+                        "surveycto-flow)"
+                    )
+                else:
+                    self._lineage(
+                        publisher,
+                        self._q_index[publisher][column],
+                        depth + 2,
+                        seen,
+                        lines,
+                    )
             reads = _REF.findall(q["calculation"])
         else:
             # A question someone answered; a search() select's choices are a
@@ -2065,6 +2138,70 @@ class SurveyStore:
                 lines.append(f"{pad}  {ref} (repeat group; its instances)")
             else:
                 lines.append(f"{pad}  {ref} (not a question in this form)")
+
+    def get_project(self) -> str:
+        """Say what the project is about: the user's description, the entities they
+        named (each with its key and the surveys carrying it), the datasets linking
+        the surveys, and the candidate keys not yet named. Reads flow.json.
+        """
+        self._check_reload()
+        flow = self._flow
+        if self._flow_error:
+            return f"flow.json is broken: {self._flow_error}; re-run surveycto-flow."
+        if flow is None:
+            return (
+                "No flow.json for this project. Ask the user what the project is "
+                "about and how its surveys connect; `surveycto-links` suggests the "
+                "[server_datasets.*] and [entities.*] tables from the forms. Once the "
+                "user confirms them in config.toml, `surveycto-flow` writes flow.json."
+            )
+        project = flow["project"]
+        lines = [
+            "About: "
+            + (
+                project["description"]
+                or "not described yet. Ask the user what the project is about; a "
+                "pre-analysis plan or protocol helps. It goes in the config's "
+                "[project] description."
+            ),
+            "",
+        ]
+        if project["entities"]:
+            lines.append("Entities (named by the user):")
+            for e in project["entities"]:
+                parent = f"; part of {e['parent']}" if e["parent"] else ""
+                lines.append(
+                    f"  {e['name']} ({', '.join(e['key'])}): {e['description']}"
+                    f"{parent}; in {', '.join(e['surveys'])}"
+                )
+        else:
+            lines.append(
+                "Entities: none named yet. Each goes in the config as "
+                "[entities.<name>] with its key, a description and an optional parent."
+            )
+        lines += ["", f"Surveys: {', '.join(s['key'] for s in flow['surveys'])}"]
+        for d in flow["datasets"]:
+            source = (
+                f"published by {d['published_by']}, key {', '.join(d['key'])}"
+                if d["published_by"]
+                else "an attachment (its rows come from outside the project)"
+            )
+            lines.append(
+                f"  dataset {d['id']}: {source}; read by {', '.join(d['read_by'])}"
+            )
+        named = {c for e in project["entities"] for c in e["key"]}
+        candidates = [k for k in flow["keys"] if k["column"] not in named]
+        if candidates:
+            lines += ["", "Candidate keys (from the forms, most widely carried first):"]
+            for k in candidates:
+                what = []
+                if k["key_of"]:
+                    what.append(f"key of {', '.join(k['key_of'])}")
+                if k["matched_by"]:
+                    what.append(f"matched by {k['matched_by']} pulldata() reads")
+                where = ", ".join(k["surveys"]) or "no survey field"
+                lines.append(f"  {k['column']}: {'; '.join(what)}; in {where}")
+        return "\n".join(lines)
 
     def get_repeat_structure(self, survey: str | None = None) -> str:
         """Return the repeat group topology tree for one or more surveys."""
@@ -2121,26 +2258,45 @@ def discover(root: Path) -> dict[str, dict]:
     dictionaries with one key raise, since either could be the stale one.
     """
     found: dict[str, dict] = {}
+    for path in _files(root, "_variable_dictionary.json"):
+        label = path.name.removesuffix("_variable_dictionary.json")
+        if label in found:
+            raise SystemExit(
+                f"two dictionaries for survey {label!r}: "
+                f"{found[label]['output_json']} and {path}; pass --dir to the "
+                "current outputs"
+            )
+        found[label] = {
+            "output_json": path,
+            "questions_json": path.with_name(f"{label}_questions.json"),
+        }
+    return found
+
+
+def find_flow(root: Path) -> Path | None:
+    """Return the project's flow.json under ``root`` (surveycto-flow), or None;
+    two raise, as two dictionaries for one survey do.
+    """
+    flows = [p for p in _files(root, "flow.json") if p.name == "flow.json"]
+    if len(flows) > 1:
+        raise SystemExit(
+            f"two flow.json files: {flows[0]} and {flows[1]}; pass --dir to the "
+            "current outputs"
+        )
+    return flows[0] if flows else None
+
+
+def _files(root: Path, suffix: str):
+    """Yield the files under ``root`` whose name ends with ``suffix``, skipping
+    hidden folders and ``node_modules``.
+    """
     for folder, dirs, names in os.walk(root):
         dirs[:] = sorted(
             d for d in dirs if not d.startswith(".") and d not in _SKIP_DIRS
         )
         for name in sorted(names):
-            if not name.endswith("_variable_dictionary.json"):
-                continue
-            path = Path(folder) / name
-            label = name.removesuffix("_variable_dictionary.json")
-            if label in found:
-                raise SystemExit(
-                    f"two dictionaries for survey {label!r}: "
-                    f"{found[label]['output_json']} and {path}; pass --dir to the "
-                    "current outputs"
-                )
-            found[label] = {
-                "output_json": path,
-                "questions_json": path.with_name(f"{label}_questions.json"),
-            }
-    return found
+            if name.endswith(suffix):
+                yield Path(folder) / name
 
 
 def main(argv: list[str] | None = None, store: SurveyStore | None = None) -> None:
@@ -2175,13 +2331,14 @@ def main(argv: list[str] | None = None, store: SurveyStore | None = None) -> Non
     lineage.add_argument("name")
     sub.add_parser("repeats", help="repeat groups: nesting, counts, suffixes")
     sub.add_parser("info", help="overview of the loaded surveys")
+    sub.add_parser("project", help="what the project is about; how surveys connect")
     args = parser.parse_args(argv)
 
     if store is None:
         datasets = discover(args.dir)
         if not datasets:
             parser.error(f"no *_variable_dictionary.json under {args.dir.resolve()}")
-        store = SurveyStore(datasets)
+        store = SurveyStore(datasets, find_flow(args.dir))
     survey = args.survey
     if args.command == "var" and len(args.names) == 1:
         out = store.lookup_var(args.names[0], context=args.context, survey=survey)
@@ -2201,6 +2358,8 @@ def main(argv: list[str] | None = None, store: SurveyStore | None = None) -> Non
         out = store.trace_lineage(args.name, survey=survey)
     elif args.command == "repeats":
         out = store.get_repeat_structure(survey=survey)
+    elif args.command == "project":
+        out = store.get_project()
     else:
         out = store.get_info()
     # Question text is often not ASCII; a Windows console defaults to cp1252.

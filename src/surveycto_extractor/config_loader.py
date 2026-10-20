@@ -175,7 +175,43 @@ def _load_toml(p: Path):
 
     ns.PII = PiiConfig.from_table(data.get("pii") or {})
 
+    # Multi-form relationships the user declares (surveycto-links suggests them):
+    # [project], [server_datasets.<id>] and [entities.<name>].
+    project = data.get("project") or {}
+    _check_keys("[project]", project, {"name", "output_dir", "description"})
+    ns.PROJECT = {
+        "name": project.get("name"),
+        "output_dir": _resolve_path(base, project.get("output_dir")),
+        "description": project.get("description"),
+    }
+    ns.SERVER_DATASETS = {}
+    for dataset, entry in (data.get("server_datasets") or {}).items():
+        _check_keys(f"[server_datasets.{dataset}]", entry, {"published_by", "key"})
+        ns.SERVER_DATASETS[dataset] = {
+            "published_by": entry["published_by"],
+            "key": _columns(entry["key"]),
+        }
+    ns.ENTITIES = {}
+    for name, entry in (data.get("entities") or {}).items():
+        _check_keys(f"[entities.{name}]", entry, {"key", "description", "parent"})
+        ns.ENTITIES[name] = {
+            "key": _columns(entry["key"]),
+            "description": entry.get("description", ""),
+            "parent": entry.get("parent"),
+        }
+
     return ns
+
+
+def _check_keys(table: str, entry: dict, allowed: set[str]) -> None:
+    unknown = set(entry) - allowed
+    if unknown:
+        raise ValueError(f"unknown key(s) in {table}: {', '.join(sorted(unknown))}")
+
+
+def _columns(key) -> list[str]:
+    """Return a key as a list: one column, or the columns that identify a row together."""
+    return [key] if isinstance(key, str) else list(key)
 
 
 def pii_config(cfg) -> PiiConfig:

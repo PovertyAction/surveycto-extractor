@@ -36,6 +36,8 @@ surveycto-init          = "surveycto_extractor.cli.init:main"
 surveycto-skill         = "surveycto_extractor.cli.skill:main"
 surveycto-mcp           = "surveycto_extractor.mcp_server.survey_server:main"
 surveycto-survey        = "surveycto_extractor.survey:main"
+surveycto-links         = "surveycto_extractor.flow:links_main"
+surveycto-flow          = "surveycto_extractor.flow:flow_main"
 
 [build-system]
 requires = ["hatchling"]

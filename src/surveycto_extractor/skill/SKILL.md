@@ -23,11 +23,25 @@ files sit next to the `.dta` (`[datasets.KEY] data`):
 
 ## Start with what the project is about
 
-Before answering questions that depend on the study, ask the user what the project is
-about and for the documents that describe it (a pre-analysis plan, a protocol, a
-codebook). Remind them to share only documents they are allowed to share with you.
-Keep their description, in their words, in the analysis project's `CLAUDE.md`, so the
-next session starts from it.
+Call `get_project` (`<S> project`) first. When it says the project is not described,
+or has no entities or links, set them up with the user before answering questions
+that depend on them:
+
+1. Ask for what describes the study: a pre-analysis plan, a protocol, a codebook.
+   Remind them to share only documents they are allowed to share with you.
+2. Ask the user to say in a few sentences what the project is about. Use their words
+   for `[project] description`; do not write one from the questions.
+3. Run `uv run surveycto-links`: it lists every dataset a form reads, the survey that
+   carries its columns, the columns it is matched on, and fields shared across
+   surveys, as candidate `[server_datasets.*]` and `[entities.*]` tables. Which form
+   publishes a dataset is a server setting no form records, so show each candidate to
+   the user and ask them to confirm or correct it; give each entity a one-line
+   description from the documents.
+4. Write the confirmed tables into `config.toml`, run `uv run surveycto-flow` (it
+   checks each key identifies one row and each pulled column is a field of its
+   publisher), and ask the user to reconnect the MCP so `get_project` serves them.
+5. Add one line to the analysis project's `CLAUDE.md` pointing at `get_project` and
+   the config, so the description and entities keep one home.
 
 ## How to look things up
 
@@ -58,6 +72,7 @@ Every MCP tool takes an optional `survey` (a partial match on the survey key, as
 | Where a value comes from, back to the questions someone answered | `trace_lineage(name)` | `lineage NAME` |
 | Repeat groups: nesting, count variables, max iterations, Stata suffixes | `get_repeat_structure()` | `repeats` |
 | Survey overview | `get_survey_info()` | `info` |
+| What the project is about: description, entities, datasets linking the surveys, candidate keys | `get_project()` | `project` |
 
 `context=N` adds why the question is asked and the N questions around it in form
 order. Read the JSON files directly only for what the tools do not show, such as a
@@ -79,8 +94,9 @@ spaCy models the `[pii]` config names. Rerun it after upgrading the toolkit.
   are handled together.
 - Where a value comes from: `trace_lineage`. It follows a calculate to the fields its
   formula reads and a `pulldata()` or `search()` to the dataset column and the field
-  it is matched on, down to answered questions; a dataset's own rows come from outside
-  the form.
+  it is matched on, down to answered questions. When the dataset is published by
+  another survey of the project (flow.json), it crosses into that survey's field; an
+  attachment's rows come from outside the project.
 - A section as the enumerator met it: `get_group`, with the group's condition, the
   enclosing groups' and each subgroup's.
 - Reshaping, merging or aggregating across levels: `get_repeat_structure` first. It
