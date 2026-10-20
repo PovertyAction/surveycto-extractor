@@ -22,3 +22,8 @@ output_json    = "sample/output/household_survey_variable_dictionary.json"
 output_xlsx    = "sample/output/household_survey_variable_dictionary.xlsx"
 # The sample form uses 3-digit sentinels (-999/-888/...) in its choice lists,
 # which are project data (not recode targets), so no [sentinels] override is set.
+
+# The small English model the tests use; a real project lists its survey
+# languages here (see the [pii] block in the config template).
+[pii]
+languages = { en = "en_core_web_sm" }

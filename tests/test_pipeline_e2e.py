@@ -17,6 +17,8 @@ import types
 
 import pytest
 
+from surveycto_extractor.pii import PiiConfig
+
 
 def _sample_dir():
     from pathlib import Path
@@ -89,6 +91,7 @@ def sample_env(tmp_path, monkeypatch):
         "phonenumber",
     ]
     stub.SYSTEM_PREFIXES = ["instanceID", "instanceName", "KEY", "SET-OF-"]
+    stub.PII = PiiConfig(languages={"en": "en_core_web_sm"})
     monkeypatch.setitem(sys.modules, "config", stub)
 
     from surveycto_extractor.cli import extract as main

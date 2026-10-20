@@ -9,6 +9,7 @@ executed). A legacy **``config.py``** is still honoured as a fallback so existin
 projects keep working during the transition. Either way the loader returns an
 object exposing the same attributes consumers read: ``SURVEYS``, ``DATASETS``,
 ``SURVEY_COLUMNS``, ``CHOICES_COLUMNS``, ``EXCLUDED_TYPES``, ``SYSTEM_PREFIXES``,
+``PII`` (a ``PiiConfig``; a legacy ``config.py`` without one gets the defaults),
 and optionally ``SENTINEL_MEANINGS`` / ``SENTINEL_SCAN_ONLY``.
 
 Because TOML is declarative it cannot compute paths (no ``Path(__file__).parent``),
@@ -33,6 +34,8 @@ import os
 import sys
 from pathlib import Path
 from types import SimpleNamespace
+
+from surveycto_extractor.pii import PiiConfig
 
 try:  # Python 3.11+
     import tomllib
@@ -170,7 +173,16 @@ def _load_toml(p: Path):
         if scan_only is not None:
             ns.SENTINEL_SCAN_ONLY = [int(x) for x in scan_only]
 
+    ns.PII = PiiConfig.from_table(data.get("pii") or {})
+
     return ns
+
+
+def pii_config(cfg) -> PiiConfig:
+    """Return the config's ``[pii]`` settings; a legacy ``config.py`` without a ``PII``
+    attribute gets the defaults.
+    """
+    return getattr(cfg, "PII", PiiConfig())
 
 
 def _resolve_path(base: Path, value):

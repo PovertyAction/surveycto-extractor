@@ -23,7 +23,7 @@ jobs:
           cache-dependency-glob: "uv.lock"
       - name: Sync (all extras)
         run: uv sync --locked --all-extras
-      # Run pre-commit via uv (pre-commit is in the dev extra). Avoids
+      # Run pre-commit via uv (pre-commit is in the dev group). Avoids
       # pre-commit/action's `python -m pip install`, which fails against the
       # pip-less uv venv that setup-uv activates.
       - name: Run pre-commit

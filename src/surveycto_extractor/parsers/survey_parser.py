@@ -21,6 +21,8 @@ class SurveyParser:
         self.survey_df = None
         self.choices_df = None
         self.settings_df = None
+        # Choice lists the external CSV added: read from data, so screened for PII.
+        self.external_lists: set[str] = set()
 
     @staticmethod
     def _normalize_string_cells(df: pd.DataFrame) -> pd.DataFrame:
@@ -229,7 +231,7 @@ class SurveyParser:
         if new_choices.empty:
             return xlsx_choices
 
-        # Concatenate
+        self.external_lists = set(new_choices["list_name"])
         merged = pd.concat([xlsx_choices, new_choices], ignore_index=True)
 
         return merged

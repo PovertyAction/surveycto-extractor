@@ -12,19 +12,28 @@ dependencies = [
     "pyreadstat>=1.2.0,<2",
     "pyarrow>=15.0.0",
     "networkx>=3.0,<4",
+    # PII classification. spaCy models are installed per project (see pii.py);
+    # model wheels declare no dependencies, so spaCy is pinned to the 3.8 models.
+    "presidio-analyzer>=2.2,<3",
+    "spacy>=3.8,<3.9",
     "tomli>=2.0.1; python_version < '3.11'",  # config.toml parsing (tomllib is stdlib on 3.11+)
 ]
 
 [project.optional-dependencies]
 # MCP server (survey-expert). Installed on demand: `uv sync --extra mcp`.
 mcp = ["mcp[cli]>=2.0.0,<3"]
-dev = ["pytest", "ruff", "codespell", "pre-commit"]
+
+[dependency-groups]
+# en-core-web-sm: the small English model the PII tests and the sample run use.
+dev = ["pytest", "ruff", "codespell", "pre-commit", "en-core-web-sm"]
+
+[tool.uv.sources]
+en-core-web-sm = { url = "https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl" }
 
 [project.scripts]
 surveycto-extract       = "surveycto_extractor.cli.extract:main"
 surveycto-vardict       = "surveycto_extractor.cli.vardict:main"
 surveycto-summary-stats = "surveycto_extractor.cli.summary_stats:main"
-surveycto-enrich        = "surveycto_extractor.cli.enrich:main"
 surveycto-init          = "surveycto_extractor.cli.init:main"
 
 [build-system]
@@ -93,6 +102,7 @@ builtin = "clear,rare,informal,usage,code,names"
 # missings=(stats plural), fallow=(uncultivated land, a plot status),
 # unparseable=(valid variant), master=(master seed RNG / "master" questions file),
 # fo=form_order local, iff=(if-and-only-if), falsy=(programming term),
-# ws=(openpyxl worksheet), stdio=(standard I/O).
-ignore-words-list = "jupyter,ipa,anc,lits,missings,fallow,unparseable,master,fo,iff,falsy,ws,stdio,fillin,lets"
+# ws=(openpyxl worksheet), stdio=(standard I/O), whitelist/blacklist=(the [pii]
+# config keys, shared with surveycto-python-dict).
+ignore-words-list = "jupyter,ipa,anc,lits,missings,fallow,unparseable,master,fo,iff,falsy,ws,stdio,fillin,lets,whitelist,whitelisted,blacklist,blacklisted"
 skip = "uv.lock,*.dta,*.parquet,*.xlsx"

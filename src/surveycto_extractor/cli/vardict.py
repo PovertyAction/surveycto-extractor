@@ -20,7 +20,7 @@ Usage:
 Config:
     Edit config.toml to add survey entries to the DATASETS dict. Add an optional
     "xml_path" to a dataset to enable the deterministic XML-contract overlay
-    (see surveycto-enrich).
+    (see cli/enrich.py).
 """
 
 import argparse
@@ -29,6 +29,7 @@ import json
 import re
 import sys
 import time
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -62,7 +63,11 @@ except ImportError:
 # config.py is per-project and gitignored; discovered from the working directory
 # (see config_loader). None/empty when absent (tests, CI) so the module still
 # imports; main() fails with a clear message if DATASETS is empty when run.
+from surveycto_extractor import pii
 from surveycto_extractor.config_loader import load_config
+from surveycto_extractor.config_loader import pii_config as pii_config_of
+from surveycto_extractor.parsers.survey_parser import SurveyParser
+from surveycto_extractor.parsers.xml_contract import pulldata_columns
 from surveycto_extractor.transformers.logic_converter import LogicConverter
 
 config = load_config()
@@ -1241,8 +1246,6 @@ def create_variable_dictionary(
             "non_null_count": non_null_count,
             "missing_rate": mm.get("missing_rate") if mm else None,
             "is_all_missing": mm.get("is_all_missing", False) if mm else False,
-            "data_min": mm.get("min") if mm else None,
-            "data_max": mm.get("max") if mm else None,
             "original_variable_name": metadata["original_variable_name"],
             "question_text": metadata["question_text"],
             "question_type": metadata["question_type"],
@@ -1604,21 +1607,8 @@ def export_dictionary(
         if row.get("is_all_missing"):
             var_metadata["is_all_missing"] = True
 
-        # Data range from parquet metadata — only for types where range is
-        # informative (not select_one/select_multiple whose range is just
-        # choice codes or 0/1 binary indicators)
-        qtype = row.get("question_type")
-        d_min = row.get("data_min")
-        d_max = row.get("data_max")
-        if d_min is not None and d_max is not None and qtype in _MINMAX_QUESTION_TYPES:
-            try:
-                # Guard against NaN (float columns with all-NaN produce NaN stats)
-                if not (isinstance(d_min, float) and np.isnan(d_min)):
-                    var_metadata["data_min"] = d_min
-                    var_metadata["data_max"] = d_max
-            except (TypeError, ValueError):
-                var_metadata["data_min"] = d_min
-                var_metadata["data_max"] = d_max
+        # data_min/data_max are written by apply_pii, only where the PII gate
+        # shows values, so a run that stops before it leaves no range anywhere.
 
         variables_dict[var_name] = var_metadata
 
@@ -2080,6 +2070,131 @@ def build_variable_graph(
     return output_path
 
 
+def _screen_search_lists(variables: dict, questions: list, pii_config, analyzer):
+    """Withhold the ``search()`` choice lists enrich read from the form's CSVs.
+
+    A list is screened once per question, from the choices enrich resolved and the
+    labels the contract decoded per column. A withheld question's columns go back
+    to the XLSForm's literal choices, lose ``contract.choice_label`` and say why in
+    ``survey.choices_withheld``.
+    """
+    literal = {q["variable_name"]: q.get("choices") for q in questions}
+    by_question: dict[str, list[str]] = {}
+    for col, entry in variables.items():
+        source = (entry.get("contract") or {}).get("data_source") or {}
+        if source.get("kind") == "search":
+            name = entry["survey"]["original_variable_name"]
+            by_question.setdefault(name, []).append(col)
+    for name, cols in by_question.items():
+        choices = []
+        for col in cols:
+            survey, contract = variables[col]["survey"], variables[col]["contract"]
+            if survey.get("choice_list") == contract["data_source"]["dataset"]:
+                choices = survey["choices"]
+        decoded = [
+            {
+                "value": str(variables[c]["contract"]["choice_code"]),
+                "label": variables[c]["contract"]["choice_label"],
+            }
+            for c in cols
+            if variables[c]["contract"].get("choice_label") is not None
+        ]
+        # One entry per choice: a select_multiple decodes the same choice in
+        # every binary and repeat instance.
+        unique = {(c["value"], c["label"]): c for c in [*choices, *decoded]}
+        reasons = pii.withhold_reasons(
+            {name}, list(unique.values()), pii_config, analyzer
+        )
+        if not reasons:
+            continue
+        print(f"  [PII] withheld search() list of {name}: {', '.join(reasons)}")
+        for col in cols:
+            variables[col]["survey"]["choices"] = literal.get(name)
+            variables[col]["survey"]["choices_withheld"] = reasons
+            variables[col]["contract"].pop("choice_label", None)
+
+
+def _survey_of(dataset_name: str) -> dict:
+    """Return the dataset's [surveys] entry: the PII rules read its XLSForm."""
+    surveys = getattr(config, "SURVEYS", {})
+    if dataset_name not in surveys or not surveys[dataset_name].get("input_file"):
+        raise ValueError(
+            f"[surveys.{dataset_name}] input_file is not set: the PII rules read the "
+            "XLSForm's publishable column and metadata rows"
+        )
+    return surveys[dataset_name]
+
+
+def apply_pii(
+    dataset_name: str,
+    cfg: dict,
+    questions: list,
+    minmax: dict,
+    pq_path,
+    pii_config,
+    analyzer,
+    enriched: dict | None,
+) -> set[str]:
+    """Classify every column, gate the dictionary's values, write it and the review.
+
+    Takes the dictionary enrich returned unwritten (``enriched``), else the one
+    export_dictionary wrote, so nothing unscreened reaches the disk: screens
+    ``search()`` lists, adds each column's ``pii`` block and ``summary.pii``, adds
+    ``data_min``/``data_max`` only where ``pii.shows_values``, then writes the
+    dictionary and ``<stem>_pii_review.xlsx`` (the only file holding flagged values)
+    next to the ``.dta``. Returns the names a ``[pii]`` list may use here.
+    """
+    survey = _survey_of(dataset_name)
+    parser = SurveyParser(survey["input_file"], survey.get("external_choices_csv"))
+    survey_df, _ = parser.load()
+    form = pii.rule_questions(survey_df, questions, parser.external_lists)
+
+    dict_path = Path(cfg["output_json"])
+    vardict = (
+        enriched
+        if enriched is not None
+        else json.loads(dict_path.read_text(encoding="utf-8"))
+    )
+    variables = vardict["variables"]
+    _screen_search_lists(variables, questions, pii_config, analyzer)
+
+    table = _pq.read_table(pq_path)
+    blocks = pii.classify(table, vardict, form, pii_config, analyzer)
+    for col, block in blocks.items():
+        entry = variables[col]
+        entry["pii"] = block
+        mm = minmax.get(col) or {}
+        d_min, d_max = mm.get("min"), mm.get("max")
+        # Range only where informative (not select codes or 0/1 binaries), and
+        # not NaN (an all-NaN float column has NaN stats).
+        if (
+            pii.shows_values(block["status"])
+            and (entry.get("survey") or {}).get("type") in _MINMAX_QUESTION_TYPES
+            and d_min is not None
+            and d_max is not None
+            and not (isinstance(d_min, float) and np.isnan(d_min))
+        ):
+            entry["data_min"] = d_min
+            entry["data_max"] = d_max
+    vardict["summary"]["pii"] = dict(Counter(b["status"] for b in blocks.values()))
+    dict_path.write_text(
+        json.dumps(vardict, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+
+    dta_path = Path(cfg["data"])
+    review = pii.write_pii_review(
+        table, vardict, dta_path.with_name(f"{dta_path.stem}_pii_review.xlsx")
+    )
+    counts = ", ".join(f"{k}={v}" for k, v in sorted(vardict["summary"]["pii"].items()))
+    print(f"  PII: {counts}")
+    print(f"  Flagged values for review: {review}")
+    return (
+        {q["variable_name"] for q in form}
+        | set(variables)
+        | {c for q in form for c in pulldata_columns(q["calculation"])}
+    )
+
+
 def main():
     """Run the vardict CLI entry point."""
     parser = argparse.ArgumentParser(
@@ -2152,6 +2267,16 @@ def main():
     print("Create Variable Dictionaries")
     print("=" * 70)
 
+    # Built once: loading the spaCy models takes seconds.
+    pii_settings = pii_config_of(config)
+    analyzer = (
+        None
+        if pii_settings.no_personal_data or not datasets_to_process
+        else pii.build_analyzer(pii_settings)
+    )
+    # Warned once for the run: a name may belong to another dataset's form.
+    known_names: set[str] = set()
+
     for dataset_name in datasets_to_process:
         print(f"\n{'=' * 70}")
         print(f"Processing {dataset_name.upper()}")
@@ -2159,6 +2284,9 @@ def main():
         df, questions, cfg, meta, pq_path, ext_missing_counts, minmax = load_data(
             dataset_name
         )
+        # The PII pass needs both; checked before any output is written.
+        _survey_of(dataset_name)
+        pii.key_column(list(df.columns))
         var_dict = create_variable_dictionary(
             df, questions, dataset_name, ext_missing_counts, minmax, meta=meta
         )
@@ -2169,15 +2297,27 @@ def main():
         # No-op (and dictionary unchanged) when no XML is available — fuzzy matching
         # from export_dictionary() stays the default. Runs before the graph build so
         # the graph reflects XML-corrected variable names.
+        enriched = None
         if not args.no_enrich_xml:
             try:
                 from surveycto_extractor.cli.enrich import enrich_dataset
 
-                enrich_dataset(dataset_name, cfg)
+                enriched = enrich_dataset(dataset_name, cfg)
             except Exception as exc:  # noqa: BLE001 — enrichment is additive, never fatal
                 print(
                     f"[WARN] XML-contract enrichment skipped for {dataset_name}: {exc}"
                 )
+
+        known_names |= apply_pii(
+            dataset_name,
+            cfg,
+            questions,
+            minmax,
+            pq_path,
+            pii_settings,
+            analyzer,
+            enriched,
+        )
 
         # Build variable relationship graph (needs the JSON dict, not the DataFrame)
         vardict_path = Path(cfg["output_json"])
@@ -2196,6 +2336,10 @@ def main():
             xlsx_path = Path(str(cfg["output_json"]).replace(".json", ".xlsx"))
             print(f"\nExporting XLSX: {xlsx_path}")
             XLSXExporter().export(cfg["output_json"], xlsx_path)
+
+    # Only a run over every dataset knows every name the lists may use.
+    if set(datasets_to_process) == set(DATASETS):
+        pii.warn_unknown_names(pii_settings, known_names)
 
     if validate:
         print(f"\n{'=' * 70}")
