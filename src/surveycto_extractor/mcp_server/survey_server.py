@@ -279,6 +279,18 @@ def get_project() -> str:
     return _get_store().get_project()
 
 
+@server.tool()
+def get_structure_db(schema: str = "", table: str = "") -> str:
+    """Map <project>.duckdb: a summary of its schemas, one schema, or one table.
+
+    ``schema`` is a survey's key (its submissions and repeat views, its description
+    tables and its joins to other surveys) or ``main`` (the project tables from
+    flow.json); ``table`` lists one table's columns. Call it before writing SQL
+    against the database.
+    """
+    return _get_store().get_structure_db(schema or None, table or None)
+
+
 def main() -> None:
     """Entry point for ``surveycto-mcp``: load the project and serve over stdio."""
     _get_store()

@@ -89,6 +89,152 @@ def _pii_line(entry: dict) -> str | None:
     return f"{block['status']} ({', '.join(block['basis'])})"
 
 
+# SurveyCTO writes a character a Stata name cannot hold as "_" (-99 -> __99). A
+# copy of xml_contract.sanitize_choice_value: this module stays standard library
+# only, since the skill ships it alone as search_survey.py.
+_NAME_UNSAFE = re.compile(r"[^A-Za-z0-9_]")
+
+
+def coded_aliases(vardict: dict, questions: list[dict]) -> dict[str, str]:
+    """Return the name each column of a withheld select_multiple is shown by.
+
+    Its binaries are named by its codes, so the columns of its n-th code (order of
+    first appearance) are shown as ``<question>_<n>`` plus their instance numbers
+    (``staff_<2>_1_3``), as surveycto-python-dict does. The data keeps every column
+    under its own name.
+    """
+    withheld = {q["variable_name"] for q in questions if q.get("choices_withheld")} | {
+        e["survey"]["original_variable_name"]
+        for e in vardict.values()
+        if (e.get("survey") or {}).get("choices_withheld")
+    }
+    alias: dict[str, str] = {}
+    positions: dict[str, dict] = {}
+    for var_name, entry in vardict.items():
+        survey_data = entry.get("survey") or {}
+        question = survey_data.get("original_variable_name")
+        if (
+            question not in withheld
+            or survey_data.get("type") != "select_multiple"
+            or var_name == question
+        ):
+            continue
+        choice = survey_data.get("choices")
+        code = (entry.get("contract") or {}).get("choice_code")
+        if code is None:
+            code = choice.get("value") if isinstance(choice, dict) else var_name
+        seen = positions.setdefault(question, {})
+        n = seen.setdefault(code, len(seen) + 1)
+        stem = f"{question}_{_NAME_UNSAFE.sub('_', str(code))}"
+        ri = entry.get("repeat_iteration")
+        rest = (
+            var_name[len(stem) :]
+            if var_name.startswith(stem)
+            else (f"_{ri}" if ri else "")
+        )
+        alias[var_name] = f"{question}_<{n}>{rest}"
+    return alias
+
+
+# ---------------------------------------------------------------------------
+# <project>_db.json: the map of <project>.duckdb that surveycto-duckdb writes
+# ---------------------------------------------------------------------------
+
+_LISTED = 20
+_DB_PII = (
+    "-- Every view holds every column; dictionary.pii_status says which may hold "
+    "personal data (a long view's column: the strictest status of the dictionary "
+    "rows with its view_name and view_column). Use them in scripts; print only "
+    "their counts and KEYs."
+)
+
+
+def _db_schema(name: str) -> str:
+    return name.split(".", 1)[0] if "." in name else "main"
+
+
+def render_structure(
+    project: str, objects: list[dict], all_columns: bool = False, listed: int = _LISTED
+) -> str:
+    """Render ``<project>_db.json`` objects as commented SQL: grain, key, joins and
+    columns. An object with more than ``listed`` columns lists that many unless
+    ``all_columns``; a column named by a withheld code shows its ``shown_as``.
+    """
+    lines = [
+        f"-- {project}.duckdb: every table and view, what one row is, its key and "
+        "joins.",
+        _DB_PII,
+    ]
+    for o in objects:
+        lines += ["", f"-- {o['kind']} {o['name']}: {o['grain']}"]
+        lines.append(f"--   key: {', '.join(o['key'])}")
+        lines += [f"--   join: {j}" for j in o["joins"]]
+        columns = [f"{c.get('shown_as', c['name'])} {c['type']}" for c in o["columns"]]
+        if len(columns) > listed and not all_columns:
+            table = o["name"].split(".", 1)[-1]
+            lines.append(
+                f"--   columns ({len(columns)}): "
+                + "".join(f"{c}, " for c in columns[:listed])
+                + f"... get_structure_db('{_db_schema(o['name'])}', '{table}') "
+                "lists all"
+            )
+        else:
+            lines.append(f"--   columns ({len(columns)}): " + ", ".join(columns))
+        if any("shown_as" in c for c in o["columns"]):
+            lines.append(
+                "--   <q>_<n>: a column named by the n-th code of the withheld list of "
+                "select <q>, whose codes are not shown; dictionary.column_name has its "
+                "name"
+            )
+    return "\n".join(lines)
+
+
+def render_structure_summary(project: str, objects: list[dict]) -> str:
+    """Summarise ``<project>_db.json``: the project tables in full, a line per
+    survey schema.
+    """
+    schemas: dict[str, list[dict]] = {}
+    for o in objects:
+        schemas.setdefault(_db_schema(o["name"]), []).append(o)
+    lines = [
+        f"-- {project}.duckdb: {len(objects)} tables and views in {len(schemas)} "
+        "schemas. get_structure_db(<schema>) maps one schema in full.",
+        _DB_PII,
+        "",
+        "-- schema main: the project, from flow.json",
+    ]
+    lines += render_structure(project, schemas.pop("main")).splitlines()[2:]
+    for schema, members in schemas.items():
+        width = next(
+            len(o["columns"]) for o in members if o["name"].endswith(".submissions")
+        )
+        repeats = [o for o in members if o["kind"] == "view" and len(o["key"]) > 1]
+        tables = [o for o in members if o["kind"] == "table"]
+        deepest = max((len(o["key"]) - 1 for o in repeats), default=0)
+        lines += [
+            "",
+            f"-- schema {schema}: submissions ({width} columns); repeat views: "
+            f"{len(repeats)}, nested up to {deepest} deep; description tables: "
+            f"{len(tables)}",
+        ]
+    return "\n".join(lines)
+
+
+def render_structure_schema(project: str, objects: list[dict], schema: str) -> str:
+    """Render one schema of ``<project>_db.json``; for a survey, add its rows of the
+    project's ``joins``. Columns are counted; a table's are listed by
+    ``get_structure_db(schema, table)``.
+    """
+    picked = [o for o in objects if _db_schema(o["name"]) == schema]
+    if schema != "main":
+        quoted = '"' + schema.replace('"', '""') + '".'
+        joins = next(o for o in objects if o["name"] == "joins")
+        mine = [j for j in joins["joins"] if quoted in j]
+        if mine:
+            picked.append({**joins, "joins": mine})
+    return render_structure(project, picked, listed=0)
+
+
 # ---------------------------------------------------------------------------
 # Variable graph (the node-link JSON surveycto-vardict writes)
 # ---------------------------------------------------------------------------
@@ -649,37 +795,8 @@ class SurveyStore:
                 q_order[vn] = i
         self._q_order[label] = q_order
 
-        # A withheld select_multiple's binaries carry its codes in their names;
-        # show them as <question>_<n> (n: order of first appearance) plus the
-        # repeat instance, as surveycto-python-dict does.
-        withheld = {
-            q["variable_name"]
-            for q in self._questions.get(label, [])
-            if q.get("choices_withheld")
-        } | {
-            e["survey"]["original_variable_name"]
-            for e in vardict.values()
-            if (e.get("survey") or {}).get("choices_withheld")
-        }
-        alias: dict[str, str] = {}
-        positions: dict[str, dict] = {}
-        for var_name, entry in vardict.items():
-            survey_data = entry.get("survey") or {}
-            question = survey_data.get("original_variable_name")
-            if (
-                question not in withheld
-                or survey_data.get("type") != "select_multiple"
-                or var_name == question
-            ):
-                continue
-            choice = survey_data.get("choices")
-            code = (entry.get("contract") or {}).get("choice_code") or (
-                choice.get("value") if isinstance(choice, dict) else var_name
-            )
-            seen = positions.setdefault(question, {})
-            n = seen.setdefault(code, len(seen) + 1)
-            ri = entry.get("repeat_iteration")
-            alias[var_name] = f"{question}_<{n}>" + (f"_{ri}" if ri else "")
+        # A withheld select_multiple's binaries carry its codes in their names.
+        alias = coded_aliases(vardict, self._questions.get(label, []))
         self._alias[label] = alias
         self._unalias[label] = {v: k for k, v in alias.items()}
 
@@ -2139,6 +2256,49 @@ class SurveyStore:
             else:
                 lines.append(f"{pad}  {ref} (not a question in this form)")
 
+    def get_structure_db(
+        self, schema: str | None = None, table: str | None = None
+    ) -> str:
+        """Map ``<project>.duckdb``: a summary of its schemas, one schema (a survey's
+        views and tables with its joins to other surveys, or ``main``), or one table
+        with every column. Reads ``<project>_db.json`` beside flow.json.
+        """
+        self._check_reload()
+        if self._flow_error:
+            return f"flow.json is broken: {self._flow_error}; re-run surveycto-flow."
+        if self._flow is None:
+            return (
+                "No flow.json for this project, so no database: run surveycto-flow, "
+                "then surveycto-duckdb."
+            )
+        project = self._flow["project"]["name"]
+        if not project:
+            return (
+                "No [project] name in config.toml: set it, then run surveycto-flow "
+                "and surveycto-duckdb."
+            )
+        path = self._flow_path.parent / f"{project}_db.json"
+        if not path.exists():
+            return f"No {path.name}: run surveycto-duckdb to build {project}.duckdb."
+        objects = json.loads(path.read_text(encoding="utf-8"))
+        if schema is None and table is not None:
+            return f"No schema given for table {table!r}: name its schema too."
+        if schema is None:
+            return render_structure_summary(project, objects)
+        schemas = sorted({_db_schema(o["name"]) for o in objects})
+        if schema not in schemas:
+            return (
+                f"No schema {schema!r} in {project}.duckdb; schemas: "
+                f"{', '.join(schemas)}"
+            )
+        if table is None:
+            return render_structure_schema(project, objects, schema)
+        name = table if schema == "main" else f"{schema}.{table}"
+        picked = [o for o in objects if o["name"] == name]
+        if not picked:
+            return f"No table {name!r} in {project}.duckdb."
+        return render_structure(project, picked, all_columns=True)
+
     def get_project(self) -> str:
         """Say what the project is about: the user's description, the entities they
         named (each with its key and the surveys carrying it), the datasets linking
@@ -2332,6 +2492,9 @@ def main(argv: list[str] | None = None, store: SurveyStore | None = None) -> Non
     sub.add_parser("repeats", help="repeat groups: nesting, counts, suffixes")
     sub.add_parser("info", help="overview of the loaded surveys")
     sub.add_parser("project", help="what the project is about; how surveys connect")
+    db = sub.add_parser("db", help="map of <project>.duckdb: summary, schema, table")
+    db.add_argument("schema", nargs="?")
+    db.add_argument("table", nargs="?")
     args = parser.parse_args(argv)
 
     if store is None:
@@ -2360,6 +2523,8 @@ def main(argv: list[str] | None = None, store: SurveyStore | None = None) -> Non
         out = store.get_repeat_structure(survey=survey)
     elif args.command == "project":
         out = store.get_project()
+    elif args.command == "db":
+        out = store.get_structure_db(args.schema, args.table)
     else:
         out = store.get_info()
     # Question text is often not ASCII; a Windows console defaults to cp1252.

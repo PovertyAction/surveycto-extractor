@@ -48,6 +48,7 @@ All take an optional `survey` (partial match on the survey key).
 | `trace_lineage` | Where a value comes from: calculates, pulldata/search, answered questions | `lineage NAME` |
 | `get_repeat_structure` | Repeat nesting, counts, suffixes, join keys | `repeats` |
 | `get_project` | What the project is about; datasets linking the surveys; entities and candidate keys | `project` |
+| `get_structure_db` | Map of `<project>.duckdb`: schemas, a schema, or a table's columns | `db [SCHEMA [TABLE]]` |
 | `get_survey_info` | Overview of the loaded surveys | `info` |
 
 Flagged PII columns (`contains_pii`, `may_contain_pii`) show counts, never values,

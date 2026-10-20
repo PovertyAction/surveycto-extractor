@@ -18,6 +18,8 @@ dependencies = [
     "spacy>=3.8,<3.9",
     # The survey-expert MCP server, the skill's first way in.
     "mcp[cli]>=2.0.0,<3",
+    # <project>.duckdb: views over the parquets, for people and agents.
+    "duckdb>=1.1,<2",
     "tomli>=2.0.1; python_version < '3.11'",  # config.toml parsing (tomllib is stdlib on 3.11+)
 ]
 
@@ -38,6 +40,7 @@ surveycto-mcp           = "surveycto_extractor.mcp_server.survey_server:main"
 surveycto-survey        = "surveycto_extractor.survey:main"
 surveycto-links         = "surveycto_extractor.flow:links_main"
 surveycto-flow          = "surveycto_extractor.flow:flow_main"
+surveycto-duckdb        = "surveycto_extractor.database:main"
 
 [build-system]
 requires = ["hatchling"]
