@@ -428,6 +428,12 @@ def load_data(dataset_name: str):
                 f"scans cannot handle Categorical dtypes."
             )
 
+    # Stata stores a missing string as "": make it missing, so the counts, the
+    # missing rates, the sidecar and the long tables read it as missing.
+    for col in df.columns:
+        if df[col].dtype == object or isinstance(df[col].dtype, pd.StringDtype):
+            df[col] = df[col].mask(df[col].eq(""))
+
     # Write parquet sidecar for fast columnar access downstream
     pq_path = _write_parquet_sidecar(df, dta_path)
 

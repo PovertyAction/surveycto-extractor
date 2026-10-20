@@ -2,9 +2,12 @@
 synthetic project (members, each with jobs), and placement edge cases by hand.
 """
 
+import json
 import math
 
 import pandas as pd
+import pyarrow as pa
+import pyarrow.compute as pc
 import pyarrow.parquet as pq
 import pytest
 from test_pii import _run
@@ -240,3 +243,20 @@ def test_a_stale_questions_json_is_refused():
     stale = [{"variable_name": "hh_count", "type": "repeat_count", "group_path": []}]
     with pytest.raises(SystemExit, match="rerun surveycto-extract"):
         repeat_parents(stale)
+
+
+def test_stata_empty_strings_are_missing(tmp_path, monkeypatch, analyzer):
+    # Stata stores a missing string as "": the dictionary counts it as missing, and
+    # the sidecar and the long tables hold it as null, one missing code throughout.
+    cfg, _ = _run(tmp_path, monkeypatch, analyzer)
+    variables = json.loads(cfg.DATASETS["synth"]["output_json"].read_text("utf-8"))[
+        "variables"
+    ]
+    entry = variables["member_name_2"]  # "James Wilson", "", ""
+    assert (entry["non_null_count"], entry["missing_rate"]) == (1, 0.6667)
+    data = tmp_path / "data"
+    for path in [data / "synth.parquet", *(data / "synth_long").glob("*.parquet")]:
+        table = pq.read_table(path)
+        for name in table.column_names:
+            if pa.types.is_string(table[name].type):
+                assert not pc.any(pc.equal(table[name], "")).as_py(), (path.name, name)
