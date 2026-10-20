@@ -678,7 +678,7 @@ def write_pii_review(table: pa.Table, vardict: dict, path: Path) -> Path:
     """Write every flagged column to ``path``: a Columns sheet and a Values sheet with
     one row per value (``KEY``, column, value), which filters by column in Excel.
     This is the only output that holds flagged values; it sits next to the ``.dta``.
-    More values than a sheet holds raise.
+    Values past a sheet's rows go on in ``Values 2``, ``Values 3``, ...
     """
     variables = vardict["variables"]
     flagged = [
@@ -702,11 +702,6 @@ def write_pii_review(table: pa.Table, vardict: dict, path: Path) -> Path:
         for key, v in zip(keys, table.column(c).to_pylist(), strict=True)
         if v is not None and v != ""
     ]
-    if len(values) >= _EXCEL_ROWS:
-        raise ValueError(
-            f"{path.name}: {len(values)} flagged values, more than a sheet's "
-            f"{_EXCEL_ROWS - 1} rows; clear columns in [pii] whitelist and rebuild"
-        )
     from openpyxl import Workbook
     from openpyxl.cell import WriteOnlyCell
     from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
@@ -720,6 +715,9 @@ def write_pii_review(table: pa.Table, vardict: dict, path: Path) -> Path:
         out.data_type = "s"
         return out
 
+    # A sheet holds _EXCEL_ROWS rows, the header included.
+    per_sheet = _EXCEL_ROWS - 1
+    chunks = [values[i : i + per_sheet] for i in range(0, len(values), per_sheet)]
     workbook = Workbook(write_only=True)
     for title, header, rows in (
         (
@@ -727,7 +725,10 @@ def write_pii_review(table: pa.Table, vardict: dict, path: Path) -> Path:
             ["column", "label", "status", "basis", "hit_rows", "non_null"],
             columns,
         ),
-        ("Values", ["KEY", "column", "value"], values),
+        *(
+            ("Values" if i == 0 else f"Values {i + 1}", ["KEY", "column", "value"], c)
+            for i, c in enumerate(chunks or [[]])
+        ),
     ):
         sheet = workbook.create_sheet(title)
         sheet.append(header)

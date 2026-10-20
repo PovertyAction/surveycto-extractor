@@ -434,3 +434,29 @@ def test_review_keeps_odd_text_as_text(project):
         )
     ]
     assert "=Lucy Gray" in values
+
+
+def test_review_spills_past_a_sheet(tmp_path, monkeypatch):
+    import pyarrow as pa
+
+    monkeypatch.setattr(pii, "_EXCEL_ROWS", 3)  # two values per sheet
+    table = pa.table({"key": ["k1", "k2", "k3"], "name": ["A", "B", "C"]})
+    entry = {
+        "pii": {"status": "contains_pii", "basis": ["reviewed"]},
+        "non_null_count": 3,
+    }
+    vardict = {
+        "variables": {
+            "key": {**entry, "pii": {"status": "whitelisted", "basis": ["system"]}},
+            "name": entry,
+        }
+    }
+    path = pii.write_pii_review(table, vardict, tmp_path / "r.xlsx")
+    book = load_workbook(path, read_only=True)
+    assert book.sheetnames == ["Columns", "Values", "Values 2"]
+    rows = [
+        r
+        for s in ("Values", "Values 2")
+        for r in book[s].iter_rows(min_row=2, values_only=True)
+    ]
+    assert [r[2] for r in rows] == ["A", "B", "C"]
