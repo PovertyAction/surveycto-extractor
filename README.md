@@ -243,6 +243,17 @@ inside a repeat is counted over that repeat's long table. A dataset left undecla
 attachment. With `flow.json` in `[project] output_dir`, the agent tools describe
 the project (`get_project`) and trace a value across forms (`trace_lineage`).
 
+```bash
+uv run surveycto-duckdb   # <output_dir>/<name>.duckdb and its map, <name>_db.json
+```
+
+`surveycto-duckdb` writes one database for the project. Per survey there is a
+`submissions` view, a view per long repeat table, and `dictionary` (with
+`pii_status`), `questions`, `choices` and `edges` tables; `main` holds the surveys,
+datasets, reads and joins from `flow.json`. Views read the parquet files, so the
+database holds no response values; rerun it after `surveycto-vardict`. The map
+(`get_structure_db`) gives each table's grain, key and joins.
+
 ### 5. Query the dictionary from your AI agent
 
 This is where the project's AI-native design pays off — see the next section.
@@ -314,6 +325,7 @@ directory (override with `SURVEYCTO_CONFIG`). Every tool takes an optional
 | Where a value comes from | `trace_lineage(name)` | `lineage NAME` |
 | Repeat group hierarchy | `get_repeat_structure()` | `repeats` |
 | What the project is about, how its surveys connect | `get_project()` | `project` |
+| The project database's tables, views, keys and joins | `get_structure_db(schema, table)` | `db [SCHEMA [TABLE]]` |
 | Survey overview | `get_survey_info()` | `info` |
 
 When the MCP server is not connected, the same answers come from the skill's

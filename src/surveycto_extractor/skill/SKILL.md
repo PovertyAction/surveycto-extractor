@@ -20,6 +20,8 @@ files sit next to the `.dta` (`[datasets.KEY] data`):
 | `<stem>.parquet` | next to the `.dta` | The submissions, every column. Scripts use it; flagged columns' values stay out of what you print (below) |
 | `<stem>_long/<repeat>.parquet` | next to the `.dta` | One table per repeat: a row per instance that has any value, keyed by `KEY` and a `<repeat>_index` per enclosing repeat, outer first (`key, member_index, job_index`); columns lose the instance suffix (`member_age_2` -> `member_age`). A question whose columns do not all carry their instance numbers stays only in `<stem>.parquet` |
 | `<stem>_pii_review.xlsx` | next to the `.dta` | Every value of a flagged column, for the people cleaning the data to verify the flags. **Never open it** |
+| `<project>.duckdb` | `[project] output_dir` | One database for the project (`surveycto-duckdb`): per survey a `submissions` view, a view per long repeat table and the `dictionary` (with `pii_status`), `questions`, `choices` and `edges` tables; in `main`, the surveys, datasets, reads and joins from `flow.json`. Views read the parquets; the file holds no response values |
+| `<project>_db.json` / `_db.sql` | `[project] output_dir` | The database's map: every table and view, what one row is, its key, joins and columns. Read it through `get_structure_db` |
 | `<key>_summary_stats.do` | next to the `.dta` | `tabstat` per numeric variable grouped by skip condition; flagged columns get no stats |
 
 ## Start with what the project is about
@@ -40,7 +42,8 @@ that depend on them:
    description from the documents.
 4. Write the confirmed tables into `config.toml`, run `uv run surveycto-flow` (it
    checks each key identifies one row and each pulled column is a field of its
-   publisher), and ask the user to reconnect the MCP so `get_project` serves them.
+   publisher), then `uv run surveycto-duckdb` for the project database, and ask the
+   user to reconnect the MCP so `get_project` and `get_structure_db` serve them.
 5. Add one line to the analysis project's `CLAUDE.md` pointing at `get_project` and
    the config, so the description and entities keep one home.
 
@@ -74,6 +77,7 @@ Every MCP tool takes an optional `survey` (a partial match on the survey key, as
 | Repeat groups: nesting, count variables, max iterations, Stata suffixes | `get_repeat_structure()` | `repeats` |
 | Survey overview | `get_survey_info()` | `info` |
 | What the project is about: description, entities, datasets linking the surveys, candidate keys | `get_project()` | `project` |
+| The project database before writing SQL: its schemas, one schema, or one table's columns | `get_structure_db(schema, table)` | `db [SCHEMA [TABLE]]` |
 
 `context=N` adds why the question is asked and the N questions around it in form
 order. Read the JSON files directly only for what the tools do not show, such as a

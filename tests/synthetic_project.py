@@ -280,4 +280,7 @@ def build(root: Path, pii: PiiConfig) -> types.ModuleType:
     ]
     config.SYSTEM_PREFIXES = ["instanceID", "instanceName", "KEY", "SET-OF-"]
     config.PII = pii
+    config.PROJECT = {"name": "synthetic", "output_dir": out, "description": None}
+    config.SERVER_DATASETS = {}
+    config.ENTITIES = {}
     return config
