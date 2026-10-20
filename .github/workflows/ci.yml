@@ -50,8 +50,8 @@ jobs:
         with:
           enable-cache: true
 
-      - name: Sync environment from lockfile (dev group + mcp extra)
-        run: uv sync --frozen --python "${{ matrix.python-version }}" --extra mcp
+      - name: Sync environment from lockfile (dev group)
+        run: uv sync --frozen --python "${{ matrix.python-version }}"
 
       - name: Pin minimum pandas
         if: matrix.pandas == 'minimum'

@@ -6,8 +6,8 @@ PATH` with that candidate's dependency set installed and `SURVEYCTO_CONFIG`
 pointed at the sample config. It writes a JSON object the harness diffs against
 the `main` baseline.
 
-The optional `mcp` extra is the part of this toolkit no file comparison can
-cover: the server has to *import* and answer. Importing is the check that matters
+The MCP server is the part of this toolkit no file comparison can cover: the
+server has to *import* and answer. Importing is the check that matters
 most for an `mcp` bump, because the SDK has already relocated its server class
 once -- 1.x's `mcp.server.fastmcp.FastMCP` became 2.x's
 `mcp.server.mcpserver.MCPServer` -- so a version range that looks harmless in a

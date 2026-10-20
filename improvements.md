@@ -10,15 +10,6 @@ string columns show as `string: -98(32)`. After destring they become numeric
 label is slightly misleading. Could run a second raw_int pass on destringed
 columns, or re-label string sentinels that match known codes.
 
-## 2. search_survey.py: sentinels for --search and --choice-list
-
-**File:** `skill/search_survey.py`
-
-Sentinel info only displays for `--var` lookups (goes through vardict).
-`--search` and `--choice-list` go straight to questions.json and skip the
-vardict, so no sentinel data. Could do a vardict lookup when the variable
-name is known from the question match.
-
 ## 3. find_question_for_variable: second-level cache
 
 **File:** `create_variable_dictionaries.py`
@@ -55,17 +46,3 @@ are missing.
 `WARNING: N choice(s) in list 'X' have empty values — check source XLSX for
 unresolved formulas.` This won't fix the source but prevents silent
 propagation into downstream docs and MCP lookups.
-
-## 6. shares_choices edge filtering
-
-**File:** `create_variable_dictionaries.py`
-
-`shares_choices` edges from universal choice lists (yesnodk, yesno, yesnoref)
-connect large portions of the survey into uninformative clusters. In the
-sample survey, the top 4 yes/no lists account for 87 of 236 variables.
-
-Could filter by variable count per list (e.g., only create edges when <= 5
-variables share a list) or auto-detect universal lists by threshold. The
-useful signal is rare/specific lists (crop_type shared by 3 vars, transport
-shared by 3 vars). Needs testing on g2r to see if agents are confused by the
-noise or just ignore it.

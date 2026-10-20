@@ -6,7 +6,6 @@ next to the .dta is the one place they go.
 """
 
 import dataclasses
-import importlib.util
 import json
 import sys
 import warnings
@@ -18,7 +17,7 @@ import synthetic_project
 from conftest import SM
 from openpyxl import load_workbook
 
-from surveycto_extractor import pii
+from surveycto_extractor import pii, survey
 from surveycto_extractor.pii import (
     MissingSpacyModel,
     PiiConfig,
@@ -27,7 +26,6 @@ from surveycto_extractor.pii import (
     withhold_reasons,
 )
 
-REPO = Path(__file__).resolve().parents[1]
 CONFIG = dataclasses.replace(SM, blacklist=("dob", "secret_num"))
 
 
@@ -45,13 +43,6 @@ class Spy:
     def analyze(self, text, language, **kwargs):
         self.texts.append(text)
         return self.inner.analyze(text=text, language=language, **kwargs)
-
-
-def _load(name, path):
-    spec = importlib.util.spec_from_file_location(name, path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
 
 
 def _run(tmp_path, monkeypatch, analyzer, config=CONFIG):
@@ -179,9 +170,13 @@ def test_whitelist_by_stata_name_shows_the_range(tmp_path, monkeypatch, analyzer
     assert variables["gpsaccuracy"]["pii"]["status"] == "whitelisted"
 
 
-def _leaked(texts):
+def _leaked(texts, canaries=synthetic_project.CANARIES):
     seen = "\n".join(t for t in texts if t)
-    return [c for c in synthetic_project.CANARIES if c in seen]
+    return [c for c in canaries if c in seen]
+
+
+# Tool and shell answers: every canary, and the withheld codes in column names.
+ANSWER_CANARIES = synthetic_project.CANARIES + synthetic_project.CODE_CANARIES
 
 
 def test_no_flagged_value_reaches_an_agent(capsys, project):
@@ -197,28 +192,31 @@ def test_no_flagged_value_reaches_an_agent(capsys, project):
             for sheet in load_workbook(path, read_only=True).worksheets:
                 for row in sheet.iter_rows(values_only=True):
                     texts.append(" ".join(str(v) for v in row if v is not None))
+    pipeline = capsys.readouterr()
+    assert "PII: " in pipeline.out  # the pipeline's own output was captured
+    assert _leaked([*texts, pipeline.out, pipeline.err]) == []
 
-    script = _load("search_survey_canary", REPO / "skill/search_survey.py")
-    out = cfg.SURVEYS["synth"]["output_dir"]
-    script.SURVEY_FILES = {
-        "synth": {
-            "questions": out / "synth_questions.json",
-            "vardict": out / "synth_variable_dictionary.json",
-        }
-    }
-    for name in synthetic_project.ROWS:
-        script.search_var(name, context=3)
-        script.gate_chain(name)
-        script.variable_neighborhood(name, depth=2)
+    # The skill's search_survey.py is survey.py; its shell front end, every command.
+    shell = ["--dir", str(cfg.SURVEYS["synth"]["output_dir"])]
+    names = list(synthetic_project.ROWS)
+    survey.main([*shell, "info"])  # discovers the folder itself
+    store = survey.SurveyStore(survey.discover(cfg.SURVEYS["synth"]["output_dir"]))
+    for name in names:
+        survey.main([*shell, "var", name, "--context", "3"], store=store)
+        survey.main([*shell, "gates", name], store=store)
+        survey.main([*shell, "neighborhood", name, "--depth", "2"], store=store)
+    survey.main([*shell, "var", *names], store=store)
     for words in ("name", "phone", "household roster"):
-        script.search_text(words)
-    for list_name in ("yesno", "hh", "roster"):
-        script.search_choice_list(list_name)
-    script.repeat_tree()
+        survey.main([*shell, "search", words], store=store)
+    for list_name in ("yesno", "hh", "roster", "staff"):
+        survey.main([*shell, "choices", list_name], store=store)
+    survey.main([*shell, "search", "staff", "visit"], store=store)
+    survey.main([*shell, "repeats"], store=store)
+    survey.main([*shell, "info"], store=store)
 
-    captured = capsys.readouterr()
-    assert "PII: " in captured.out  # the pipeline's own output was captured
-    assert _leaked([*texts, captured.out, captured.err]) == []
+    answers = capsys.readouterr()
+    assert "staff_multi_<1>" in answers.out
+    assert _leaked([answers.out, answers.err], ANSWER_CANARIES) == []
     # The review workbook next to the .dta is where they go.
     review = Path(cfg.DATASETS["synth"]["data"]).with_name("synth_pii_review.xlsx")
     values = {
@@ -230,28 +228,25 @@ def test_no_flagged_value_reaches_an_agent(capsys, project):
     assert {"Robert Brown", "dev-2"} <= values
 
 
-def test_no_flagged_value_in_mcp_answers(project):
-    pytest.importorskip("mcp")
+def test_no_flagged_value_in_mcp_answers(project, monkeypatch):
+    from surveycto_extractor.mcp_server import survey_server as mcp
+
     cfg, _ = project
+    monkeypatch.setattr(mcp, "_store", survey.SurveyStore(cfg.DATASETS))
     names = list(synthetic_project.ROWS)
-    server = _load(
-        "survey_server_canary",
-        REPO / "src/surveycto_extractor/mcp_server/survey_server.py",
-    )
-    store = server.SurveyStore(cfg.DATASETS)
     texts = []
     for name in names:
-        texts.append(store.lookup_var(name, context=3))
-        texts.append(store.get_gate_chain(name))
-        texts.append(store.get_neighborhood(name, depth=2))
-    texts.append(store.lookup_vars_batch(names))
-    texts.append(store.get_info())
-    texts.append(store.get_repeat_structure())
-    for words in ("name", "phone", "household roster", "date of birth"):
-        texts.append(store.search(words))
-    for list_name in ("yesno", "hh", "roster"):
-        texts.append(store.get_choice_list(list_name))
-    assert _leaked(texts) == []
+        texts.append(mcp.lookup_variable(name, context=3))
+        texts.append(mcp.get_gate_chain(name))
+        texts.append(mcp.get_variable_neighborhood(name, depth=2))
+    texts.append(mcp.lookup_variables(names))
+    texts.append(mcp.get_survey_info())
+    texts.append(mcp.get_repeat_structure())
+    for words in ("name", "phone", "household roster", "date of birth", "staff"):
+        texts.append(mcp.search_questions(words))
+    for list_name in ("yesno", "hh", "roster", "staff"):
+        texts.append(mcp.get_choice_list(list_name))
+    assert _leaked(texts, ANSWER_CANARIES) == []
 
 
 def test_search_list_withheld_with_its_decoded_labels(analyzer):

@@ -56,7 +56,7 @@ and run the toolkit to:
 - Generate a variable dictionary mapping every Stata variable to its source
   question, skip logic, choices, observed range, sentinel counts, missing rates.
 - Generate a relationship graph (calculation dependencies, gating chains,
-  repeat siblings, shared choice domains).
+  constraints, repeat siblings).
 - Generate a summary-stats do-file grouped by skip condition.
 - Query the dictionary from your AI agent during cleaning via the
   `survey-expert` skill or the MCP server.
@@ -183,8 +183,9 @@ and the agent tools; their values go to `<dta stem>_pii_review.xlsx` next to the
 `.dta` for the team to verify, and choice lists read from data (the external
 choices CSV, `search()` CSVs) are withheld when they hold personal data. Review
 the workbook and settle disagreements in `[pii] whitelist` / `blacklist` (see the
-config template). Presidio needs a spaCy model per survey language, installed in
-your project with the `uv add <model wheel URL>` line the first run prints.
+config template). Presidio needs a spaCy model per survey language:
+`uv run surveycto-skill` installs the ones `[pii]` names, or run the
+`uv add <model wheel URL>` line the first run prints.
 
 ### 2. Use the variable graph
 
@@ -197,15 +198,14 @@ directed graph capturing how variables relate (requires `networkx`, which
 - `group_gated_by` — A's parent group's relevance references B.
 - `constrained_by` — A's constraint references B.
 - `repeat_sibling` — A and B are inside the same repeat group.
-- `shares_choices` — A and B draw from the same choice list.
 
-Use it interactively via the skill's `--neighborhood VAR` flag or the MCP
-server's `get_variable_neighborhood` tool. Typical questions answered in one
+Use it interactively via the MCP server's `get_variable_neighborhood` tool or
+the skill's `neighborhood VAR` command. Typical questions answered in one
 hop:
 
 - "What depends on `crpsale_qty`?"
 - "Why might `income_1` be missing for some observations?"
-- "What variables share the `yesnodk` choice list?"
+- "Which fields feed this calculate, and which questions does it gate?"
 
 ### 3. Generate the summary-stats do-file
 
@@ -232,106 +232,92 @@ This is where the project's AI-native design pays off — see the next section.
 
 The variable dictionary, expression evaluator, and relationship graph are
 designed so a Claude Code (or similar) session can find the right metadata in
-one tool call rather than asking you to dig through a spreadsheet. Two
-surfaces sit on top of the same JSON outputs.
+one tool call rather than asking you to dig through a spreadsheet. A
+`survey-expert` skill and MCP server sit on top of the same JSON outputs, and
+one installer sets both up.
 
-### Survey-expert skill
+### Install the survey-expert skill
 
-The `skill/` directory contains a Claude Code skill that gives your agent
-direct lookup access. It is the primary way to query survey metadata during
-cleaning — faster and more reliable than asking the agent to reason from a
-spreadsheet or a fragment of the form.
+From your project directory (the one with `config.toml`):
+
+```bash
+uv run surveycto-skill
+```
+
+This does three things:
+
+1. Writes the skill into `.claude/skills/survey-expert/`: `SKILL.md`, the
+   cleaning guides under `references/`, and `search_survey.py`.
+2. Adds the `survey-expert` server (`uv run surveycto-mcp`) to `.mcp.json`,
+   creating the file if needed.
+3. Installs the spaCy models your `[pii]` config names, so the PII pass runs.
+
+Rerun it after upgrading the toolkit so the skill matches the outputs. Nothing
+needs filling in: the skill is project-agnostic and reads whatever surveys the
+docs folders hold. It refuses to run inside this repository itself; to try the
+MCP server on the sample here, `cp .mcp.json.example .mcp.json`.
 
 The skill answers questions like:
 
-- "What is the skip condition for `hh_size`?" → `--var`
-- "What are the valid choices for `asset_type`?" → `--choice-list`
-- "Which variables capture crop sales?" → `--search` (TF-IDF ranked,
+- "What is the skip condition for `hh_size`?" → `lookup_variable`
+- "What are the valid choices for `asset_type`?" → `get_choice_list`
+- "Which variables capture crop sales?" → `search_questions` (TF-IDF ranked,
   natural-language queries work)
-- "Why is `income_1` missing for some observations?" → `--gate-chain`
-- "What's the observed range of `hh_age`?" → shown automatically under
-  `data_range`
-- "What depends on `crpsale_qty`?" → `--neighborhood`
+- "Why is `income_1` missing for some observations?" → `get_gate_chain`
+- "What depends on `crpsale_qty`?" → `get_variable_neighborhood`
 
-Setup:
+It also tells the agent how to treat PII: a flagged column is used in scripts
+but its values never reach the conversation (counts and `KEY`s only), and the
+`_pii_review.xlsx` workbook stays with the team.
 
-1. Copy `skill/SKILL.md` → `.claude/skills/survey-expert/SKILL.md`.
-2. Copy `skill/search_survey.py` → `.claude/skills/survey-expert/search_survey.py`.
-3. In `search_survey.py`, update `DOCS` to point at your
-   `survey_documentation/` directory.
-4. In `SKILL.md`, fill in the `[TODO: ...]` placeholders (project name,
-   survey names, variable counts, file paths).
+### MCP server and shell fallback
 
-The skill auto-discovers all surveys under `DOCS` by scanning for
-`*_variable_dictionary.json` files.
+`uv run surveycto-mcp` serves the lookups over MCP, keeping the dictionaries in
+memory for sessions with heavy query volume (10–50+ lookups per cleaning
+module). `mcp` is a core dependency, so a plain `uv sync` installs it. The
+server discovers `config.toml` (or a legacy `config.py`) in the current working
+directory (override with `SURVEYCTO_CONFIG`). Every tool takes an optional
+`survey` (a partial match on the survey key):
 
-### MCP server (optional, higher-performance)
-
-The `mcp_server/` directory contains an optional MCP server that keeps variable
-dictionaries in memory for instant lookups — the high-performance alternative
-for sessions with heavy query volume (10–50+ lookups per cleaning module).
-
-| | `skill/search_survey.py` | `surveycto_extractor.mcp_server` |
+| Need | MCP tool | Shell command |
 |---|---|---|
-| Loads JSON | Every call | Once at startup |
-| Dependencies | None (stdlib) | `mcp[cli]` |
-| Setup | Copy to `.claude/skills/` | Add to `.mcp.json` |
-| Best for | Occasional lookups | Cleaning sessions (10–50+ lookups) |
-| Batch queries | Not supported | `lookup_variables` tool |
-| Gate chain | `--gate-chain` flag | `get_gate_chain` tool |
-| Neighborhood | `--neighborhood` flag | `get_variable_neighborhood` tool |
-| Data range | Shown in output | Shown in lookup tools |
-| Multi-survey filter | `--survey KEY` flag | `survey` parameter on every tool |
+| One variable in full | `lookup_variable(name, context=0)` | `var NAME [--context N]` |
+| A batch of variables | `lookup_variables(names)` | `var NAME [NAME ...]` |
+| Find questions by keyword | `search_questions(query, max_results=20)` | `search WORDS [--max N]` |
+| A choice list and its users | `get_choice_list(list_name)` | `choices LIST` |
+| Why a question is asked | `get_gate_chain(name)` | `gates NAME` |
+| What feeds, gates or sits beside it | `get_variable_neighborhood(name, depth=1)` | `neighborhood NAME [--depth N]` |
+| Repeat group hierarchy | `get_repeat_structure()` | `repeats` |
+| Survey overview | `get_survey_info()` | `info` |
+
+When the MCP server is not connected, the same answers come from the skill's
+`search_survey.py`, standard-library Python that needs no package installed:
 
 ```bash
-uv sync --extra mcp
+uv run python .claude/skills/survey-expert/search_survey.py [--dir DOCS] [--survey KEY] <command>
 ```
 
-Add to your project's `.mcp.json` (a ready-made `.mcp.json.example` in the
-repo root works out of the box for the sample: `cp .mcp.json.example .mcp.json`):
+`--dir` defaults to the current directory, scanned for
+`*_variable_dictionary.json`. `uv run surveycto-survey` runs the same commands
+from the installed package. See `src/surveycto_extractor/mcp_server/README.md`
+for the server's details.
 
-```json
-{
-  "mcpServers": {
-    "survey-expert": {
-      "command": "uv",
-      "args": ["run", "--extra", "mcp", "python", "-m", "surveycto_extractor.mcp_server.survey_server"]
-    }
-  }
-}
-```
+### Cleaning guides and SurveyCTO primers
 
-> **Note:** this directory was previously named `mcp/`. If your `.mcp.json`
-> still points at `mcp/survey_server.py`, update the path — a stale path shows
-> up as "failed to connect" in `/mcp`.
+The skill ships three project-agnostic guides under `references/`, which the
+agent reads before writing or reviewing cleaning code and offers as
+suggestions the people cleaning decide on:
 
-The server discovers `config.toml` (or a legacy `config.py`) in the current
-working directory (override with `SURVEYCTO_CONFIG`). It degrades gracefully — if config or JSON
-files are missing, tools return setup instructions rather than crashing. See
-`mcp_server/README.md` for full details.
+- `CLEANING.md` — language-independent cleaning principles
+- `STATA.md` — Stata-specific patterns and guardrails
+- `SURVEYCTO_RELEVANCE_TRANSLATION.md` — SurveyCTO → Stata skip logic
+  translation rules
 
-### Coding guidelines for agents
-
-The `coding_guidelines/` directory contains project-agnostic standards for
-Stata cleaning pipelines, written to be read by AI coding agents. **Reference
-them from your `AGENTS.md`** so every agent session has them in context
-automatically:
-
-```markdown
-## Coding Standards
-
-Stata cleaning modules must follow the guidelines in:
-- `surveycto_extractor/coding_guidelines/CLEANING.md` — language-independent cleaning principles
-- `surveycto_extractor/coding_guidelines/STATA.md` — Stata-specific patterns and guardrails
-- `surveycto_extractor/coding_guidelines/SURVEYCTO_RELEVANCE_TRANSLATION.md` — SurveyCTO → Stata skip logic translation rules
-- `surveycto_extractor/coding_guidelines/surveycto_refs/xlsform.md` and `expressions.md` — in-house primers distilled from the SurveyCTO documentation, used by the converter as a technical reference
-```
-
-These files need no modification — they are fully project-agnostic. The
-`surveycto_refs/` subdirectory holds derivative summaries we maintain by hand
-against <https://docs.surveycto.com>. See
-`coding_guidelines/surveycto_refs/README.md` for the source pages and refresh
-procedure.
+Their source is `src/surveycto_extractor/skill/references/`. The SurveyCTO
+primers (`xlsform.md`, `expressions.md`), the converter's technical reference,
+stay in this repository under `docs/surveycto_refs/`: derivative summaries we
+maintain by hand against <https://docs.surveycto.com>. See
+`docs/surveycto_refs/README.md` for the source pages and refresh procedure.
 
 ---
 
@@ -427,6 +413,7 @@ uv run surveycto-init                        # writes a config.toml template int
 # edit config.toml → fill in [surveys.KEY] / [datasets.KEY]
 uv run surveycto-extract --survey my_survey  # instrument day (csv/json/sections)
 uv run surveycto-vardict --survey my_survey  # post-collection vardict + graph
+uv run surveycto-skill                       # survey-expert skill + MCP entry + spaCy models
 ```
 
 `config.toml` is per-project and gitignored; the tool discovers it in the
@@ -437,15 +424,16 @@ layout:
 surveycto-extractor/
 ├── pyproject.toml  uv.lock  .python-version
 ├── src/surveycto_extractor/
-│   ├── cli/            ← console entry points: extract, vardict, summary_stats, enrich, init
+│   ├── cli/            ← console entry points: extract, vardict, summary_stats, init, skill
 │   ├── core/           ← shared support (sentinels table)
 │   ├── parsers/        ← survey + compiled-XForm (xml_contract) parsers
 │   ├── extractors/  transformers/   ← CSV/JSON extraction, logic conversion
 │   ├── generators/     ← outputs incl. Stata metadata (load_survey_metadata)
-│   ├── mcp_server/     ← optional MCP add-on (uv sync --extra mcp)
+│   ├── survey.py       ← survey-expert lookups (stdlib; becomes search_survey.py)
+│   ├── mcp_server/     ← survey-expert MCP server (surveycto-mcp)
+│   ├── skill/          ← SKILL.md + references/ that surveycto-skill installs
 │   └── templates/      ← the config.toml template surveycto-init writes
-├── skill/              ← copy to .claude/skills/ (stdlib-only survey-expert search)
-├── coding_guidelines/  ← reference from your AGENTS.md
+├── docs/surveycto_refs/  ← SurveyCTO primers (xlsform.md, expressions.md)
 └── sample/             ← bundled demo (household_survey)
 ```
 
@@ -454,9 +442,15 @@ surveycto-extractor/
 ## Common issues
 
 **`search_survey.py` finds no surveys**
-Check that `DOCS` in `search_survey.py` points to the directory containing
-your `*_variable_dictionary.json` files. Run
+It scans `--dir` (default: the current directory) for
+`*_variable_dictionary.json`; pass `--dir` with the survey's docs folder. Run
 `surveycto-vardict` first if the dictionary doesn't exist yet.
+
+**The `survey-expert` MCP server fails to connect**
+An older `.mcp.json` entry using `--extra mcp` no longer resolves. Rerun
+`uv run surveycto-skill`: it replaces the entry this toolkit used to document with
+`uv run surveycto-mcp` (keeping its `env`), and refuses to overwrite any other
+`survey-expert` entry, which you then edit or delete by hand.
 
 **`FileNotFoundError: Bridge file not found`**
 `surveycto-vardict` needs the `*_questions.json` file produced

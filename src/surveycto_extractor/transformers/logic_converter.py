@@ -1,6 +1,6 @@
 """Convert SurveyCTO relevance logic to Stata syntax.
 
-Reference: coding_guidelines/SURVEYCTO_RELEVANCE_TRANSLATION.md
+Reference: src/surveycto_extractor/skill/references/SURVEYCTO_RELEVANCE_TRANSLATION.md
 """
 
 import re

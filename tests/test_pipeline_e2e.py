@@ -151,6 +151,23 @@ def test_phase4_variable_graph_written(sample_env, monkeypatch):
     monkeypatch.setattr(sys, "argv", ["cvd.py", "--survey", "household_survey"])
     cvd.main()
     graph_path = out / "household_survey_variable_graph.json"
-    if graph_path.exists():  # only when networkx is installed
-        g = json.loads(graph_path.read_text(encoding="utf-8"))
-        assert len(g.get("nodes", [])) > 0
+    g = json.loads(graph_path.read_text(encoding="utf-8"))
+    assert len(g["nodes"]) > 0
+
+    # survey.py walks the graph without networkx: same nodes, same distances.
+    import networkx as nx
+
+    from surveycto_extractor.survey import _Graph
+
+    g.pop("repeat_groups")
+    ours = _Graph(g)
+    undirected = nx.node_link_graph(
+        g, edges="edges" if "edges" in g else "links"
+    ).to_undirected(as_view=True)
+    for node in ours.nodes:
+        for depth in (1, 2, 3):
+            expected = nx.single_source_shortest_path_length(
+                undirected, node, cutoff=depth
+            )
+            got = {n: len(p) - 1 for n, p in ours.shortest_paths(node, depth).items()}
+            assert got == expected, (node, depth)

@@ -22,7 +22,7 @@ system-info:
 
 [doc("Create/refresh the virtual environment + install the pre-commit hooks")]
 venv:
-    uv sync --all-extras
+    uv sync
     uv run pre-commit install
 
 [doc("First-time setup (alias for venv)")]
@@ -49,9 +49,9 @@ fmt-py f:
 pre-commit-run:
     uv run pre-commit run --all-files
 
-[doc("Run the test suite (all extras, so the MCP tests run too)")]
+[doc("Run the test suite")]
 test:
-    uv run --all-extras pytest -q
+    uv run pytest -q
 
 # Each PR head gets its own worktree + venv and is diffed against main on tests,
 # the sample end-to-end outputs (see .dep-accept.toml) and the MCP smoke test.
