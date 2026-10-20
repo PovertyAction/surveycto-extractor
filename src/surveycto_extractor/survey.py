@@ -16,10 +16,12 @@ Shell use::
     python search_survey.py [--dir DOCS] [--survey KEY] <command>
 
 with commands ``var``, ``search``, ``choices``, ``gates``, ``neighborhood``,
-``repeats`` and ``info`` (``--help`` lists their arguments).
+``group``, ``lineage``, ``repeats`` and ``info`` (``--help`` lists their
+arguments).
 """
 
 import argparse
+import difflib
 import json
 import math
 import os
@@ -42,6 +44,37 @@ _UNCLASSIFIED = (
     "built before PII classification, so nothing gates its values; "
     "re-run surveycto-vardict"
 )
+_OLD_QUESTIONS = (
+    "written by an older surveycto-extract (no gates or data_source); "
+    "re-run surveycto-extract, then surveycto-vardict"
+)
+
+
+_REF = re.compile(r"\$\{([^}]+)\}")
+
+
+def _unquote(text: str) -> str:
+    text = text.strip()
+    if len(text) >= 2 and text[0] in "'\"" and text[-1] == text[0]:
+        return text[1:-1]
+    return text
+
+
+def _source_line(source: dict) -> str:
+    """Describe a questions.json ``data_source``: where a value is read from."""
+    if source["kind"] == "pulldata":
+        # A pulldata() written without its 4th argument matches on nothing.
+        match = source["match"] or "(no value given)"
+        return (
+            f"pulldata: column {_unquote(source['value'])} of dataset "
+            f"{source['dataset']}, the row where {source['key']} = {match}"
+        )
+    filters = ", ".join(
+        f"{c} = {v}" if v is not None else c for c, v in source["match"].items()
+    )
+    return f"search: a row of dataset {source['dataset']}" + (
+        f" where {filters}" if filters else ""
+    )
 
 
 class _Unclassified(Exception):
@@ -362,8 +395,9 @@ class SurveyStore:
         # names carry the list's codes: column -> alias, and back.
         self._alias: dict[str, dict[str, str]] = {}
         self._unalias: dict[str, dict[str, str]] = {}
-        # Dictionaries refused for having no PII classification, by survey.
-        self._refused: dict[str, Path] = {}
+        # Surveys refused, with why: a dictionary built before the PII pass, or a
+        # questions.json from an older extract.
+        self._refused: dict[str, str] = {}
 
         self._load_all()
 
@@ -385,8 +419,8 @@ class SurveyStore:
         """Return a helpful message shown when no data is loaded."""
         if self._refused:
             return "\n".join(
-                f"[{label}] refused {path}: {_UNCLASSIFIED}"
-                for label, path in sorted(self._refused.items())
+                f"[{label}] refused {why}"
+                for label, why in sorted(self._refused.items())
             )
         if not self._config:
             return (
@@ -489,7 +523,7 @@ class SurveyStore:
                     f"[survey-expert] REFUSED {v_path}: {_UNCLASSIFIED}",
                     file=sys.stderr,
                 )
-                self._refused[label] = v_path
+                self._refused[label] = f"{v_path}: {_UNCLASSIFIED}"
                 self._vardicts[label] = {}
                 self._dataset_meta[label] = {}
                 self._mtimes[str(v_path)] = self._mtime(v_path)
@@ -515,11 +549,19 @@ class SurveyStore:
             try:
                 with open(q_path, encoding="utf-8") as f:
                     questions = json.load(f)
+                self._mtimes[str(q_path)] = self._mtime(q_path)
+                if any("gates" not in q or "data_source" not in q for q in questions):
+                    # An older extract: group and lineage answers would be wrong.
+                    why = f"{q_path}: {_OLD_QUESTIONS}"
+                    print(f"[survey-expert] REFUSED {why}", file=sys.stderr)
+                    self._refused[label] = why
+                    self._vardicts[label] = {}
+                    self._dataset_meta[label] = {}
+                    questions = []
                 self._questions[label] = questions
                 self._q_index[label] = {
                     q["variable_name"]: q for q in questions if "variable_name" in q
                 }
-                self._mtimes[str(q_path)] = self._mtime(q_path)
             except (json.JSONDecodeError, OSError) as exc:
                 print(
                     f"[survey-expert] WARNING: Failed to load {q_path} "
@@ -834,6 +876,8 @@ class SurveyStore:
             nn_str = f"{non_null:,}" if isinstance(non_null, int) else str(non_null)
             lines.append(f"  stata_type   : {stata_type}")
             lines.append(f"  non_null     : {nn_str}")
+            if entry.get("missing_rate") is not None:
+                lines.append(f"  missing_rate : {entry['missing_rate']:.1%}")
 
             # Data range (integer/decimal/calculate/date only)
             d_min = entry.get("data_min")
@@ -967,6 +1011,9 @@ class SurveyStore:
             refs = survey_data.get("references") or (q.get("references") if q else None)
             if refs:
                 lines.append(f"  references   : {', '.join(refs)}")
+            source = q.get("data_source") if q else None
+            if source and not (entry.get("contract") or {}).get("data_source"):
+                lines.append(f"  comes_from   : {_source_line(source)}")
 
             # XML contract — deterministic "where it comes from" provenance, present
             # only when the dictionary was enriched with a compiled-XForm contract
@@ -1084,9 +1131,13 @@ class SurveyStore:
                     == stata_name
                 ]
                 if columns:
+                    more = (
+                        f", ... ({len(columns) - 10} more)" if len(columns) > 10 else ""
+                    )
                     results.append(
                         f"[{label}] {stata_name} is a form question stored in "
-                        f"{len(columns)} columns; look one up: {', '.join(columns)}"
+                        f"{len(columns)} columns; look one up: "
+                        f"{', '.join(columns[:10])}{more}"
                     )
                 else:
                     results.append(self._form_question(label, q))
@@ -1856,6 +1907,165 @@ class SurveyStore:
 
         return "\n".join(lines)
 
+    def get_group(self, group: str, survey: str | None = None) -> str:
+        """List a group's questions in form order, with their type and condition:
+        the group's own gate, the enclosing groups' and each subgroup's once.
+        """
+        self._check_reload()
+        if self.is_empty:
+            return self._empty_message()
+        labels = self._filtered_labels(survey)
+        if survey and not labels:
+            return self._no_survey_match_msg(survey)
+
+        results = []
+        for label in labels:
+            members = [
+                q
+                for q in self._questions.get(label, [])
+                if group in (q.get("group_path") or [])
+            ]
+            if not members:
+                continue
+            lines = [f"[{label}] {group}: {len(members)} questions"]
+            own = next(
+                (g for q in members for g in q["gates"] if g["group"] == group), None
+            )
+            if own:
+                lines[0] += f", asked if {own['relevance']}"
+            # The groups it sits in gate it too, outermost first.
+            path = members[0]["group_path"]
+            outer = path[: path.index(group)]
+            lines += [
+                f"  inside {g['group']}, asked if {g['relevance']}"
+                for g in members[0]["gates"]
+                if g["group"] in outer
+            ]
+            shown: set[str] = set()
+            for q in members:
+                inner = q["group_path"][q["group_path"].index(group) + 1 :]
+                # Each subgroup's condition once, where its questions start.
+                for g in q["gates"]:
+                    if g["group"] in inner and g["group"] not in shown:
+                        shown.add(g["group"])
+                        lines.append(f"  -- {g['group']}: if {g['relevance']}")
+                where = f" [{'/'.join(inner)}]" if inner else ""
+                when = f"  if {q['relevance']}" if q["relevance"] else ""
+                lines.append(f"  {q['variable_name']} ({q['type']}){where}{when}")
+            results.append("\n".join(lines))
+
+        if not results:
+            groups = sorted(
+                {
+                    g
+                    for label in labels
+                    for q in self._questions.get(label, [])
+                    for g in q.get("group_path") or []
+                }
+            )
+            close = difflib.get_close_matches(group, groups, n=5)
+            return f"No group named {group!r}." + (
+                f" Close: {', '.join(close)}" if close else ""
+            )
+        return "\n\n".join(results)
+
+    def trace_lineage(self, name: str, survey: str | None = None) -> str:
+        """Trace where a field's value comes from, step by step within the form: a
+        calculate to the fields it reads, a pulldata() or search() to the dataset
+        column and the field it is matched on, down to questions someone answered.
+        """
+        self._check_reload()
+        if self.is_empty:
+            return self._empty_message()
+        labels = self._filtered_labels(survey)
+        if survey and not labels:
+            return self._no_survey_match_msg(survey)
+
+        results = []
+        for label in labels:
+            column = self._column(label, name)
+            entry = self._vardicts.get(label, {}).get(column) or {}
+            question = (entry.get("survey") or {}).get("original_variable_name") or name
+            q = self._q_index.get(label, {}).get(question)
+            if q is None:
+                continue
+            shown = self._shown(label, column) if entry else question
+            lines = [f"[{label}] Where {shown} comes from:"]
+            self._lineage(label, q, 1, set(), lines)
+            results.append("\n".join(lines))
+
+        if not results:
+            suggestions = self._suggest_similar(name, survey)
+            msg = f"No match for '{name}'."
+            if suggestions:
+                msg += f"\n  Did you mean: {', '.join(suggestions[:5])}"
+            return msg
+        return "\n\n".join(results)
+
+    def _lineage(
+        self, label: str, q: dict, depth: int, seen: set[str], lines: list[str]
+    ) -> None:
+        """Append one step of ``q``'s lineage, then the steps of what it reads."""
+        pad = "  " * depth
+        name = q["variable_name"]
+        if name in seen:
+            lines.append(f"{pad}{name} (traced above)")
+            return
+        seen.add(name)
+        q_index = self._q_index.get(label, {})
+        qtype = q["type"]
+        source = q["data_source"]
+        reads: list[str] = []
+        if (
+            qtype in ("calculate", "calculate_here", "repeat_count")
+            and q["calculation"]
+        ):
+            # Every field the formula reads, a pulldata()'s match included; the
+            # dataset's own rows come from outside the form.
+            lines.append(f"{pad}{name} ({qtype}) = {q['calculation']}")
+            if source:
+                lines.append(f"{pad}  <- {_source_line(source)}")
+            reads = _REF.findall(q["calculation"])
+        else:
+            # A question someone answered; a search() select's choices are a
+            # dataset's rows, filtered by the fields its match reads.
+            text = (q["question_text"] or "").strip()[:80]
+            withheld = q.get("choices_withheld") or next(
+                (
+                    e["survey"]["choices_withheld"]
+                    for e in self._vardicts.get(label, {}).values()
+                    if (e.get("survey") or {}).get("original_variable_name") == name
+                    and e["survey"].get("choices_withheld")
+                ),
+                None,
+            )
+            if withheld:
+                note = f"  [list withheld: {', '.join(withheld)}]"
+            elif q["choice_list"]:
+                note = f"  [choices: {q['choice_list']}]"
+            else:
+                note = ""
+            lines.append(
+                f"{pad}{name} ({qtype})" + (f": {text}" if text else "") + note
+            )
+            if source:
+                lines.append(f"{pad}  <- choices from {_source_line(source)}")
+                reads = [
+                    r for m in source["match"].values() if m for r in _REF.findall(m)
+                ]
+        repeats = {
+            q2["repeat_group_name"]
+            for q2 in self._questions.get(label, [])
+            if q2.get("repeat_group_name")
+        }
+        for ref in dict.fromkeys(reads):
+            if ref in q_index:
+                self._lineage(label, q_index[ref], depth + 1, seen, lines)
+            elif ref in repeats:
+                lines.append(f"{pad}  {ref} (repeat group; its instances)")
+            else:
+                lines.append(f"{pad}  {ref} (not a question in this form)")
+
     def get_repeat_structure(self, survey: str | None = None) -> str:
         """Return the repeat group topology tree for one or more surveys."""
         self._check_reload()
@@ -1959,6 +2169,10 @@ def main(argv: list[str] | None = None, store: SurveyStore | None = None) -> Non
     hood = sub.add_parser("neighborhood", help="what feeds, gates or follows it")
     hood.add_argument("name")
     hood.add_argument("--depth", type=int, default=1)
+    group = sub.add_parser("group", help="a group's questions in order")
+    group.add_argument("group")
+    lineage = sub.add_parser("lineage", help="where a field's value comes from")
+    lineage.add_argument("name")
     sub.add_parser("repeats", help="repeat groups: nesting, counts, suffixes")
     sub.add_parser("info", help="overview of the loaded surveys")
     args = parser.parse_args(argv)
@@ -1981,6 +2195,10 @@ def main(argv: list[str] | None = None, store: SurveyStore | None = None) -> Non
         out = store.get_gate_chain(args.name, survey=survey)
     elif args.command == "neighborhood":
         out = store.get_neighborhood(args.name, depth=args.depth, survey=survey)
+    elif args.command == "group":
+        out = store.get_group(args.group, survey=survey)
+    elif args.command == "lineage":
+        out = store.trace_lineage(args.name, survey=survey)
     elif args.command == "repeats":
         out = store.get_repeat_structure(survey=survey)
     else:

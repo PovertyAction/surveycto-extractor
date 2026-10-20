@@ -207,6 +207,9 @@ def _unquote(s: str) -> str:
 
 
 def _parse_pulldata(calc: str | None) -> dict | None:
+    """``pulldata('ds', 'col', 'key', expr)``: ``match`` is ``expr``, the value of
+    ``key`` the row is found by.
+    """
     args = _split_call_args(calc, "pulldata")
     if not args or len(args) < 3:
         return None
@@ -214,6 +217,7 @@ def _parse_pulldata(calc: str | None) -> dict | None:
         "dataset": _unquote(args[0]),
         "value": args[1].strip(),
         "key": _unquote(args[2]),
+        "match": args[3].strip() if len(args) > 3 else None,
     }
 
 
@@ -245,19 +249,33 @@ def _parse_search(appearance: str | None) -> dict | None:
     mode = _unquote(rest[0]) if rest else None
     pairs = rest[1:]
     filt: dict[str, str | None] = {}
+    # Every filter's value expression as written, field references included.
+    match: dict[str, str | None] = {}
     for i in range(0, len(pairs) - 1, 2):
         col = _unquote(pairs[i])
         val_raw = pairs[i + 1].strip()
         # a quoted literal is a static filter value; an unquoted node-ref is
         # dynamic -> None
         filt[col] = _unquote(val_raw) if val_raw[:1] in ("'", '"') else None
+        match[col] = val_raw
     if len(pairs) % 2 == 1:  # trailing col with a dynamic (node-ref) value
         filt[_unquote(pairs[-1])] = None
-    return {"kind": "search", "dataset": dataset, "mode": mode, "filter": filt}
+        match[_unquote(pairs[-1])] = None
+    return {
+        "kind": "search",
+        "dataset": dataset,
+        "mode": mode,
+        "filter": filt,
+        "match": match,
+    }
 
 
-def _parse_data_source(appearance: str | None, calc: str | None) -> dict | None:
-    """Unify select-from-file (`search`) and preload (`pulldata`) provenance."""
+def parse_data_source(appearance: str | None, calc: str | None) -> dict | None:
+    """Unify select-from-file (`search`) and preload (`pulldata`) provenance.
+
+    The arguments are parsed as text, so XLSForm (``${x}``) and compiled XForm
+    (``/data/x``) expressions both work.
+    """
     s = _parse_search(appearance)
     if s:
         return s
@@ -675,7 +693,7 @@ def parse_contract(xml_path) -> FormContract:
             pulldata=_parse_pulldata(b.get("calculate")),
             preload=b.get("preload"),
             preload_params=b.get("preloadParams"),
-            data_source=_parse_data_source(ap, b.get("calculate")),
+            data_source=parse_data_source(ap, b.get("calculate")),
         )
     return FormContract(formid, formdef_version, nodes)
 

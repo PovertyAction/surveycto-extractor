@@ -44,6 +44,8 @@ All take an optional `survey` (partial match on the survey key).
 | `get_choice_list` | A choice list and the variables using it | `choices LIST` |
 | `get_gate_chain` | The composed skip logic behind a variable | `gates NAME` |
 | `get_variable_neighborhood` | What feeds, gates, constrains or repeats with it | `neighborhood NAME [--depth N]` |
+| `get_group` | A group's questions in order, with each condition | `group GROUP` |
+| `trace_lineage` | Where a value comes from: calculates, pulldata/search, answered questions | `lineage NAME` |
 | `get_repeat_structure` | Repeat nesting, counts, suffixes, join keys | `repeats` |
 | `get_survey_info` | Overview of the loaded surveys | `info` |
 

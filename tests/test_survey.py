@@ -142,6 +142,19 @@ def _write_survey(root: Path, label="hh"):
             "choices_withheld": ["presidio:PERSON"],
         },
     ]
+    # Keys every questions.json entry carries (the store refuses an older file).
+    questions = [
+        {
+            "group_path": [],
+            "gates": [],
+            "data_source": None,
+            "relevance": None,
+            "choice_list": None,
+            "calculation": None,
+            **q,
+        }
+        for q in questions
+    ]
     variables = {
         "name": {
             "non_null_count": 3,
@@ -413,3 +426,228 @@ def test_installer_main_needs_a_config(tmp_path, monkeypatch):
     _project(tmp_path, monkeypatch, None)
     with pytest.raises(SystemExit, match="no config.toml"):
         skill.main([])
+
+
+def _write_form(root: Path):
+    """A form with nested groups and a lineage chain, and a dictionary for it."""
+    gate = {"group": "hh", "relevance": "${consent} = 1"}
+    sub = {"group": "visit", "relevance": "${n_visits} > 0"}
+    q = {
+        "choices": None,
+        "choice_list": None,
+        "relevance": None,
+        "calculation": None,
+        "data_source": None,
+    }
+    questions = [
+        {
+            **q,
+            "variable_name": "consent",
+            "type": "select_one",
+            "choice_list": "yesno",
+            "question_text": "Consent",
+            "group_path": [],
+            "gates": [],
+        },
+        {
+            **q,
+            "variable_name": "hhid",
+            "type": "text",
+            "question_text": "Household ID",
+            "group_path": ["hh"],
+            "gates": [gate],
+        },
+        {
+            **q,
+            "variable_name": "n_visits",
+            "type": "integer",
+            "question_text": "Visits",
+            "group_path": ["hh"],
+            "gates": [gate],
+            "relevance": "${hhid} != ''",
+        },
+        {
+            **q,
+            "variable_name": "owner",
+            "type": "calculate",
+            "calculation": "pulldata('roster', 'owner', 'hhid', ${hhid})",
+            "data_source": {
+                "kind": "pulldata",
+                "dataset": "roster",
+                "value": "'owner'",
+                "key": "hhid",
+                "match": "${hhid}",
+            },
+            "group_path": ["hh", "visit"],
+            "gates": [gate, sub],
+        },
+        {
+            **q,
+            "variable_name": "greeting",
+            "type": "calculate",
+            "calculation": "concat('Hi ', ${owner}, ${greeting})",
+            "group_path": ["hh", "visit"],
+            "gates": [gate, sub],
+        },
+    ]
+    folder = root / "docs"
+    folder.mkdir(parents=True)
+    (folder / "f_questions.json").write_text(json.dumps(questions), "utf-8")
+    variables = {
+        q["variable_name"]: {
+            "non_null_count": 1,
+            "stata": {"type": "str9"},
+            "survey": {"original_variable_name": q["variable_name"], "type": q["type"]},
+            "pii": {"status": "no_hits", "basis": ["type:text"]},
+        }
+        for q in questions
+    }
+    (folder / "f_variable_dictionary.json").write_text(
+        json.dumps({"summary": {"pii": {}}, "variables": variables}), "utf-8"
+    )
+    return srv.SurveyStore(srv.discover(root))
+
+
+def test_get_group_shows_each_gate_once(tmp_path):
+    out = _write_form(tmp_path).get_group("hh")
+    assert out.splitlines() == [
+        "[f] hh: 4 questions, asked if ${consent} = 1",
+        "  hhid (text)",
+        "  n_visits (integer)  if ${hhid} != ''",
+        "  -- visit: if ${n_visits} > 0",
+        "  owner (calculate) [visit]",
+        "  greeting (calculate) [visit]",
+    ]
+    inner = _write_form(tmp_path / "b").get_group("visit")
+    assert "inside hh, asked if ${consent} = 1" in inner
+    assert (
+        _write_form(tmp_path / "c").get_group("visits")
+        == "No group named 'visits'. Close: visit"
+    )
+
+
+def test_trace_lineage_walks_calculates_and_pulldata(tmp_path):
+    out = _write_form(tmp_path).trace_lineage("greeting")
+    assert out.splitlines() == [
+        "[f] Where greeting comes from:",
+        "  greeting (calculate) = concat('Hi ', ${owner}, ${greeting})",
+        "    owner (calculate) = pulldata('roster', 'owner', 'hhid', ${hhid})",
+        "      <- pulldata: column owner of dataset roster, the row where hhid = ${hhid}",
+        "      hhid (text): Household ID",
+        "    greeting (traced above)",
+    ]
+
+
+def test_new_tools_through_the_shell_and_mcp(tmp_path, capsys, monkeypatch):
+    from surveycto_extractor.mcp_server import survey_server
+
+    store = _write_form(tmp_path)
+    for argv, expected in (
+        (["group", "hh"], store.get_group("hh")),
+        (["lineage", "owner"], store.trace_lineage("owner")),
+    ):
+        srv.main(["--dir", str(tmp_path), *argv])
+        assert capsys.readouterr().out == expected + "\n"
+    monkeypatch.setattr(survey_server, "_store", store)
+    assert survey_server.get_group("hh") == store.get_group("hh")
+    assert survey_server.trace_lineage("owner") == store.trace_lineage("owner")
+
+
+def test_lineage_reads_every_field_and_names_repeats(tmp_path):
+    store = _write_form(tmp_path)
+    path = tmp_path / "docs" / "f_questions.json"
+    questions = json.loads(path.read_text("utf-8"))
+    base = {k: None for k in ("choices", "choice_list", "relevance", "data_source")}
+    questions += [
+        {
+            **base,
+            "variable_name": "guarded",
+            "type": "calculate",
+            "question_text": "",
+            "group_path": [],
+            "gates": [],
+            "calculation": "if(${consent} = 1, pulldata('roster', 'owner', 'hhid', "
+            "${hhid}), pulldata('staff', 'name', 'id', ${n_visits}))",
+            "data_source": {
+                "kind": "pulldata",
+                "dataset": "roster",
+                "value": "'owner'",
+                "key": "hhid",
+                "match": "${hhid}",
+            },
+        },
+        {
+            **base,
+            "variable_name": "n_members",
+            "type": "calculate",
+            "question_text": "",
+            "group_path": [],
+            "gates": [],
+            "calculation": "count(${members})",
+        },
+        {
+            **base,
+            "variable_name": "members_count",
+            "type": "repeat_count",
+            "question_text": "",
+            "group_path": [],
+            "gates": [],
+            "repeat_group_name": "members",
+        },
+        {
+            **base,
+            "variable_name": "pick",
+            "type": "select_one",
+            "question_text": "Pick a member",
+            "choice_list": "roster",
+            "group_path": [],
+            "gates": [],
+            "data_source": {
+                "kind": "search",
+                "dataset": "roster",
+                "mode": "matches",
+                "filter": {"hhid": None},
+                "match": {"hhid": "${hhid}"},
+            },
+        },
+    ]
+    path.write_text(json.dumps(questions), "utf-8")
+    store = srv.SurveyStore(srv.discover(tmp_path))
+    guarded = store.trace_lineage("guarded")
+    for field in ("consent (select_one)", "hhid (text)", "n_visits (integer)"):
+        assert field in guarded
+    assert "pulldata('staff', 'name', 'id', ${n_visits})" in guarded
+    assert "members (repeat group; its instances)" in store.trace_lineage("n_members")
+    pick = store.trace_lineage("pick").splitlines()
+    assert pick[1] == "  pick (select_one): Pick a member  [choices: roster]"
+    assert pick[2].startswith("    <- choices from search: a row of dataset roster")
+    assert pick[3] == "    hhid (text): Household ID"
+
+
+def test_an_older_questions_json_is_refused(tmp_path):
+    _write_form(tmp_path)
+    path = tmp_path / "docs" / "f_questions.json"
+    questions = json.loads(path.read_text("utf-8"))
+    for q in questions:
+        del q["gates"]
+    path.write_text(json.dumps(questions), "utf-8")
+    out = srv.SurveyStore(srv.discover(tmp_path)).get_group("hh")
+    assert "refused" in out and "re-run surveycto-extract" in out
+
+
+def test_lookup_caps_a_long_column_list_and_shows_missing_rate(tmp_path):
+    folder = _write_survey(tmp_path)
+    path = folder / "hh_variable_dictionary.json"
+    raw = json.loads(path.read_text("utf-8"))
+    for i in range(1, 13):
+        raw["variables"][f"name_{i}"] = {
+            **raw["variables"]["name"],
+            "repeat_iteration": i,
+            "missing_rate": 0.25,
+        }
+    del raw["variables"]["name"]
+    path.write_text(json.dumps(raw), "utf-8")
+    store = srv.SurveyStore(srv.discover(tmp_path))
+    out = store.lookup_var("name")
+    assert "stored in 12 columns" in out and "(2 more)" in out
+    assert "missing_rate : 25.0%" in store.lookup_var("name_1")

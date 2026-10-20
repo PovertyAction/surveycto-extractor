@@ -205,6 +205,14 @@ def test_no_flagged_value_reaches_an_agent(capsys, project):
         survey.main([*shell, "var", name, "--context", "3"], store=store)
         survey.main([*shell, "gates", name], store=store)
         survey.main([*shell, "neighborhood", name, "--depth", "2"], store=store)
+        # A column with no question (key, a system column) has no lineage: exit 1.
+        entry = store._vardicts["synth"][name]
+        question = entry["survey"].get("original_variable_name") or name
+        if question in store._q_index["synth"]:
+            survey.main([*shell, "lineage", name], store=store)
+        else:
+            with pytest.raises(SystemExit):
+                survey.main([*shell, "lineage", name], store=store)
     survey.main([*shell, "var", *names], store=store)
     for words in ("name", "phone", "household roster"):
         survey.main([*shell, "search", words], store=store)
@@ -212,6 +220,7 @@ def test_no_flagged_value_reaches_an_agent(capsys, project):
         survey.main([*shell, "choices", list_name], store=store)
     survey.main([*shell, "search", "staff", "visit"], store=store)
     survey.main([*shell, "repeats"], store=store)
+    survey.main([*shell, "group", "contact_grp"], store=store)
     survey.main([*shell, "info"], store=store)
 
     answers = capsys.readouterr()
@@ -239,9 +248,11 @@ def test_no_flagged_value_in_mcp_answers(project, monkeypatch):
         texts.append(mcp.lookup_variable(name, context=3))
         texts.append(mcp.get_gate_chain(name))
         texts.append(mcp.get_variable_neighborhood(name, depth=2))
+        texts.append(mcp.trace_lineage(name))
     texts.append(mcp.lookup_variables(names))
     texts.append(mcp.get_survey_info())
     texts.append(mcp.get_repeat_structure())
+    texts.append(mcp.get_group("contact_grp"))
     for words in ("name", "phone", "household roster", "date of birth", "staff"):
         texts.append(mcp.search_questions(words))
     for list_name in ("yesno", "hh", "roster", "staff"):
