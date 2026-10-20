@@ -5,10 +5,14 @@ Run from the project's root, through uv so the models land in its lockfile::
     uv run surveycto-skill [TARGET]
 
 It writes ``SKILL.md`` and ``references/`` to TARGET (default
-``.claude/skills/survey-expert``), copies this package's ``survey.py`` there as
-``search_survey.py`` so the shell fallback matches the installed toolkit, adds the
-``survey-expert`` server to ``.mcp.json``, and installs the spaCy model of every
-``[pii]`` language. Rerun it after upgrading the toolkit.
+``.claude/skills/survey-expert``), with a ``## This project`` section built from the
+config and the outputs (surveys, repeat groups, missing-value codes, where the files
+are); copies this package's ``survey.py`` there as ``search_survey.py`` so the shell
+fallback matches the installed toolkit; adds a ``## Survey project`` section to the
+project's ``CLAUDE.md`` when it has none (the study, pipelines, conventions and
+rulings, filled in with the team); adds the ``survey-expert`` server to
+``.mcp.json``; and installs the spaCy model of every ``[pii]`` language. Rerun it
+after upgrading the toolkit or rebuilding the outputs.
 """
 
 import argparse
@@ -16,13 +20,17 @@ import json
 import os
 import re
 import subprocess
+from collections import Counter
 from importlib.metadata import PackageNotFoundError, distribution
 from importlib.resources import files
 from pathlib import Path
 
 # tomllib, or tomli on Python 3.10, as the config loader resolved it.
+import pyarrow.parquet as pq
+
 from surveycto_extractor.config_loader import load_config, pii_config, tomllib
-from surveycto_extractor.pii import MODEL_URL
+from surveycto_extractor.long_tables import long_dir, repeat_parents
+from surveycto_extractor.pii import FLAGGED, MODEL_URL
 
 SERVER = {"command": "uv", "args": ["run", "surveycto-mcp"]}
 # The entry this toolkit documented before surveycto-mcp existed: replaced, since
@@ -37,12 +45,150 @@ _OLD_ARGS = [
 ]
 
 
-def install_skill(target: Path) -> Path:
-    """Write the skill's files to ``target`` and return it."""
+# Where SKILL.md takes the project's section.
+MARKER = "<!-- surveycto-skill writes this project's section here -->"
+_NO_PROJECT = (
+    "## This project\n\nRun `uv run surveycto-skill` from the analysis project to "
+    "describe its surveys here."
+)
+CLAUDE_SECTION = """
+## Survey project
+
+<!-- Written by surveycto-skill. Fill it in with the team, in their words; the
+survey-expert skill reads it before any task (references/SETUP.md says how). -->
+
+### The study
+
+What the project is about, and the documents that describe it.
+
+### Pipelines
+
+Which survey each cleaning or analysis pipeline reads, by path.
+
+### Conventions
+
+How the team cleans: missing and don't-know codes, outliers and where they are
+treated, units and currency, file layout.
+
+### Rulings
+
+Decisions on specific fields, written as they are made and never reopened.
+"""
+
+
+def project_section(config) -> str:
+    """Return SKILL.md's ``## This project`` section, built from the config and the
+    outputs: a row per survey, its missing-value codes and repeat groups, and where
+    the files are. A survey not built yet says what to run.
+    """
+    project = getattr(config, "PROJECT", None) or {}
+    surveys = getattr(config, "SURVEYS", {})
+    lines = [f"## This project: {project.get('name') or Path.cwd().name}", ""]
+    if project.get("description"):
+        lines += [project["description"], ""]
+    lines += [
+        "| Survey | Title | Submissions | Columns | Questions | Flagged PII columns | Data | Docs |",
+        "|---|---|---|---|---|---|---|---|",
+    ]
+    built = []
+    for key, paths in config.DATASETS.items():
+        title = surveys.get(key, {}).get("name", "")
+        docs = surveys.get(key, {}).get("output_dir", "")
+        dict_path = Path(paths["output_json"])
+        if not dict_path.exists():
+            lines.append(
+                f"| `{key}` | {title} | not built: run `surveycto-vardict --survey "
+                f"{key}` | | | | `{paths['data']}` | `{docs}` |"
+            )
+            continue
+        vardict = json.loads(dict_path.read_text(encoding="utf-8"))
+        questions = json.loads(
+            Path(paths["questions_json"]).read_text(encoding="utf-8")
+        )
+        pii = vardict["summary"]["pii"]
+        flagged = sum(n for status, n in pii.items() if status in FLAGGED)
+        lines.append(
+            f"| `{key}` | {title} | {vardict['dataset']['n_observations']:,} | "
+            f"{vardict['dataset']['n_variables']:,} | {len(questions):,} | "
+            f"{flagged:,} | `{paths['data']}` | `{docs}` |"
+        )
+        graph = dict_path.with_name(
+            dict_path.name.replace("_variable_dictionary", "_variable_graph")
+        )
+        repeats = (
+            json.loads(graph.read_text(encoding="utf-8"))["repeat_groups"]
+            if graph.exists()
+            else {}
+        )
+        codes = Counter()
+        for entry in vardict["variables"].values():
+            found = entry.get("sentinels") or {}
+            for kind in ("raw_int_detail", "string_detail"):
+                codes.update(found.get(kind) or {})
+            # Stata's extended missings, .d and .r.
+            codes.update(
+                {f".{c}": n for c, n in (found.get("ext_missing_detail") or {}).items()}
+            )
+        built.append(
+            (key, Path(paths["data"]), repeats, codes, repeat_parents(questions))
+        )
+    for key, data, repeats, codes, parents in built:
+        lines += ["", f"### `{key}`", ""]
+        if codes:
+            lines.append(
+                "Missing-value codes in the data (cells holding each): "
+                + ", ".join(f"`{c}` {n:,}" for c, n in codes.most_common())
+                + "."
+            )
+        if repeats:
+            long = long_dir(data.with_suffix(".parquet"))
+            lines += [
+                "",
+                f"Repeat groups; long tables in `{long}`:",
+                "",
+                "| Repeat | Inside | Max instances | Count variable | Long table rows |",
+                "|---|---|---|---|---|",
+            ]
+            for name, group in repeats.items():
+                table = long / f"{name}.parquet"
+                rows = (
+                    f"{pq.read_metadata(table).num_rows:,}"
+                    if table.exists()
+                    else "none"
+                )
+                lines.append(
+                    f"| `{name}` | {parents.get(name) or 'submission'} | "
+                    f"{group['max_iterations']} | `{group['count_var']}` | {rows} |"
+                )
+    if project.get("output_dir"):
+        out = Path(project["output_dir"])
+        db = out / f"{project.get('name')}.duckdb"
+        lines += [
+            "",
+            f"Project files in `{out}`: "
+            + ("`flow.json`" if (out / "flow.json").exists() else "no `flow.json` yet")
+            + "; "
+            + (
+                f"`{db.name}` (map: `get_structure_db`)"
+                if db.exists()
+                else "no database yet"
+            )
+            + ".",
+        ]
+    return "\n".join(lines)
+
+
+def install_skill(target: Path, section: str | None = None) -> Path:
+    """Write the skill's files to ``target``, with ``section`` as SKILL.md's project
+    section, and return it.
+    """
     package = files("surveycto_extractor")
     references = target / "references"
     references.mkdir(parents=True, exist_ok=True)
-    (target / "SKILL.md").write_bytes((package / "skill" / "SKILL.md").read_bytes())
+    text = (package / "skill" / "SKILL.md").read_text(encoding="utf-8")
+    (target / "SKILL.md").write_text(
+        text.replace(MARKER, section or _NO_PROJECT), encoding="utf-8"
+    )
     for guide in (package / "skill" / "references").iterdir():
         if guide.name.endswith(".md"):
             (references / guide.name).write_bytes(guide.read_bytes())
@@ -70,6 +216,20 @@ def server_entry(mcp_json: Path) -> dict | None:
             f"({json.dumps(current)}); edit or remove it, then rerun"
         )
     return data
+
+
+def claude_md(project: Path) -> bool:
+    """Append the ``## Survey project`` section to ``project``'s CLAUDE.md when it has
+    none; return whether it wrote. An existing section is the team's: never touched.
+    """
+    path = project / "CLAUDE.md"
+    text = path.read_text(encoding="utf-8") if path.exists() else ""
+    if re.search(r"^## Survey project\s*$", text, re.M):
+        return False
+    path.write_text(
+        text.rstrip() + ("\n" if text else "") + CLAUDE_SECTION, encoding="utf-8"
+    )
+    return True
 
 
 def missing_models(languages: dict[str, str]) -> list[str]:
@@ -141,8 +301,12 @@ def main(argv: list[str] | None = None) -> None:
     entry = server_entry(mcp_json)
     models = [] if settings.no_personal_data else missing_models(settings.languages)
 
-    target = install_skill(args.target)
+    section = project_section(config)
+
+    target = install_skill(args.target, section)
     print(f"[skill] survey-expert -> {target}")
+    if claude_md(project):
+        print("[claude] ## Survey project added to CLAUDE.md: fill it in with the team")
     if entry is None:
         print("[mcp] survey-expert already in .mcp.json")
     else:

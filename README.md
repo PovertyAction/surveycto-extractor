@@ -277,17 +277,24 @@ From your project directory (the one with `config.toml`):
 uv run surveycto-skill
 ```
 
-This does three things:
+This does four things:
 
 1. Writes the skill into `.claude/skills/survey-expert/`: `SKILL.md`, the
-   cleaning guides under `references/`, and `search_survey.py`.
-2. Adds the `survey-expert` server (`uv run surveycto-mcp`) to `.mcp.json`,
+   cleaning and setup guides under `references/`, and `search_survey.py`.
+   `SKILL.md` opens with a `## This project` section built from your config and
+   outputs: each survey's size and PII counts, the missing-value codes found in
+   the data, every repeat group with its parent, count variable and long table,
+   and where the files are.
+2. Adds a `## Survey project` section to the project's `CLAUDE.md` when it has
+   none: the study, which survey each pipeline reads, the team's conventions, and
+   its rulings. The skill reads it before any task; fill it in with the agent
+   (`references/SETUP.md` walks through it). An existing section is never touched.
+3. Adds the `survey-expert` server (`uv run surveycto-mcp`) to `.mcp.json`,
    creating the file if needed.
-3. Installs the spaCy models your `[pii]` config names, so the PII pass runs.
+4. Installs the spaCy models your `[pii]` config names, so the PII pass runs.
 
-Rerun it after upgrading the toolkit so the skill matches the outputs. Nothing
-needs filling in: the skill is project-agnostic and reads whatever surveys the
-docs folders hold. It refuses to run inside this repository itself; to try the
+Rerun it after upgrading the toolkit or rebuilding the outputs, so the project
+section matches them. It refuses to run inside this repository itself; to try the
 MCP server on the sample here, `cp .mcp.json.example .mcp.json`.
 
 The skill answers questions like:

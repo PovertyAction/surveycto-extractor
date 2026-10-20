@@ -260,3 +260,26 @@ def test_stata_empty_strings_are_missing(tmp_path, monkeypatch, analyzer):
         for name in table.column_names:
             if pa.types.is_string(table[name].type):
                 assert not pc.any(pc.equal(table[name], "")).as_py(), (path.name, name)
+
+
+def test_skill_project_section_and_claude_md(tmp_path, monkeypatch, analyzer):
+    from surveycto_extractor.cli import skill
+
+    cfg, _ = _run(tmp_path, monkeypatch, analyzer)
+    section = skill.project_section(cfg)
+    assert section.startswith("## This project: synthetic")
+    assert "| `synth` | Synthetic | 3 |" in section
+    # Parents come from questions.json: job sits inside member.
+    assert "| `member` | submission | 2 | `member_count` | 3 |" in section
+    assert "| `job` | member |" in section
+    target = skill.install_skill(tmp_path / "skill", section)
+    text = (target / "SKILL.md").read_text("utf-8")
+    assert skill.MARKER not in text and "## This project: synthetic" in text
+    assert (target / "references" / "SETUP.md").exists()
+    # CLAUDE.md gets the section once; the team's text is never touched.
+    (tmp_path / "CLAUDE.md").write_text("# Team notes\n", "utf-8")
+    assert skill.claude_md(tmp_path) is True
+    first = (tmp_path / "CLAUDE.md").read_text("utf-8")
+    assert first.startswith("# Team notes\n") and "### Rulings" in first
+    assert skill.claude_md(tmp_path) is False
+    assert (tmp_path / "CLAUDE.md").read_text("utf-8") == first

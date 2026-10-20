@@ -24,28 +24,18 @@ files sit next to the `.dta` (`[datasets.KEY] data`):
 | `<project>_db.json` / `_db.sql` | `[project] output_dir` | The database's map: every table and view, what one row is, its key, joins and columns. Read it through `get_structure_db`, never `DESCRIBE` or `information_schema`: a withheld list's columns carry its codes in their names, which the map shows by position |
 | `<key>_summary_stats.do` | next to the `.dta` | `tabstat` per numeric variable grouped by skip condition; flagged columns get no stats |
 
-## Start with what the project is about
+<!-- surveycto-skill writes this project's section here -->
 
-Call `get_project` (`<S> project`) first. When it says the project is not described,
-or has no entities or links, set them up with the user before answering questions
-that depend on them:
+## Project setup
 
-1. Ask for what describes the study: a pre-analysis plan, a protocol, a codebook.
-   Remind them to share only documents they are allowed to share with you.
-2. Ask the user to say in a few sentences what the project is about. Use their words
-   for `[project] description`; do not write one from the questions.
-3. Run `uv run surveycto-links`: it lists every dataset a form reads, the survey that
-   carries its columns, the columns it is matched on, and fields shared across
-   surveys, as candidate `[server_datasets.*]` and `[entities.*]` tables. Which form
-   publishes a dataset is a server setting no form records, so show each candidate to
-   the user and ask them to confirm or correct it; give each entity a one-line
-   description from the documents.
-4. Write the confirmed tables into `config.toml`, run `uv run surveycto-flow` (it
-   checks each key identifies one row and each pulled column is a field of its
-   publisher), then `uv run surveycto-duckdb` for the project database, and ask the
-   user to reconnect the MCP so `get_project` and `get_structure_db` serve them.
-5. Add one line to the analysis project's `CLAUDE.md` pointing at `get_project` and
-   the config, so the description and entities keep one home.
+The section above comes from the outputs. What the team knows that no output records
+lives in the analysis project's `CLAUDE.md`, section `## Survey project`: the study,
+which survey each pipeline reads, the team's conventions, and its rulings. Read it
+before any task and follow it over the general advice in this skill.
+
+When that section is still the template, or `get_project` says the project is not
+described, and the user wants it set up, follow `references/SETUP.md`. A cleaning or
+analysis task does not wait for setup.
 
 ## How to look things up
 
@@ -83,9 +73,11 @@ Every MCP tool takes an optional `survey` (a partial match on the survey key, as
 order. Read the JSON files directly only for what the tools do not show, such as a
 whole section or `structure.txt`.
 
-`uv run surveycto-skill` writes this skill into `.claude/skills/survey-expert/`, adds
-the `survey-expert` server (`uv run surveycto-mcp`) to `.mcp.json`, and installs the
-spaCy models the `[pii]` config names. Rerun it after upgrading the toolkit.
+`uv run surveycto-skill` writes this skill into `.claude/skills/survey-expert/` with
+its project section, adds the `## Survey project` section to `CLAUDE.md` when missing,
+adds the `survey-expert` server (`uv run surveycto-mcp`) to `.mcp.json`, and installs
+the spaCy models the `[pii]` config names. Rerun it after upgrading the toolkit or
+rebuilding the outputs.
 
 ## How a form works
 
@@ -224,9 +216,9 @@ applies.
 ## Rulings
 
 When the user decides how to handle something (a code, a gate that never fired, a
-field the instrument mislabels), write the decision into the analysis project's
-`CLAUDE.md` as a ruling, in their words, as soon as it is made: a decision left in the
-conversation is reopened on the next run. Rulings come from the user and the study's
+field the instrument mislabels), write the decision under `### Rulings` in the
+`## Survey project` section of the analysis project's `CLAUDE.md`, in their words, as
+soon as it is made: a decision left in the conversation is reopened on the next run. Rulings come from the user and the study's
 documents; propose one only from those. Never relitigate a recorded ruling.
 
 ## Answering
