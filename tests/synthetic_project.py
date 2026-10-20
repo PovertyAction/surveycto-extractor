@@ -69,6 +69,16 @@ SURVEY = [
         "search('staff', 'matches', 'grp', 'a')",
         "",
     ),
+    # Household members, each with jobs: the long tables' nested repeats.
+    ("begin repeat", "member", "Members", "", "", ""),
+    ("text", "member_name", "Member's name", "", "", ""),
+    ("integer", "member_age", "Member's age", "", "", ""),
+    # Its codes 0/1 are also instance numbers: member_tasks_1 is instance 1's answer.
+    ("select_multiple yesno", "member_tasks", "Tasks", "", "", ""),
+    ("begin repeat", "job", "Jobs", "", "", ""),
+    ("integer", "job_wage", "Wage", "", "", ""),
+    ("end repeat", "job", "", "", "", ""),
+    ("end repeat", "member", "", "", "", ""),
 ]
 CHOICES = [
     ("yesno", "1", "Yes"),
@@ -123,6 +133,24 @@ ROWS = {
     "hh_multi_h2": [0, 1, 0],
     "staff_multi_edavis": [1, 1, 0],
     "staff_multi_mjones": [0, 1, 1],
+    # Two members in aaa, one in bbb, none in ccc; Stata writes "" and NaN for the
+    # instances a submission did not reach.
+    "member_name_1": ["Sofia Lopez", "Daniel Clark", ""],
+    "member_name_2": ["James Wilson", "", ""],
+    "member_age_1": [40.0, 22.0, float("nan")],
+    "member_age_2": [12.0, float("nan"), float("nan")],
+    "member_tasks_1": ["1 0", "1", ""],
+    "member_tasks_2": ["0", "", ""],
+    "member_tasks_1_1": [1.0, 1.0, float("nan")],
+    "member_tasks_0_1": [1.0, 0.0, float("nan")],
+    "member_tasks_1_2": [0.0, float("nan"), float("nan")],
+    "member_tasks_0_2": [1.0, float("nan"), float("nan")],
+    "member_count": [2, 1, 0],
+    "job_count_1": [2.0, 1.0, float("nan")],
+    "job_count_2": [1.0, float("nan"), float("nan")],
+    "job_wage_1_1": [100.0, 200.0, float("nan")],
+    "job_wage_1_2": [150.0, float("nan"), float("nan")],
+    "job_wage_2_1": [50.0, float("nan"), float("nan")],
 }
 ROSTER = "grp,value,label\na,r1,Emily Davis\na,r2,Mary Johnson\n"
 STAFF = "grp,value,label\na,edavis,Emily Davis\na,mjones,Mark Jones\n"
@@ -174,6 +202,7 @@ CANARIES = [
     "user8",  # enum_user: username metadata
     "Emily Davis",  # roster.csv, read by the XML overlay's search()
     "Mark Jones",  # staff.csv label
+    "Sofia Lopez",  # member_name_1: Presidio PERSON inside a repeat
 ]
 # The withheld staff list's codes: in its column names, so the dictionary keeps
 # them (scripts need the real names); no tool or shell answer may show them.

@@ -18,6 +18,7 @@ files sit next to the `.dta` (`[datasets.KEY] data`):
 | `<key>_variable_dictionary.json` (+ `.xlsx` with `--xlsx`) | docs folder | One entry per `.dta` variable, in form order: its question, Stata type, counts, sentinels, `pii`, and the range of a column whose values are shown |
 | `<key>_variable_graph.json` | docs folder | Questions linked by calculation, relevance, group relevance, constraint and repeat, plus the repeat tree |
 | `<stem>.parquet` | next to the `.dta` | The submissions, every column. Scripts use it; flagged columns' values stay out of what you print (below) |
+| `<stem>_long/<repeat>.parquet` | next to the `.dta` | One table per repeat: a row per instance that has any value, keyed by `KEY` and a `<repeat>_index` per enclosing repeat, outer first (`key, member_index, job_index`); columns lose the instance suffix (`member_age_2` -> `member_age`). A question whose columns do not all carry their instance numbers stays only in `<stem>.parquet` |
 | `<stem>_pii_review.xlsx` | next to the `.dta` | Every value of a flagged column, for the people cleaning the data to verify the flags. **Never open it** |
 | `<key>_summary_stats.do` | next to the `.dta` | `tabstat` per numeric variable grouped by skip condition; flagged columns get no stats |
 
@@ -99,9 +100,10 @@ spaCy models the `[pii]` config names. Rerun it after upgrading the toolkit.
   attachment's rows come from outside the project.
 - A section as the enumerator met it: `get_group`, with the group's condition, the
   enclosing groups' and each subgroup's.
-- Reshaping, merging or aggregating across levels: `get_repeat_structure` first. It
-  gives each repeat's parent, count variable and expression, max iterations, Stata
-  suffix pattern and join key.
+- Analysis at a repeat's level: read `<stem>_long/<repeat>.parquet` instead of
+  reshaping the wide data; a nested repeat joins its parent on the parent's keys.
+  `get_repeat_structure` gives each repeat's parent, count variable and expression,
+  max iterations and Stata suffix pattern.
 
 ## PII: use every column, see only unflagged values
 
@@ -110,6 +112,10 @@ personal data may be so it is handled carefully; it never means drop the column 
 work around it. Scripts use every column: merge on a respondent's name, deduplicate on
 a phone number, clean a free-text field, keep them in the output. What changes is what
 you see: a flagged column's values never reach the conversation.
+
+A long table's column (`member_name` in `member.parquet`) has no dictionary entry of
+its own: it takes the strictest status of the wide columns it stacks
+(`member_name_1`, `member_name_2`, ...). `lookup_variable("member_name")` lists them.
 
 | Status | Basis | You may see |
 |---|---|---|

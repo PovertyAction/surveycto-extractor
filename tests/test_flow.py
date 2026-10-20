@@ -65,8 +65,12 @@ QUESTIONS = {
     ],
 }
 ROWS = {
-    "baseline": {"hhid": ["H1", "H2", "H3"], "name": ["A", "B", "C"]},
-    "endline": {"hhid": ["H1", "H2"], "hh_name": ["A", "B"]},
+    "baseline": {
+        "key": ["k1", "k2", "k3"],
+        "hhid": ["H1", "H2", "H3"],
+        "name": ["A", "B", "C"],
+    },
+    "endline": {"key": ["e1", "e2"], "hhid": ["H1", "H2"], "hh_name": ["A", "B"]},
 }
 
 
@@ -154,7 +158,6 @@ def test_flow_records_datasets_joins_and_keys(tmp_path):
     ("declared", "message"),
     [
         ({"published_by": "midline", "key": ["hhid"]}, "is not a \\[datasets\\] key"),
-        ({"published_by": "baseline", "key": ["member_name"]}, "sits in a repeat"),
         ({"published_by": "baseline", "key": ["village"]}, "is not a field"),
     ],
 )
@@ -170,7 +173,11 @@ def test_repeated_and_blank_keys_are_counted_not_refused(tmp_path, capsys):
     # The server dataset keeps the latest row per key; Stata stores a missing
     # string as "".
     rows = {
-        "baseline": {"hhid": ["H1", "H1", "", "H3"], "name": ["A", "A2", "B", "C"]},
+        "baseline": {
+            "key": ["k1", "k2", "k3", "k4"],
+            "hhid": ["H1", "H1", "", "H3"],
+            "name": ["A", "A2", "B", "C"],
+        },
         "endline": ROWS["endline"],
     }
     cfg = _project(tmp_path, rows=rows)
@@ -178,10 +185,66 @@ def test_repeated_and_blank_keys_are_counted_not_refused(tmp_path, capsys):
     assert (roster["repeated_keys"], roster["missing_keys"]) == (1, 1)
 
 
+def _members_table(tmp_path, names):
+    long = tmp_path / "baseline" / "baseline_long"
+    long.mkdir()
+    pd.DataFrame(
+        {
+            "key": ["k1", "k1", "k2", "k3"],
+            "members_index": [1, 2, 1, 1],
+            "member_name": names,
+        }
+    ).to_parquet(long / "members.parquet")
+
+
+def _roster(cfg):
+    return next(d for d in flow.build_flow(cfg)["datasets"] if d["id"] == "hh_roster")
+
+
+def test_a_key_in_a_repeat_is_counted_on_its_long_table(tmp_path):
+    # A repeat publishes one dataset row per instance: vardict's long table has them.
+    declared = {"published_by": "baseline", "key": ["member_name"]}
+    cfg = _project(tmp_path, {"hh_roster": declared})
+    with pytest.raises(SystemExit, match="members.parquet is missing"):
+        flow.build_flow(cfg)
+    _members_table(tmp_path, ["Ana", "", "Ana", "Luis"])
+    assert (_roster(cfg)["repeated_keys"], _roster(cfg)["missing_keys"]) == (1, 1)
+
+
+def test_a_repeat_key_with_an_enclosing_field(tmp_path):
+    # hhid from the submission, joined on KEY: Ana in k1 and Ana in k2 differ.
+    rows = {
+        "baseline": {
+            "key": ["k1", "k2", "k3"],
+            "hhid": ["H1", "H2", "H3"],
+            "name": ["A", "B", "C"],
+        },
+        "endline": ROWS["endline"],
+    }
+    declared = {"published_by": "baseline", "key": ["hhid", "member_name"]}
+    cfg = _project(tmp_path, {"hh_roster": declared}, rows=rows)
+    _members_table(tmp_path, ["Ana", "Ana", "Ana", "Luis"])
+    assert (_roster(cfg)["repeated_keys"], _roster(cfg)["missing_keys"]) == (1, 0)
+
+
+def test_key_fields_in_sibling_repeats_are_refused(tmp_path):
+    declared = {"published_by": "baseline", "key": ["member_name", "asset_id"]}
+    cfg = _project(tmp_path, {"hh_roster": declared})
+    path = cfg.DATASETS["baseline"]["questions_json"]
+    questions = json.loads(path.read_text("utf-8"))
+    questions += [
+        _q("assets_count", "repeat_count", repeat_group_name="assets"),
+        _q("asset_id", group_path=["assets"]),
+    ]
+    path.write_text(json.dumps(questions), "utf-8")
+    with pytest.raises(ValueError, match="do not enclose one another"):
+        flow.build_flow(cfg)
+
+
 def test_a_key_column_found_through_the_dictionary(tmp_path):
     # Stata kept the field under another name; the dictionary maps it.
     rows = {
-        "baseline": {"HHID": ["H1", "H2"], "name": ["A", "B"]},
+        "baseline": {"key": ["k1", "k2"], "HHID": ["H1", "H2"], "name": ["A", "B"]},
         "endline": ROWS["endline"],
     }
     cfg = _project(tmp_path, rows=rows)

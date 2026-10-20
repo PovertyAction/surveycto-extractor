@@ -37,6 +37,18 @@ QUESTIONS = [
         "group_path": ["orpt"],
         "choices": [{"value": "1"}, {"value": "2"}, {"value": "-99"}],
     },
+    {
+        "variable_name": "crop",
+        "type": "select_multiple",
+        "group_path": ["orpt", "irpt"],
+        "choices": [{"value": "1"}, {"value": "2"}],
+    },
+    {
+        "variable_name": "fruits",
+        "type": "select_multiple",
+        "group_path": [],
+        "choices": [{"value": "1"}, {"value": "2"}],
+    },
 ]
 IDX = _build_question_index(QUESTIONS)
 
@@ -73,16 +85,39 @@ def test_negative_code_select_multiple_decoded():
 
 
 def test_valid_positive_code_select_multiple():
-    r = _src("colors_2")
+    r = _src("fruits_2")
     assert r["is_select_multiple"] is True
     assert r["choice_code"] == "2"
 
 
-def test_single_level_repeat_field():
-    # A field directly in a repeat gets repeat_iteration from its single suffix.
-    r = _src("colors_1")  # choice 1 indicator (SM wins over repeat here)
-    assert r["is_select_multiple"] is True
-    assert r["choice_code"] == "1"
+def test_top_level_binary_with_no_underscore():
+    r = _src("fruits1")
+    assert (r["is_select_multiple"], r["choice_code"]) == (True, "1")
+
+
+def test_select_multiple_binary_in_a_repeat_is_choice_first():
+    r = _src("colors_2_3")
+    assert (r["is_select_multiple"], r["choice_code"]) == (True, "2")
+    assert (r["is_repeat"], r["repeat_iteration"]) == (True, 3)
+
+
+def test_nested_select_multiple_counts_the_numbers_against_the_depth():
+    # Depth 2: two numbers are the instance's answer, three a binary.
+    r = _src("crop_2_3")
+    assert r["is_select_multiple"] is False
+    assert (r["is_repeat"], r["repeat_iteration"]) == (True, 3)
+    r = _src("crop_1_2_3")
+    assert (r["is_select_multiple"], r["choice_code"]) == (True, "1")
+    assert (r["is_repeat"], r["repeat_iteration"]) == (True, 3)
+
+
+def test_single_suffix_in_a_repeat_is_the_instance_answer():
+    # A binary in a repeat carries the instance too, so colors_1 is instance 1's
+    # answer string, though 1 is also a choice code.
+    for name in ("colors_1", "colors1"):
+        r = _src(name)
+        assert r["is_select_multiple"] is False
+        assert (r["is_repeat"], r["repeat_iteration"]) == (True, 1)
 
 
 def test_unmatched_column_returns_empty_source():
