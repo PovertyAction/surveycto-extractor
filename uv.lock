@@ -2694,6 +2694,7 @@ name = "surveycto-extractor"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "mcp", extra = ["cli"] },
     { name = "networkx", version = "3.4.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "networkx", version = "3.6.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
@@ -2709,11 +2710,6 @@ dependencies = [
     { name = "tomli", marker = "python_full_version < '3.11'" },
 ]
 
-[package.optional-dependencies]
-mcp = [
-    { name = "mcp", extra = ["cli"] },
-]
-
 [package.dev-dependencies]
 dev = [
     { name = "codespell" },
@@ -2725,7 +2721,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "mcp", extras = ["cli"], marker = "extra == 'mcp'", specifier = ">=2.0.0,<3" },
+    { name = "mcp", extras = ["cli"], specifier = ">=2.0.0,<3" },
     { name = "networkx", specifier = ">=3.0,<4" },
     { name = "numpy", specifier = ">=1.26,<3" },
     { name = "openpyxl", specifier = ">=3.1.5,<4" },
@@ -2736,7 +2732,6 @@ requires-dist = [
     { name = "spacy", specifier = ">=3.8,<3.9" },
     { name = "tomli", marker = "python_full_version < '3.11'", specifier = ">=2.0.1" },
 ]
-provides-extras = ["mcp"]
 
 [package.metadata.requires-dev]
 dev = [

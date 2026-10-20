@@ -11,7 +11,7 @@ in `tabstat` or `replace if` contexts.
 
 - SurveyCTO Expressions Reference — <https://docs.surveycto.com/02-designing-forms/01-core-concepts/09.expressions.html>
 - SurveyCTO Data Export Format — <https://docs.surveycto.com/05-exporting-and-publishing-data/01-overview/09.data-format.html>
-- **In-house function catalog**: [`surveycto_refs/expressions.md`](surveycto_refs/expressions.md) — derivative primer we maintain by hand against the SurveyCTO docs; when extending the converter, treat it as the working reference for what each function does, what its arguments look like, and which SurveyCTO operators diverge from ODK/XPath. [`surveycto_refs/xlsform.md`](surveycto_refs/xlsform.md) plays the same role for XLSForm column semantics. Verify against the canonical pages on <https://docs.surveycto.com> if anything looks stale.
+- **In-house function catalog**: [`docs/surveycto_refs/expressions.md`](https://github.com/PovertyAction/surveycto-extractor/blob/main/docs/surveycto_refs/expressions.md) in the toolkit's repository — derivative primer we maintain by hand against the SurveyCTO docs; when extending the converter, treat it as the working reference for what each function does, what its arguments look like, and which SurveyCTO operators diverge from ODK/XPath. [`docs/surveycto_refs/xlsform.md`](https://github.com/PovertyAction/surveycto-extractor/blob/main/docs/surveycto_refs/xlsform.md) plays the same role for XLSForm column semantics. Verify against the canonical pages on <https://docs.surveycto.com> if anything looks stale.
 
 **Downstream consumer**: `transformers/logic_converter.py`
 
@@ -647,6 +647,6 @@ assert (
 - [STATA.md — SurveyCTO Skip Logic in Stata](STATA.md#surveycto-skip-logic-in-stata) — runtime pitfalls (`r(109)`, `r(111)`, `r(2000)`)
 - `transformers/logic_converter.py` — implementation file. The `LogicConverter.validate_translations(conditions)` method scans a list of already-converted Stata skip-logic strings and reports how many still contain untranslated SurveyCTO calls — useful for spotting converter gaps after extending the form coverage.
 - `extractors/json_extractor.py` — caller that builds the `question_types` dict
-- [`surveycto_refs/expressions.md`](surveycto_refs/expressions.md) — in-house function-catalog primer (the converter's working reference for what each SurveyCTO function does)
+- [`docs/surveycto_refs/expressions.md`](https://github.com/PovertyAction/surveycto-extractor/blob/main/docs/surveycto_refs/expressions.md) — in-house function-catalog primer (the converter's working reference for what each SurveyCTO function does)
 - SurveyCTO Expressions Reference: <https://docs.surveycto.com/02-designing-forms/01-core-concepts/09.expressions.html>
 - SurveyCTO Data Export Format: <https://docs.surveycto.com/05-exporting-and-publishing-data/01-overview/09.data-format.html>

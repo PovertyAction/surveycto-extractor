@@ -1922,8 +1922,8 @@ def build_variable_graph(
     """Build a variable relationship graph and write it as JSON.
 
     Nodes are form-level variables (one per question). Edges encode semantic
-    relationships: calculation dependencies, gating, constraints, repeat
-    siblings, and shared choice lists. Returns the output path, or None if
+    relationships: calculation dependencies, gating, constraints and repeat
+    siblings. Returns the output path, or None if
     networkx is not available.
     """
     if not _NETWORKX_AVAILABLE:
@@ -2157,6 +2157,20 @@ def apply_pii(
     )
     variables = vardict["variables"]
     _screen_search_lists(variables, questions, pii_config, analyzer)
+    # A list extract withheld can come back through the XML overlay, whose
+    # choice index reads the compiled form's items: its columns lose those labels.
+    withheld = {
+        q["variable_name"]: q["choices_withheld"]
+        for q in questions
+        if q.get("choices_withheld")
+    }
+    for entry in variables.values():
+        reasons = withheld.get(
+            (entry.get("survey") or {}).get("original_variable_name")
+        )
+        if reasons:
+            entry["survey"]["choices_withheld"] = reasons
+            (entry.get("contract") or {}).pop("choice_label", None)
 
     table = _pq.read_table(pq_path)
     blocks = pii.classify(table, vardict, form, pii_config, analyzer)

@@ -3,13 +3,13 @@
 
 # SurveyCTO XLSForm Mechanics
 
-This primer covers the structure of SurveyCTO XLSForm workbooks: worksheets, columns, field types, choices, groups, repeats, appearances, and form settings. Expression syntax belongs in [`expressions.md`](expressions.md); dataset attachment and dataset XML belong in [`datasets-xml.md`](datasets-xml.md).
+This primer covers the structure of SurveyCTO XLSForm workbooks: worksheets, columns, field types, choices, groups, repeats, appearances, and form settings. It is reference material for this toolkit, which reads forms and never edits or uploads them. Expression syntax belongs in [`expressions.md`](expressions.md); attached data (`pulldata()`, `search()`) is covered in [`pulldata()`, `search()`, and attached data](#pulldata-search-and-attached-data).
 
 Canonical docs: [Designing forms: core concepts](https://docs.surveycto.com/02-designing-forms/01-core-concepts/), [Introduction](https://docs.surveycto.com/02-designing-forms/01-core-concepts/01.intro.html), [Other field properties](https://docs.surveycto.com/02-designing-forms/01-core-concepts/05.other-columns.html), [Grouping and repeating questions](https://docs.surveycto.com/02-designing-forms/01-core-concepts/06.groups.html), [Constraints](https://docs.surveycto.com/02-designing-forms/01-core-concepts/07.constraints.html), and [Relevance](https://docs.surveycto.com/02-designing-forms/01-core-concepts/08.relevance.html).
 
 ## Worksheets
 
-SurveyCTO spreadsheet form definitions are workbooks with three functional worksheets. The bundled skill template also includes help worksheets, discussed at the end.
+SurveyCTO spreadsheet form definitions are workbooks with three functional worksheets. SurveyCTO's form template also includes help worksheets, discussed at the end.
 
 | Worksheet | Role | Key rules | Canonical docs |
 | --- | --- | --- | --- |
@@ -260,13 +260,13 @@ Put settings in row 2.
 
 ## `pulldata()`, `search()`, And Attached Data
 
-Canonical docs: [Pre-loading data](https://docs.surveycto.com/02-designing-forms/03-advanced-topics/03.preloading.html), [Loading choices from pre-loaded data](https://docs.surveycto.com/02-designing-forms/03-advanced-topics/04.search-and-select.html), [`expressions.md`](expressions.md), and [`datasets-xml.md`](datasets-xml.md).
+Canonical docs: [Pre-loading data](https://docs.surveycto.com/02-designing-forms/03-advanced-topics/03.preloading.html), [Loading choices from pre-loaded data](https://docs.surveycto.com/02-designing-forms/03-advanced-topics/04.search-and-select.html), and [`expressions.md`](expressions.md).
 
 Structural placement:
 
 | Function | Where it goes | What workbook structure it needs |
 | --- | --- | --- |
-| `pulldata()` | Usually in `survey.calculation` on a `calculate` row. It can also go in `survey.calculation` for an editable visible field as a dynamic default. | Attached CSV or attached server dataset. Pre-loaded data should have headers, comma-separated columns, and at least one unique lookup column, commonly ending in `_key` for indexing. See [`datasets-xml.md`](datasets-xml.md) for server dataset attachment structure. |
+| `pulldata()` | Usually in `survey.calculation` on a `calculate` row. It can also go in `survey.calculation` for an editable visible field as a dynamic default. | Attached CSV or attached server dataset. Pre-loaded data should have headers, comma-separated columns, and at least one unique lookup column, commonly ending in `_key` for indexing. A server dataset is attached in the SurveyCTO console, not in the workbook. |
 | `search()` | In `survey.appearance` on `select_one` or `select_multiple`; if combined with another appearance, put the normal appearance first, then `search(...)`. | A matching `choices` row whose `list_name` is the select list; its `value`, `label`, and optionally `image` cells name columns in the attached data source. A numeric `sortby` source column controls dynamic choice order if present. |
 
 Defer exact syntax, operators, conversions, and examples to [`expressions.md`](expressions.md). Remember that values pulled from CSV/datasets are treated as text strings; convert with expression functions when numeric behavior is needed.
@@ -275,7 +275,7 @@ Defer exact syntax, operators, conversions, and examples to [`expressions.md`](e
 
 Canonical docs: [Using field plug-ins](https://docs.surveycto.com/02-designing-forms/03-advanced-topics/06.using-field-plug-ins.html), [Testing field plug-ins](https://docs.surveycto.com/02-designing-forms/03-advanced-topics/07.testing-field-plug-ins.html), and the Support Center [Guide to field plug-ins](https://support.surveycto.com/hc/en-us/articles/360045234534).
 
-**When to use one.** Default to native field types and appearances; plug-ins add attachment management, version bumping, caching, and cross-platform testing overhead. If a plug-in is warranted, check the [field plug-in catalog](https://support.surveycto.com/hc/en-us/articles/360045235134-Field-plug-in-catalog) first for one that meets the need as-is, then customize a catalog plug-in or matching SurveyCTO `baseline-*` repo, and only fall back to the bundled minimal template when starting completely fresh. See [`field-plugins.md`](field-plugins.md) for the decision order in detail.
+**When to use one.** Default to native field types and appearances; plug-ins add attachment management, version bumping, caching, and cross-platform testing overhead. If a plug-in is warranted, check the [field plug-in catalog](https://support.surveycto.com/hc/en-us/articles/360045235134-Field-plug-in-catalog) first for one that meets the need as-is, then customize a catalog plug-in or a matching SurveyCTO `baseline-*` repo before writing one from scratch.
 
 | Piece | Rule |
 | --- | --- |
@@ -285,11 +285,11 @@ Canonical docs: [Using field plug-ins](https://docs.surveycto.com/02-designing-f
 | Parameters | Put parameters inside parentheses after the plug-in name, for example `custom-slider(min=0, max=10)`; parameter values can use expressions and field references. |
 | Behavior | A field plug-in completely takes over field appearance. Other appearance options may not be supported unless the plug-in documents them. Test carefully on target platforms. |
 
-**After editing.** Forms that reference a `custom-<name>` appearance require the user to attach the matching `<name>.fieldplugin.zip` in the SurveyCTO console at upload time. This skill and the MCP server only edit local files; they do not upload or attach plug-ins. Remind the user explicitly when handing back a form that references a plug-in.
+**Attachments.** A form that references a `custom-<name>` appearance needs the matching `<name>.fieldplugin.zip` attached in the SurveyCTO console at upload time; the workbook does not carry it.
 
-## The Bundled XLSForm Template
+## The SurveyCTO XLSForm Template
 
-The skill ships with [`assets/xlsform-template.xlsx`](../assets/xlsform-template.xlsx). Use it as the required starting point for generated workbooks.
+SurveyCTO's downloadable form template is the usual starting point for a workbook, so most forms carry its parts.
 
 | Template part | What's in it | Why it matters |
 | --- | --- | --- |
@@ -311,11 +311,11 @@ What breaks when building from scratch:
 
 Before editing or generating a SurveyCTO XLSForm:
 
-- Start from the bundled template unless the user supplied an existing workbook.
+- Start from SurveyCTO's form template unless the user supplied an existing workbook.
 - Preserve exact worksheet and column names.
 - Keep `form_id` stable for updates; increment `version`.
 - Do not delete deployed fields if old data must remain exportable; set `relevance` to `0` instead.
 - For `select_multiple`, use `selected()` in logic; do not compare the whole value with `=`.
-- Put expression syntax details in [`expressions.md`](expressions.md), and dataset attachment details in [`datasets-xml.md`](datasets-xml.md).
+- Put expression syntax details in [`expressions.md`](expressions.md), and attached-data placement in [`pulldata()`, `search()`, and attached data](#pulldata-search-and-attached-data).
 - Upload every referenced media, CSV, dataset attachment, and field plug-in with the form.
 - Treat SurveyCTO-specific field types and appearances as platform-dependent; check target platform limitations before relying on them.

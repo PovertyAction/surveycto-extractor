@@ -56,8 +56,24 @@ SURVEY = [
         "search('roster', 'matches', 'grp', 'a')",
         "",
     ),
+    # A select_multiple on the external list: the XML overlay decodes its labels.
+    ("select_multiple hh", "hh_multi", "Households visited", "", "", ""),
+    # A select_multiple whose search() codes are names: its column names carry them.
+    (
+        "select_multiple staff",
+        "staff_multi",
+        "Staff on the visit",
+        "",
+        "search('staff', 'matches', 'grp', 'a')",
+        "",
+    ),
 ]
-CHOICES = [("yesno", "1", "Yes"), ("yesno", "0", "No"), ("roster", "value", "label")]
+CHOICES = [
+    ("yesno", "1", "Yes"),
+    ("yesno", "0", "No"),
+    ("roster", "value", "label"),
+    ("staff", "value", "label"),
+]
 # The external roster: names, so the list is withheld.
 EXTERNAL = pd.DataFrame(
     {"hh_value": ["h1", "h2"], "hh_label": ["John Smith", "Mary Johnson"]}
@@ -101,15 +117,24 @@ ROWS = {
     "roster_pick": ["r1", "r2", "r1"],
     # A system column the settings sheet can fill with names: scanned.
     "instancename": ["Robert Brown household", "Jorge Perez household", ""],
+    "hh_multi_h1": [1, 0, 1],
+    "hh_multi_h2": [0, 1, 0],
+    "staff_multi_edavis": [1, 1, 0],
+    "staff_multi_mjones": [0, 1, 1],
 }
 ROSTER = "grp,value,label\na,r1,Emily Davis\na,r2,Mary Johnson\n"
+STAFF = "grp,value,label\na,edavis,Emily Davis\na,mjones,Mark Jones\n"
 XFORM = """<?xml version="1.0"?>
 <h:html xmlns="http://www.w3.org/2002/xforms" xmlns:h="http://www.w3.org/1999/xhtml"
         xmlns:jr="http://openrosa.org/javarosa">
   <h:head>
     <model>
-      <instance><synth id="synth" version="1"><roster_pick/></synth></instance>
+      <instance>
+        <synth id="synth" version="1"><roster_pick/><hh_multi/><staff_multi/></synth>
+      </instance>
       <bind nodeset="/synth/roster_pick" type="select1"/>
+      <bind nodeset="/synth/hh_multi" type="select"/>
+      <bind nodeset="/synth/staff_multi" type="select"/>
     </model>
   </h:head>
   <h:body>
@@ -118,6 +143,16 @@ XFORM = """<?xml version="1.0"?>
       <label>Member from the roster</label>
       <item><label>label</label><value>value</value></item>
     </select1>
+    <select ref="/synth/hh_multi">
+      <label>Households visited</label>
+      <item><label>John Smith</label><value>h1</value></item>
+      <item><label>Mary Johnson</label><value>h2</value></item>
+    </select>
+    <select ref="/synth/staff_multi"
+            appearance="search('staff', 'matches', 'grp', 'a')">
+      <label>Staff on the visit</label>
+      <item><label>label</label><value>value</value></item>
+    </select>
   </h:body>
 </h:html>
 """
@@ -136,7 +171,11 @@ CANARIES = [
     "2125550147",  # phone_num: Presidio PHONE_NUMBER on a number (its range)
     "user8",  # enum_user: username metadata
     "Emily Davis",  # roster.csv, read by the XML overlay's search()
+    "Mark Jones",  # staff.csv label
 ]
+# The withheld staff list's codes: in its column names, so the dictionary keeps
+# them (scripts need the real names); no tool or shell answer may show them.
+CODE_CANARIES = ["edavis", "mjones"]
 
 
 def _xlsx(path: Path) -> None:
@@ -161,6 +200,7 @@ def build(root: Path, pii: PiiConfig) -> types.ModuleType:
     _xlsx(data / "form.xlsx")
     EXTERNAL.to_csv(data / "choices.csv", index=False)
     (data / "roster.csv").write_text(ROSTER, encoding="utf-8")
+    (data / "staff.csv").write_text(STAFF, encoding="utf-8")
     (data / "form.xml").write_text(XFORM, encoding="utf-8")
     pd.DataFrame(ROWS).to_stata(
         data / "synth.dta",

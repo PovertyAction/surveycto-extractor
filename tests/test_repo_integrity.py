@@ -40,7 +40,7 @@ ALLOWED = {
     "scripts/cleaning/": "a commented-out config example for a user's own project",
 }
 
-_ROOTS = "src|tests|scripts|coding_guidelines|skill|sample|data|[.]github|[.]claude"
+_ROOTS = "src|tests|scripts|docs|skill|sample|data|[.]github|[.]claude"
 PATH_RE = re.compile(
     rf"(?<![\w./\\-])((?:{_ROOTS})/[A-Za-z0-9_./-]*[A-Za-z0-9])(?![\w-])"
 )
@@ -113,7 +113,7 @@ def test_the_check_reports_an_injected_dead_reference(tmp_path):
     A single probe proves only that one shape works -- which is how the previous
     version stayed green while broken. Each case here is asserted separately.
     """
-    probe = REPO_ROOT / "coding_guidelines" / f"_probe_{tmp_path.name}.md"
+    probe = REPO_ROOT / "docs" / f"_probe_{tmp_path.name}.md"
     probe.write_text(
         "src/surveycto_extractor/never_existed.py\n"
         "tests/no_such_test.py\n"
@@ -135,14 +135,14 @@ def test_the_check_reports_an_injected_dead_reference(tmp_path):
 
 def test_path_building_idioms_are_not_reported():
     """The false positives that would have blocked a legitimate commit."""
-    real = "coding_guidelines/SURVEYCTO_RELEVANCE_TRANSLATION.md"
+    real = "src/surveycto_extractor/skill/references/SURVEYCTO_RELEVANCE_TRANSLATION.md"
     assert (REPO_ROOT / real).is_file(), "fixture assumption: this doc exists"
     for snippet in (
-        'return f"coding_guidelines/report_{sha}.md"',
-        'return "coding_guidelines/report_%s.md" % n',
+        'return f"docs/report_{sha}.md"',
+        'return "docs/report_%s.md" % n',
         # Implicit concatenation of a path that DOES exist -- the shape that made
         # the previous version report a live file as dead.
-        'return ("coding_guidelines/SURVEYCTO_" "RELEVANCE_TRANSLATION.md")',
+        'return ("src/surveycto_extractor/skill/references/SURVEYCTO_" "RELEVANCE_TRANSLATION.md")',
     ):
         disk = _on_disk()
         unresolved = [
@@ -156,8 +156,8 @@ def test_path_building_idioms_are_not_reported():
 def test_resolution_is_case_exact():
     """A wrong-case reference is dead on Linux and must not pass on Windows."""
     disk = _on_disk()
-    assert "coding_guidelines/SURVEYCTO_RELEVANCE_TRANSLATION.md" in disk
-    assert "coding_guidelines/surveycto_relevance_translation.md" not in disk
+    assert "src/surveycto_extractor/skill/references/STATA.md" in disk
+    assert "src/surveycto_extractor/skill/references/stata.md" not in disk
 
 
 def test_an_allowed_prefix_does_not_suppress_a_dead_sibling():

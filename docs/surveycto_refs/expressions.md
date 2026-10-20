@@ -3,7 +3,7 @@
 
 # SurveyCTO Expression Language
 
-This primer covers the language used in SurveyCTO expressions: field references, operators, functions, scoping, quoting, common idioms, and failure modes. For XLSForm column mechanics, see [`xlsform.md`](xlsform.md). For attached dataset XML and data-link mechanics, see [`datasets-xml.md`](datasets-xml.md).
+This primer covers the language used in SurveyCTO expressions: field references, operators, functions, scoping, quoting, common idioms, and failure modes. For XLSForm column mechanics, see [`xlsform.md`](xlsform.md); for where `pulldata()` and `search()` sit in a workbook, see [`xlsform.md`](xlsform.md#pulldata-search-and-attached-data).
 
 Canonical source: [Using expressions in your forms: a reference for all operators and functions](https://docs.surveycto.com/02-designing-forms/01-core-concepts/09.expressions.html).
 

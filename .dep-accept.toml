@@ -9,10 +9,6 @@
 # Keep this committed: a bot branch is cut from `main`, so committing it is what
 # makes future bump PRs measurable.
 
-[checks]
-# --all-extras, so the optional `mcp` extra is installed and its tests run.
-extras = "all"
-
 [e2e]
 # config.toml is gitignored (it is per-project and may point at real survey data),
 # so the sample config is copied in as the one this run uses.
