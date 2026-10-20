@@ -138,8 +138,10 @@ order. Per-variable fields include:
 
 Exports to JSON (machine-readable) and XLSX (for sharing with field teams or
 PIs). Also writes `<survey>_data_ord.dta` — your dataset with columns
-reordered to match form structure — and a Parquet sidecar for fast columnar
-access by downstream scripts.
+reordered to match form structure — a Parquet sidecar for fast columnar
+access by downstream scripts, and one long table per repeat,
+`<stem>_long/<repeat>.parquet`: a row per instance that has any value, keyed by
+`KEY` and a `<repeat>_index` per enclosing repeat.
 
 The export summary lists all-missing and sparse (≥95% missing) variables so
 you can spot data-quality issues immediately.
@@ -234,9 +236,10 @@ uv run surveycto-links    # candidate [server_datasets.*] / [entities.*] tables
 uv run surveycto-flow     # checks them against the forms and data; writes flow.json
 ```
 
-`surveycto-flow` refuses a publisher that is not a survey, a key that does not
-identify one row of the publisher's data (or sits in a repeat), and a pulled
-column the publisher has no field for. A dataset left undeclared is an
+`surveycto-flow` refuses a publisher that is not a survey, a key that is not
+a field of the publisher (or whose fields sit at different levels), and a pulled
+column the publisher has no field for. It counts repeated and blank keys; a key
+inside a repeat is counted over that repeat's long table. A dataset left undeclared is an
 attachment. With `flow.json` in `[project] output_dir`, the agent tools describe
 the project (`get_project`) and trace a value across forms (`trace_lineage`).
 

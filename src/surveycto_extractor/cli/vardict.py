@@ -7,6 +7,9 @@ Handles:
 - Select_multiple questions (binary choice variables)
 - Double-suffix patterns (select_multiple within repeats)
 
+Also writes one long table per repeat, ``<stem>_long/<repeat>.parquet``
+(see long_tables.py).
+
 Usage:
     uv run surveycto-vardict [--survey KEY] [--validate] [--xlsx]
 
@@ -66,6 +69,7 @@ except ImportError:
 from surveycto_extractor import pii
 from surveycto_extractor.config_loader import load_config
 from surveycto_extractor.config_loader import pii_config as pii_config_of
+from surveycto_extractor.long_tables import write_long_tables
 from surveycto_extractor.parsers.survey_parser import SurveyParser
 from surveycto_extractor.parsers.xml_contract import pulldata_columns
 from surveycto_extractor.transformers.logic_converter import LogicConverter
@@ -1134,7 +1138,16 @@ def determine_variable_source(
             active_match = match or match_direct
             if active_match:
                 suffix_num = active_match.group(1)
-                if q_is_sm and str(suffix_num) in choice_values:
+                # A binary is `base_<code>`, and in a repeat `base_<code>_<n>`: a
+                # single suffix on a select_multiple in a repeat (`lead_r3`,
+                # `lead_3`) is the instance's answer string, even when the number
+                # is also a choice code.
+                if (
+                    match
+                    and q_is_sm
+                    and str(suffix_num) in choice_values
+                    and not _question_in_repeat(question, rgs)
+                ):
                     _mark_select_multiple(suffix_num)
                 elif in_repeat:
                     # Only stamp repeat_iteration on a field that actually lives
@@ -2331,6 +2344,11 @@ def main():
             pii_settings,
             analyzer,
             enriched,
+        )
+        write_long_tables(
+            questions,
+            json.loads(Path(cfg["output_json"]).read_text(encoding="utf-8")),
+            pq_path,
         )
 
         # Build variable relationship graph (needs the JSON dict, not the DataFrame)

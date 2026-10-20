@@ -154,7 +154,11 @@ def test_flow_records_datasets_joins_and_keys(tmp_path):
     ("declared", "message"),
     [
         ({"published_by": "midline", "key": ["hhid"]}, "is not a \\[datasets\\] key"),
-        ({"published_by": "baseline", "key": ["member_name"]}, "sits in a repeat"),
+        (
+            {"published_by": "baseline", "key": ["hhid", "member_name"]},
+            "different levels of baseline: hhid in the submission, member_name in "
+            "members",
+        ),
         ({"published_by": "baseline", "key": ["village"]}, "is not a field"),
     ],
 )
@@ -174,6 +178,26 @@ def test_repeated_and_blank_keys_are_counted_not_refused(tmp_path, capsys):
         "endline": ROWS["endline"],
     }
     cfg = _project(tmp_path, rows=rows)
+    roster = next(d for d in flow.build_flow(cfg)["datasets"] if d["id"] == "hh_roster")
+    assert (roster["repeated_keys"], roster["missing_keys"]) == (1, 1)
+
+
+def test_a_key_in_a_repeat_is_counted_on_its_long_table(tmp_path):
+    # A repeat publishes one dataset row per instance: vardict's long table has them.
+    cfg = _project(
+        tmp_path, {"hh_roster": {"published_by": "baseline", "key": ["member_name"]}}
+    )
+    with pytest.raises(SystemExit, match="members.parquet is missing"):
+        flow.build_flow(cfg)
+    long = tmp_path / "baseline" / "baseline_long"
+    long.mkdir()
+    pd.DataFrame(
+        {
+            "key": ["k1", "k1", "k2", "k3"],
+            "members_index": [1, 2, 1, 1],
+            "member_name": ["Ana", "", "Ana", "Luis"],
+        }
+    ).to_parquet(long / "members.parquet")
     roster = next(d for d in flow.build_flow(cfg)["datasets"] if d["id"] == "hh_roster")
     assert (roster["repeated_keys"], roster["missing_keys"]) == (1, 1)
 

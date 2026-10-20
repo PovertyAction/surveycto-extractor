@@ -31,6 +31,7 @@ from collections import Counter
 from pathlib import Path
 
 from surveycto_extractor.config_loader import load_config
+from surveycto_extractor.long_tables import long_dir
 from surveycto_extractor.parsers.xml_contract import is_system_column, pulldata_calls
 
 _REF = re.compile(r"\$\{([^}]+)\}")
@@ -252,18 +253,21 @@ def _sidecar(cfg, survey: str) -> Path:
 
 
 def _check_key(cfg, dataset: str, publisher: str, key: list[str], qs: list[dict]):
-    """Check ``key`` is a set of the publisher's top-level fields with a column
-    each, and return how many submissions repeat a key and how many lack one.
+    """Check ``key`` is a set of the publisher's fields at one level, each with a
+    column, and return how many rows repeat a key and how many lack one.
 
-    Repeats are counted, not refused: the server dataset keeps one row per key (the
-    latest submission), so a resurveyed household is normal. A Stata column may not
-    carry the field's name (case, 32-character truncation), so each field is found
-    through the publisher's dictionary.
+    A top-level key is counted over the submissions, through the publisher's
+    dictionary (a Stata column may not carry the field's name: case, 32-character
+    truncation). A key inside a repeat, which publishes one dataset row per instance,
+    is counted over that repeat's long table. Repeats are counted, not refused: the
+    server dataset keeps one row per key (the latest submission), so a resurveyed
+    household is normal.
     """
     import pyarrow.parquet as pq
 
     by_name = {q["variable_name"]: q for q in qs}
     repeats = _repeats(qs)
+    levels = {}
     for field in key:
         q = by_name.get(field)
         if q is None:
@@ -271,12 +275,44 @@ def _check_key(cfg, dataset: str, publisher: str, key: list[str], qs: list[dict]
                 f"[server_datasets.{dataset}] key {field!r} is not a field of "
                 f"{publisher}"
             )
-        if set(q["group_path"]) & repeats:
-            raise ValueError(
-                f"[server_datasets.{dataset}] key {field!r} sits in a repeat of "
-                f"{publisher}; the wide .dta has one row per submission, so it "
-                "cannot be checked there"
+        inner = [g for g in q["group_path"] if g in repeats]
+        levels[field] = inner[-1] if inner else None
+    if len(set(levels.values())) > 1:
+        where = ", ".join(f"{f} in {r or 'the submission'}" for f, r in levels.items())
+        raise ValueError(
+            f"[server_datasets.{dataset}] key fields sit at different levels of "
+            f"{publisher}: {where}"
+        )
+    repeat = levels[key[0]]
+    if repeat is None:
+        path, columns = (
+            _sidecar(cfg, publisher),
+            _key_columns(cfg, dataset, publisher, key),
+        )
+    else:
+        path = long_dir(_sidecar(cfg, publisher)) / f"{repeat}.parquet"
+        if not path.exists():
+            raise SystemExit(
+                f"{path} is missing: run surveycto-vardict --survey {publisher}"
             )
+        names = pq.read_schema(path).names
+        for field in key:
+            if field not in names:
+                raise ValueError(
+                    f"[server_datasets.{dataset}] key {field!r} has no column in "
+                    f"{path.name}: its Stata columns do not carry the instance numbers"
+                )
+        columns = key
+    rows = pq.read_table(path, columns=columns).to_pandas()
+    # Stata stores a missing string as "".
+    missing = rows.isna() | rows.eq("")
+    lacking = int(missing.any(axis=1).sum())
+    repeated = int(rows[~missing.any(axis=1)].duplicated().sum())
+    return repeated, lacking
+
+
+def _key_columns(cfg, dataset: str, publisher: str, key: list[str]) -> list[str]:
+    """Return the publisher's column for each top-level key field."""
     vardict_path = Path(cfg.DATASETS[publisher]["output_json"])
     if not vardict_path.exists():
         raise SystemExit(
@@ -297,12 +333,7 @@ def _check_key(cfg, dataset: str, publisher: str, key: list[str], qs: list[dict]
                 "dictionary; it needs one"
             )
         columns += found
-    rows = pq.read_table(_sidecar(cfg, publisher), columns=columns).to_pandas()
-    # Stata stores a missing string as "".
-    missing = rows.isna() | rows.eq("")
-    lacking = int(missing.any(axis=1).sum())
-    repeated = int(rows[~missing.any(axis=1)].duplicated().sum())
-    return repeated, lacking
+    return columns
 
 
 def _check_parents(entities: dict) -> None:
