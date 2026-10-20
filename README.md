@@ -237,7 +237,7 @@ uv run surveycto-flow     # checks them against the forms and data; writes flow.
 ```
 
 `surveycto-flow` refuses a publisher that is not a survey, a key that is not
-a field of the publisher (or whose fields sit at different levels), and a pulled
+a set of the publisher's fields (or whose fields sit in sibling repeats), and a pulled
 column the publisher has no field for. It counts repeated and blank keys; a key
 inside a repeat is counted over that repeat's long table. A dataset left undeclared is an
 attachment. With `flow.json` in `[project] output_dir`, the agent tools describe

@@ -31,8 +31,9 @@ from collections import Counter
 from pathlib import Path
 
 from surveycto_extractor.config_loader import load_config
-from surveycto_extractor.long_tables import long_dir
+from surveycto_extractor.long_tables import index_columns, long_dir, repeat_parents
 from surveycto_extractor.parsers.xml_contract import is_system_column, pulldata_calls
+from surveycto_extractor.pii import key_column
 
 _REF = re.compile(r"\$\{([^}]+)\}")
 # Expression columns a pulldata() can sit in.
@@ -241,10 +242,6 @@ def suggest_links(cfg) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
-def _repeats(questions: list[dict]) -> set[str]:
-    return {q["repeat_group_name"] for q in questions if q.get("repeat_group_name")}
-
-
 def _sidecar(cfg, survey: str) -> Path:
     path = Path(cfg.DATASETS[survey]["data"]).with_suffix(".parquet")
     if not path.exists():
@@ -253,21 +250,23 @@ def _sidecar(cfg, survey: str) -> Path:
 
 
 def _check_key(cfg, dataset: str, publisher: str, key: list[str], qs: list[dict]):
-    """Check ``key`` is a set of the publisher's fields at one level, each with a
-    column, and return how many rows repeat a key and how many lack one.
+    """Check ``key`` is a set of the publisher's fields, each with a column, and
+    return how many rows repeat a key and how many lack one.
 
     A top-level key is counted over the submissions, through the publisher's
     dictionary (a Stata column may not carry the field's name: case, 32-character
-    truncation). A key inside a repeat, which publishes one dataset row per instance,
-    is counted over that repeat's long table. Repeats are counted, not refused: the
-    server dataset keeps one row per key (the latest submission), so a resurveyed
-    household is normal.
+    truncation). A key with a field inside a repeat, which publishes one dataset row
+    per instance, is counted over that repeat's long table; its other fields may sit
+    at the levels enclosing it (``hhid`` with ``member_id``), joined on ``KEY`` and
+    the enclosing instance numbers. Repeats are counted, not refused: the server
+    dataset keeps one row per key (the latest submission), so a resurveyed household
+    is normal.
     """
     import pyarrow.parquet as pq
 
     by_name = {q["variable_name"]: q for q in qs}
-    repeats = _repeats(qs)
-    levels = {}
+    parents = repeat_parents(qs)
+    levels: dict[str | None, list[str]] = {}
     for field in key:
         q = by_name.get(field)
         if q is None:
@@ -275,35 +274,52 @@ def _check_key(cfg, dataset: str, publisher: str, key: list[str], qs: list[dict]
                 f"[server_datasets.{dataset}] key {field!r} is not a field of "
                 f"{publisher}"
             )
-        inner = [g for g in q["group_path"] if g in repeats]
-        levels[field] = inner[-1] if inner else None
-    if len(set(levels.values())) > 1:
-        where = ", ".join(f"{f} in {r or 'the submission'}" for f, r in levels.items())
+        inner = [g for g in q["group_path"] if g in parents]
+        levels.setdefault(inner[-1] if inner else None, []).append(field)
+    depth = {r: 0 if r is None else len(index_columns(r, parents)) for r in levels}
+    deepest = max(levels, key=depth.get)
+    enclosing = {None} | (
+        set()
+        if deepest is None
+        else {i[: -len("_index")] for i in index_columns(deepest, parents)}
+    )
+    if not set(levels) <= enclosing:
+        where = ", ".join(
+            f"{', '.join(f)} in {r or 'the submission'}" for r, f in levels.items()
+        )
         raise ValueError(
-            f"[server_datasets.{dataset}] key fields sit at different levels of "
-            f"{publisher}: {where}"
+            f"[server_datasets.{dataset}] key fields sit in repeats that do not "
+            f"enclose one another in {publisher}: {where}"
         )
-    repeat = levels[key[0]]
-    if repeat is None:
-        path, columns = (
-            _sidecar(cfg, publisher),
-            _key_columns(cfg, dataset, publisher, key),
-        )
-    else:
-        path = long_dir(_sidecar(cfg, publisher)) / f"{repeat}.parquet"
-        if not path.exists():
-            raise SystemExit(
-                f"{path} is missing: run surveycto-vardict --survey {publisher}"
-            )
-        names = pq.read_schema(path).names
-        for field in key:
-            if field not in names:
-                raise ValueError(
-                    f"[server_datasets.{dataset}] key {field!r} has no column in "
-                    f"{path.name}: its Stata columns do not carry the instance numbers"
+    sidecar = _sidecar(cfg, publisher)
+    submission = key_column(pq.read_schema(sidecar).names)
+    rows = None
+    for repeat in sorted(levels, key=depth.get, reverse=True):
+        fields = levels[repeat]
+        if repeat is None:
+            columns = _key_columns(cfg, dataset, publisher, fields)
+            frame = pq.read_table(sidecar, columns=[submission, *columns]).to_pandas()
+            frame = frame.rename(columns=dict(zip(columns, fields, strict=True)))
+            on = [submission]
+        else:
+            path = long_dir(sidecar) / f"{repeat}.parquet"
+            if not path.exists():
+                raise SystemExit(
+                    f"{path} is missing: run surveycto-vardict --survey {publisher} "
+                    "(a repeat whose columns all stay wide has no long table)"
                 )
-        columns = key
-    rows = pq.read_table(path, columns=columns).to_pandas()
+            names = pq.read_schema(path).names
+            for field in fields:
+                if field not in names:
+                    raise ValueError(
+                        f"[server_datasets.{dataset}] key {field!r} has no column in "
+                        f"{path.name}: its columns stay wide (surveycto-vardict says "
+                        "why)"
+                    )
+            on = [submission, *index_columns(repeat, parents)]
+            frame = pq.read_table(path, columns=[*on, *fields]).to_pandas()
+        rows = frame if rows is None else rows.merge(frame, on=on, how="left")
+    rows = rows[key]
     # Stata stores a missing string as "".
     missing = rows.isna() | rows.eq("")
     lacking = int(missing.any(axis=1).sum())
@@ -356,7 +372,7 @@ def build_flow(cfg) -> dict:
     """Return ``flow.json``: surveys, datasets, reads, joins, keys and the project.
 
     Raises on anything declared that the forms or the data contradict: a publisher
-    that is not a survey, a key that is not a top-level field with a column, a
+    that is not a survey, a key that is not a set of its fields with a column, a
     pulled column the publisher has no field for, a declared dataset no survey
     reads, an entity column no survey carries, an unknown parent or a loop.
     """

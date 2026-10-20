@@ -1098,28 +1098,35 @@ def determine_variable_source(
         )
 
     if var_name != base_name:
-        # 1. Double suffix `base_<a>_<b>`: only a genuine select_multiple-in-
-        #    repeat indicator (type is SM, <a> is a real choice code, and the
-        #    field lives in a repeat). Otherwise it's a plain field with two
-        #    repeat indices -- mark repeat only, never fabricate a choice code
-        #    on a non-SM field. (#26.1)
-        double_match = re.match(rf"{re.escape(base_name)}_(\d+)_(\d+)$", var_name)
+        # 1. Two or more suffixes `base_<a>_<b>...`: a select_multiple binary in a
+        #    repeat carries its choice code then one number per enclosing repeat
+        #    (`crop_1_2_3` at depth 2), so one number more than the depth. With
+        #    exactly the depth it is the instance's answer string (`crop_2_3`), and
+        #    a non-SM field never gets a fabricated choice code. (#26.1) A stale
+        #    bridge with no repeat names counts as depth 1.
+        multi_match = re.match(rf"{re.escape(base_name)}((?:_\d+){{2,}})$", var_name)
         # 2. Negative-code SM indicator `base__<n>` (dash->underscore), optionally
         #    followed by repeat indices. The (\d+) suffix regexes below can't
         #    cross the `__`, so this class was silently demoted to a plain
         #    field before. (#26.3 -- same class as #23)
         neg_match = re.match(rf"{re.escape(base_name)}__(\d+)((?:_\d+)*)$", var_name)
 
-        if double_match:
-            choice_num, repeat_num = double_match.group(1), double_match.group(2)
-            if q_is_sm and choice_num in choice_values and in_repeat:
+        if multi_match:
+            numbers = multi_match.group(1).strip("_").split("_")
+            depth = sum(seg in rgs for seg in question.get("group_path") or []) or 1
+            if (
+                q_is_sm
+                and in_repeat
+                and len(numbers) == depth + 1
+                and numbers[0] in choice_values
+            ):
                 result["is_repeat"] = True
-                result["repeat_iteration"] = int(repeat_num)
-                _mark_select_multiple(choice_num)
+                result["repeat_iteration"] = int(numbers[-1])
+                _mark_select_multiple(numbers[0])
             elif in_repeat:
-                # Plain field with two repeat indices; iteration = last suffix.
+                # Plain field with repeat indices; iteration = last suffix.
                 result["is_repeat"] = True
-                result["repeat_iteration"] = int(repeat_num)
+                result["repeat_iteration"] = int(numbers[-1])
             # else: base mapping stands, no fabricated flags.
         elif neg_match and q_is_sm and f"-{neg_match.group(1)}" in choice_values:
             _mark_select_multiple(f"-{neg_match.group(1)}")
@@ -1138,13 +1145,12 @@ def determine_variable_source(
             active_match = match or match_direct
             if active_match:
                 suffix_num = active_match.group(1)
-                # A binary is `base_<code>`, and in a repeat `base_<code>_<n>`: a
-                # single suffix on a select_multiple in a repeat (`lead_r3`,
-                # `lead_3`) is the instance's answer string, even when the number
-                # is also a choice code.
+                # A binary in a repeat is `base_<code>_<n>`: a single suffix on a
+                # select_multiple in a repeat (`lead_r3`, `lead_3`) is the
+                # instance's answer string, even when the number is also a choice
+                # code.
                 if (
-                    match
-                    and q_is_sm
+                    q_is_sm
                     and str(suffix_num) in choice_values
                     and not _question_in_repeat(question, rgs)
                 ):
@@ -1902,16 +1908,17 @@ def _build_repeat_tree(
             suffix = "".join(parts)
 
         # Join key note
+        # The long table <stem>_long/<repeat>.parquet carries these keys.
         if d == 1:
             join_note = (
-                "Iteration index is the only key -- "
-                "suffix _N maps directly to roster position N."
+                f"Long table keyed KEY + {rg_name}_index; joins the submission on "
+                "KEY. In the wide data, suffix _N is instance N."
             )
         else:
             join_note = (
-                f"Nested repeat -- Stata columns have suffix pattern "
-                f"{suffix}. Join to parent level by matching the first "
-                f"{d - 1} suffix(es)."
+                f"Long table keyed KEY + one _index per enclosing repeat; joins "
+                f"{parent} on KEY and its indices. In the wide data, columns end "
+                f"in {suffix}."
             )
 
         tree[rg_name] = {
@@ -2345,22 +2352,16 @@ def main():
             analyzer,
             enriched,
         )
-        write_long_tables(
-            questions,
-            json.loads(Path(cfg["output_json"]).read_text(encoding="utf-8")),
-            pq_path,
-        )
+        vardict_path = Path(cfg["output_json"])
+        vardict_json = json.loads(vardict_path.read_text(encoding="utf-8"))
+        write_long_tables(questions, vardict_json, pq_path)
 
         # Build variable relationship graph (needs the JSON dict, not the DataFrame)
-        vardict_path = Path(cfg["output_json"])
         graph_path = vardict_path.with_name(
             vardict_path.stem.replace("_variable_dictionary", "_variable_graph")
             + ".json"
         )
-        if vardict_path.exists():
-            with open(vardict_path, encoding="utf-8") as f:
-                vardict_json = json.load(f)
-            build_variable_graph(questions, vardict_json, graph_path)
+        build_variable_graph(questions, vardict_json, graph_path)
 
         if args.xlsx:
             from surveycto_extractor.generators.xlsx_exporter import XLSXExporter

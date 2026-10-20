@@ -38,6 +38,12 @@ QUESTIONS = [
         "choices": [{"value": "1"}, {"value": "2"}, {"value": "-99"}],
     },
     {
+        "variable_name": "crop",
+        "type": "select_multiple",
+        "group_path": ["orpt", "irpt"],
+        "choices": [{"value": "1"}, {"value": "2"}],
+    },
+    {
         "variable_name": "fruits",
         "type": "select_multiple",
         "group_path": [],
@@ -84,9 +90,24 @@ def test_valid_positive_code_select_multiple():
     assert r["choice_code"] == "2"
 
 
+def test_top_level_binary_with_no_underscore():
+    r = _src("fruits1")
+    assert (r["is_select_multiple"], r["choice_code"]) == (True, "1")
+
+
 def test_select_multiple_binary_in_a_repeat_is_choice_first():
     r = _src("colors_2_3")
     assert (r["is_select_multiple"], r["choice_code"]) == (True, "2")
+    assert (r["is_repeat"], r["repeat_iteration"]) == (True, 3)
+
+
+def test_nested_select_multiple_counts_the_numbers_against_the_depth():
+    # Depth 2: two numbers are the instance's answer, three a binary.
+    r = _src("crop_2_3")
+    assert r["is_select_multiple"] is False
+    assert (r["is_repeat"], r["repeat_iteration"]) == (True, 3)
+    r = _src("crop_1_2_3")
+    assert (r["is_select_multiple"], r["choice_code"]) == (True, "1")
     assert (r["is_repeat"], r["repeat_iteration"]) == (True, 3)
 
 

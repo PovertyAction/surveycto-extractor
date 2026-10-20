@@ -113,6 +113,10 @@ work around it. Scripts use every column: merge on a respondent's name, deduplic
 a phone number, clean a free-text field, keep them in the output. What changes is what
 you see: a flagged column's values never reach the conversation.
 
+A long table's column (`member_name` in `member.parquet`) has no dictionary entry of
+its own: it takes the strictest status of the wide columns it stacks
+(`member_name_1`, `member_name_2`, ...). `lookup_variable("member_name")` lists them.
+
 | Status | Basis | You may see |
 |---|---|---|
 | `cleared_by_form` | `publishable`: the XLSForm marks the field publishable | Its values |

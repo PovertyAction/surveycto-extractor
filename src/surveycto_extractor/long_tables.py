@@ -3,15 +3,17 @@
 The Stata export is wide: a field in a repeat has one column per instance
 (``member_age_1``, ``member_age_2``; nested, ``job_wage_1_2``). Each repeat gets one
 table with one row per instance that has any value, keyed by the submission ``KEY``
-column and one ``<repeat>_index`` per repeat from the outermost down
+column (``key`` in a Stata export) and one ``<repeat>_index`` per repeat from the
+outermost down
 (``key, member_index, job_index``). A column keeps its wide name without the
 instance suffix: ``member_age_2`` -> ``member_age``; a select_multiple binary keeps
 its choice, ``tasks_3_2`` -> ``tasks_3``.
 
 The instance numbers come from the column name, after the question's name (and a
-select_multiple binary's choice), one per repeat the question sits in. A column
-whose name does not read that way (Stata truncated it at 32 characters, or another
-form version wrote it with more or fewer numbers) stays wide only.
+select_multiple binary's choice), one per repeat the question sits in. When one of
+a question's columns does not read that way (Stata truncated it at 32 characters, or
+another form version wrote it with more or fewer numbers), all its columns stay wide
+only, so a long column holds every instance or is not there.
 """
 
 import re
@@ -22,6 +24,7 @@ import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
+from surveycto_extractor.parsers.xml_contract import sanitize_choice_value
 from surveycto_extractor.pii import key_column
 
 _INDICES = re.compile(r"_?\d+(?:_\d+)*")
@@ -38,6 +41,13 @@ def repeat_parents(questions: list[dict]) -> dict[str, str | None]:
     Every repeat has a ``repeat_count`` question at its parent's level, so the
     nearest repeat in that question's group path is the parent.
     """
+    if any(
+        q.get("type") == "repeat_count" and not q.get("repeat_group_name")
+        for q in questions
+    ):
+        raise SystemExit(
+            "questions.json predates repeat_group_name: rerun surveycto-extract"
+        )
     counts = {
         q["repeat_group_name"]: q for q in questions if q.get("type") == "repeat_count"
     }
@@ -68,8 +78,8 @@ def _choice_suffix(entry: dict) -> str:
         code = str(survey["choices"]["value"])
     else:
         return ""
-    # Stata names cannot hold "-": SurveyCTO writes choice -99 as __99.
-    return f"__{code[1:]}" if code.startswith("-") else f"_{code}"
+    # SurveyCTO writes a character a Stata name cannot hold as "_": -99 -> __99.
+    return "_" + sanitize_choice_value(code)
 
 
 def placement(questions: list[dict], variables: dict) -> tuple[dict, list[str]]:
@@ -77,13 +87,13 @@ def placement(questions: list[dict], variables: dict) -> tuple[dict, list[str]]:
 
     Returns ``{column: (repeat, long_name, instance_numbers)}`` and the repeat
     columns that stay wide only, because their names do not carry one instance
-    number per enclosing repeat.
+    number per enclosing repeat. A nested repeat's count sits in its parent's
+    instances (``jobs_count_2``), so it goes in the parent's table.
     """
     parents = repeat_parents(questions)
     chain_of = {
         q["variable_name"]: [g for g in q["group_path"] if g in parents]
         for q in questions
-        if q.get("type") != "repeat_count"
     }
     placed, unread = {}, set()
     question_of = {}
@@ -114,6 +124,10 @@ def _has_value(column: pa.ChunkedArray) -> pa.ChunkedArray:
     return valid
 
 
+def _empty(column: pa.ChunkedArray) -> bool:
+    return pc.any(_has_value(column)).as_py() is not True
+
+
 def long_table(
     table: pa.Table, key: str, columns: dict[str, tuple[str, list[int]]], keys: list
 ) -> pa.Table:
@@ -130,25 +144,52 @@ def long_table(
         rows = table.select([key, *wide])
         rows = rows.filter(reduce(pc.or_, [_has_value(rows[c]) for c in wide]))
         index = [pa.array([n] * rows.num_rows, pa.int32()) for n in numbers]
+        # An instance column with no value (Stata types an empty column on its
+        # own, "" or NaN) takes the type of the instances that have values.
+        values = [
+            pa.nulls(rows.num_rows) if _empty(rows[c]) else rows[c].combine_chunks()
+            for c in wide
+        ]
         parts.append(
             pa.Table.from_arrays(
-                [rows[key].combine_chunks(), *index]
-                + [rows[c].combine_chunks() for c in wide],
+                [rows[key].combine_chunks(), *index, *values],
                 names=[*keys, *(columns[c][0] for c in wide)],
             )
         )
-    if not parts:
-        # No submission reached the repeat: its table is the keys, no rows.
-        types = [table.schema.field(key).type] + [pa.int32()] * (len(keys) - 1)
-        return pa.schema(list(zip(keys, types, strict=True))).empty_table()
     long = pa.concat_tables(parts, promote_options="permissive")
     return long.sort_by([(k, "ascending") for k in keys])
+
+
+def _kind(dtype: pa.DataType) -> str | None:
+    if pa.types.is_null(dtype):
+        return None
+    if pa.types.is_string(dtype) or pa.types.is_large_string(dtype):
+        return "text"
+    if pa.types.is_integer(dtype) or pa.types.is_floating(dtype):
+        return "number"
+    return str(dtype)
+
+
+def _mixed(placed: dict, table: pa.Table) -> list[str]:
+    """Return the placed columns whose long column would mix text and numbers.
+
+    SurveyCTO's do-file destrings each wide column alone, so one instance of a field
+    can be numeric and another text; neither type holds both. A column with no value
+    has no kind.
+    """
+    kinds: dict[tuple[str, str], set] = {}
+    for column, (repeat, name, _) in placed.items():
+        kind = None if _empty(table[column]) else _kind(table[column].type)
+        kinds.setdefault((repeat, name), set()).add(kind)
+    mixed = {k for k, found in kinds.items() if len(found - {None}) > 1}
+    return [c for c, (r, name, _) in placed.items() if (r, name) in mixed]
 
 
 def write_long_tables(questions: list[dict], vardict: dict, parquet: Path) -> Path:
     """Write ``<stem>_long/<repeat>.parquet`` for every repeat; return the directory.
 
-    Raises when two columns land on the same long column, or one is named like a key.
+    A repeat none of whose columns could be placed gets no table. Raises when two
+    columns land on the same long column, or one is named like a key.
     """
     parents = repeat_parents(questions)
     placed, wide = placement(questions, vardict["variables"])
@@ -156,33 +197,52 @@ def write_long_tables(questions: list[dict], vardict: dict, parquet: Path) -> Pa
     for old in out.glob("*.parquet"):
         old.unlink()
     if not parents:
+        if out.exists():
+            out.rmdir()
         return out
     out.mkdir(exist_ok=True)
     table = pq.read_table(parquet)
     key = key_column(table.column_names)
-    summary = []
+    mixed = _mixed(placed, table)
+    for column in mixed:
+        del placed[column]
+    summary, unplaced = [], []
     for repeat in sorted(parents):
         keys = [key, *index_columns(repeat, parents)]
         columns = {c: (name, n) for c, (r, name, n) in placed.items() if r == repeat}
-        seen: dict[tuple, str] = {}
+        if not columns:
+            unplaced.append(repeat)
+            continue
+        # Named by question and instance only: a withheld list's codes are in its
+        # columns' names.
+        seen: set[tuple] = set()
         for column, (name, numbers) in columns.items():
+            question = vardict["variables"][column]["survey"]["original_variable_name"]
             if name in keys:
                 raise ValueError(
-                    f"{column}: its long name {name!r} is a key of {repeat}.parquet"
+                    f"{question}: its long column is named like a key of "
+                    f"{repeat}.parquet"
                 )
-            other = seen.setdefault((name, *numbers), column)
-            if other != column:
+            if (name, *numbers) in seen:
                 raise ValueError(
-                    f"{other} and {column} both land on {name!r} of the same "
-                    f"{repeat} instance"
+                    f"two columns of {question} land on the same long column of "
+                    f"{repeat} instance {numbers}"
                 )
+            seen.add((name, *numbers))
         long = long_table(table, key, columns, keys)
         pq.write_table(long, out / f"{repeat}.parquet")
         summary.append(f"{repeat} ({long.num_rows} rows)")
-    print(f"  Long tables in {out.name}: {', '.join(summary)}")
+    print(f"  Long tables in {out.name}: {', '.join(summary) or 'none'}")
     if wide:
         print(
             f"  {len(wide)} repeat columns stay wide only: their names do not carry "
             "one instance number per repeat"
         )
+    if mixed:
+        print(
+            f"  {len(mixed)} repeat columns stay wide only: their instances mix text "
+            "and numbers"
+        )
+    if unplaced:
+        print(f"  No long table for {', '.join(unplaced)}: every column stays wide")
     return out
