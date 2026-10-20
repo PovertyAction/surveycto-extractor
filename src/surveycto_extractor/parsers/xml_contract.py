@@ -221,14 +221,28 @@ def _parse_pulldata(calc: str | None) -> dict | None:
     }
 
 
-def pulldata_columns(expr: str | None) -> list[str]:
-    """Return ``dataset.column`` for every ``pulldata()`` call in ``expr``."""
+def pulldata_calls(expr: str | None) -> list[dict]:
+    """Return every ``pulldata()`` call in ``expr`` as ``{dataset, column, key,
+    match}`` (``match`` is the 4th argument as written, or None).
+    """
     out = []
     for m in re.finditer(r"(?<![\w-])pulldata\s*\(", expr or "", re.IGNORECASE):
         args = _split_call_args(expr[m.start() :], "pulldata")
         if args and len(args) >= 2:
-            out.append(f"{_unquote(args[0])}.{_unquote(args[1])}")
+            out.append(
+                {
+                    "dataset": _unquote(args[0]),
+                    "column": _unquote(args[1]),
+                    "key": _unquote(args[2]) if len(args) > 2 else None,
+                    "match": args[3].strip() if len(args) > 3 else None,
+                }
+            )
     return out
+
+
+def pulldata_columns(expr: str | None) -> list[str]:
+    """Return ``dataset.column`` for every ``pulldata()`` call in ``expr``."""
+    return [f"{c['dataset']}.{c['column']}" for c in pulldata_calls(expr)]
 
 
 def _parse_search(appearance: str | None) -> dict | None:

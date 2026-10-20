@@ -76,3 +76,21 @@
 # # A column with more distinct values is scanned on a sample of this size, drawn with seed.
 # max_distinct = 1000
 # seed = 0
+
+# --- How the surveys connect (optional; `surveycto-links` suggests these) ----
+# Which form publishes a server dataset is a server setting no form records, so
+# it is declared here; `surveycto-flow` checks it and writes flow.json, which the
+# survey-expert tools read (get_project, lineage across forms).
+# [project]
+# name        = "my_study"
+# output_dir  = "survey_documentation"   # where flow.json is written
+# description = "..."                    # what the study is about, in your words
+#
+# [server_datasets.hh_roster]            # the dataset id pulldata()/search() name
+# published_by = "baseline"              # a [datasets] key
+# key          = ["hhid"]                # the columns that identify a row
+#
+# [entities.household]
+# key         = "hhid"                   # or a list of columns, together
+# description = "A household listed at baseline"
+# # parent    = "village"                # another entity, when it sits inside one

@@ -222,7 +222,25 @@ teams or PIs.
 Customise the preamble's `${input_data}` path and the `sumstats_dir` global
 via the `output_do` and `sumstats_dir_stata` keys in your `DATASETS` entry.
 
-### 4. Query the dictionary from your AI agent
+### 4. Connect the surveys (projects with more than one form)
+
+When one survey reads another's data through a server dataset (`pulldata()`,
+`search()`), declare which form publishes it: that is a server setting no form
+records.
+
+```bash
+uv run surveycto-links    # candidate [server_datasets.*] / [entities.*] tables
+# confirm or correct them, add them to config.toml, then:
+uv run surveycto-flow     # checks them against the forms and data; writes flow.json
+```
+
+`surveycto-flow` refuses a publisher that is not a survey, a key that does not
+identify one row of the publisher's data (or sits in a repeat), and a pulled
+column the publisher has no field for. A dataset left undeclared is an
+attachment. With `flow.json` in `[project] output_dir`, the agent tools describe
+the project (`get_project`) and trace a value across forms (`trace_lineage`).
+
+### 5. Query the dictionary from your AI agent
 
 This is where the project's AI-native design pays off — see the next section.
 
@@ -292,6 +310,7 @@ directory (override with `SURVEYCTO_CONFIG`). Every tool takes an optional
 | A group's questions in order | `get_group(group)` | `group GROUP` |
 | Where a value comes from | `trace_lineage(name)` | `lineage NAME` |
 | Repeat group hierarchy | `get_repeat_structure()` | `repeats` |
+| What the project is about, how its surveys connect | `get_project()` | `project` |
 | Survey overview | `get_survey_info()` | `info` |
 
 When the MCP server is not connected, the same answers come from the skill's
