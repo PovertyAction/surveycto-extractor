@@ -36,10 +36,12 @@ from surveycto_extractor.long_tables import (
     placement,
     repeat_parents,
 )
+from surveycto_extractor.pii import key_column
 from surveycto_extractor.survey import coded_aliases, render_structure
 
-# Schemas DuckDB keeps for itself.
-_RESERVED = {"main", "temp", "information_schema", "pg_catalog"}
+# Schemas DuckDB keeps for itself; it also names the file's catalog after the
+# project. It compares names ignoring case.
+_RESERVED = {"main", "temp", "system", "information_schema", "pg_catalog"}
 
 # Each survey's description tables: what one row is, the key, what each refers to.
 # `{s}` is the survey's schema, quoted.
@@ -54,13 +56,15 @@ _DESCRIPTIONS = {
     "questions": {"grain": "one row per question", "key": ["question"], "joins": []},
     "choices": {
         "grain": "one row per choice questions.json lists (a withheld list keeps "
-        "only the form's own items)",
-        "key": ["question", "value"],
+        "only the form's own items); position: its place in the list, which can "
+        "repeat a value",
+        "key": ["question", "position"],
         "joins": ["{s}.choices.question = {s}.questions.question"],
     },
     "edges": {
-        "grain": "one row per link in the variable graph",
-        "key": ["source", "target", "type"],
+        "grain": "one row per link in the variable graph; edge_key tells apart "
+        "links of one type between the same two questions",
+        "key": ["source", "target", "type", "edge_key"],
         "joins": [
             "{s}.edges.source = {s}.questions.question",
             "{s}.edges.target = {s}.questions.question",
@@ -110,7 +114,7 @@ def _load(path: Path, rerun: str):
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def _check_view(con, view: str, expected: list[str]) -> None:
+def _check_view(con, view: str, expected: list[str], aliases: dict) -> None:
     """Raise when ``view``'s columns are not ``expected``.
 
     DuckDB ignores case in names and renames the later of two that clash (``Age``,
@@ -119,7 +123,12 @@ def _check_view(con, view: str, expected: list[str]) -> None:
     """
     got = con.sql(f"SELECT * FROM {view} LIMIT 0").columns
     if got != expected:
-        renamed = [f"{e} to {g}" for e, g in zip(expected, got, strict=True) if e != g]
+        # Shown as the map shows them: a withheld list's codes are in its names.
+        renamed = [
+            f"{aliases.get(e, e)} to {aliases.get(g, g)}"
+            for e, g in zip(expected, got, strict=True)
+            if e != g
+        ]
         raise ValueError(
             f"{view}: DuckDB ignores case in column names, so it renamed "
             f"{', '.join(renamed)} to keep it apart from a column of the same name"
@@ -164,8 +173,6 @@ def _inner_repeat(question: dict, parents: dict) -> str | None:
 
 def _write_survey(con, cfg, survey: str, structure: dict) -> dict:
     """Write one survey's schema; return where each question's column is."""
-    if survey in _RESERVED:
-        raise ValueError(f"[datasets.{survey}]: DuckDB keeps the schema {survey!r}")
     paths = cfg.DATASETS[survey]
     rerun = f"surveycto-vardict --survey {survey}"
     questions = _load(
@@ -186,13 +193,16 @@ def _write_survey(con, cfg, survey: str, structure: dict) -> dict:
         raise SystemExit(f"{sidecar} is missing: run {rerun}")
     variables = vardict["variables"]
     parents = repeat_parents(questions)
-    # A repeat view sits beside submissions and the description tables.
+    # A repeat view sits beside submissions and the description tables; DuckDB
+    # compares the names ignoring case.
+    taken = {"submissions", *_DESCRIPTIONS}
     for repeat in parents:
-        if repeat == "submissions" or repeat in _DESCRIPTIONS:
+        if repeat.lower() in taken:
             raise ValueError(
                 f"{survey}: the repeat {repeat!r} has the name of the "
-                f"{survey}.{repeat} table the database writes"
+                f"{survey}.{repeat.lower()} table the database writes"
             )
+        taken.add(repeat.lower())
 
     # The view each column is read from, and its name there: its repeat's long
     # view when the long table holds it, else submissions.
@@ -200,13 +210,20 @@ def _write_survey(con, cfg, survey: str, structure: dict) -> dict:
     long_columns = {
         p.stem: pq.read_schema(p).names for p in sorted(long.glob("*.parquet"))
     }
+    stale = sorted(set(long_columns) - set(parents))
+    if stale:
+        raise SystemExit(
+            f"{long}: {', '.join(stale)} is no repeat of the form: run {rerun}"
+        )
     placed, _ = placement(questions, variables)
     view_of = {
         c: (r, name)
         for c, (r, name, _) in placed.items()
         if name in long_columns.get(r, [])
     }
-    wide = [c for c in pq.read_schema(sidecar).names if c not in view_of]
+    sidecar_columns = pq.read_schema(sidecar).names
+    key = key_column(sidecar_columns)
+    wide = [c for c in sidecar_columns if c not in view_of]
     aliases = coded_aliases(variables, questions)
 
     con.execute(f"CREATE SCHEMA {_ident(survey)}")
@@ -216,10 +233,10 @@ def _write_survey(con, cfg, survey: str, structure: dict) -> dict:
         + ", ".join(_ident(c) for c in wide)
         + f" FROM read_parquet({source})"
     )
-    _check_view(con, _q(survey, "submissions"), wide)
+    _check_view(con, _q(survey, "submissions"), wide, aliases)
     structure[f"{survey}.submissions"] = {
         "grain": "one row per submission",
-        "key": ["KEY"],
+        "key": [key],
         "joins": [],
         "shown_as": {c: aliases[c] for c in wide if c in aliases},
     }
@@ -228,22 +245,26 @@ def _write_survey(con, cfg, survey: str, structure: dict) -> dict:
         this = _q(survey, repeat)
         source = _literal((long / f"{repeat}.parquet").resolve().as_posix())
         con.execute(f"CREATE VIEW {this} AS SELECT * FROM read_parquet({source})")
-        _check_view(con, this, names)
-        # An instance joins its parent on the parent's keys, named alike in both.
-        parent = _q(survey, parents[repeat] or "submissions")
-        on = " AND ".join(
-            f"{this}.{_ident(k)} = {parent}.{_ident(k)}" for k in keys[:-1]
-        )
+        long_aliases = {
+            name: aliases[c].split(">", 1)[0] + ">"
+            for c, (r, name) in view_of.items()
+            if r == repeat and c in aliases
+        }
+        _check_view(con, this, names, long_aliases)
+        # An instance joins the nearest enclosing view on that view's keys, named
+        # alike in both; a repeat with no long table has no view.
+        outer = parents[repeat]
+        while outer is not None and outer not in long_columns:
+            outer = parents[outer]
+        parent = _q(survey, outer or "submissions")
+        shared = [key, *(index_columns(outer, parents) if outer else [])]
+        on = " AND ".join(f"{this}.{_ident(k)} = {parent}.{_ident(k)}" for k in shared)
         structure[f"{survey}.{repeat}"] = {
             "grain": f"one row per instance of the repeat {repeat} that has any value",
             "key": keys,
             "joins": [f"{on}  (many to one)"],
             # A long column drops the instance numbers, and so does its alias.
-            "shown_as": {
-                name: aliases[c].split(">", 1)[0] + ">"
-                for c, (r, name) in view_of.items()
-                if r == repeat and c in aliases
-            },
+            "shown_as": long_aliases,
         }
 
     by_name = {q["variable_name"]: q for q in questions}
@@ -299,21 +320,27 @@ def _write_survey(con, cfg, survey: str, structure: dict) -> dict:
             [
                 {
                     "question": q["variable_name"],
+                    "position": i,
                     "value": str(c.get("value")),
                     "label": c.get("label"),
                 }
                 for q in questions
-                for c in q.get("choices") or []
+                for i, c in enumerate(q.get("choices") or [], start=1)
             ],
-            columns=["question", "value", "label"],
+            columns=["question", "position", "value", "label"],
         ),
         "edges": pd.DataFrame(
             [
-                {"source": e["source"], "target": e["target"], "type": e["type"]}
+                {
+                    "source": e["source"],
+                    "target": e["target"],
+                    "type": e["type"],
+                    "edge_key": e["key"],
+                }
                 # networkx 3.4 (py3.10) writes "links"; 3.6 writes "edges".
                 for e in (graph["edges"] if "edges" in graph else graph["links"])
             ],
-            columns=["source", "target", "type"],
+            columns=["source", "target", "type", "edge_key"],
         ),
     }
     for name, frame in tables.items():
@@ -324,17 +351,25 @@ def _write_survey(con, cfg, survey: str, structure: dict) -> dict:
             "joins": [j.format(s=_ident(survey)) for j in described["joins"]],
         }
 
-    def where(field: str) -> tuple[str, str]:
-        """Return the view and column a top-level or repeat field is read from."""
+    def where(field: str) -> tuple[str, str | None]:
+        """Return the view and column a field is read from; the column is None for
+        a repeat field that stays wide (one column per instance in submissions).
+        """
         columns = [
             c
             for c, v in variables.items()
             if v["survey"].get("original_variable_name") == field
         ]
-        if len(columns) == 1 and columns[0] in wide:
-            return "submissions", columns[0]
+        # A select_multiple in a repeat has its answer and its binaries in the
+        # long view: the field is the column named after it.
         long = {view_of[c] for c in columns if c in view_of}
-        return next(iter(long)) if len(long) == 1 else ("submissions", field)
+        if field in {name for _, name in long}:
+            return next((r, name) for r, name in long if name == field)
+        if len(columns) == 1:
+            return "submissions", columns[0]
+        if not columns:
+            raise ValueError(f"{survey}: {field} has no column in its dictionary")
+        return "submissions", None
 
     return {"where": where}
 
@@ -352,6 +387,7 @@ def _write_project(con, flow: dict, surveys: dict, structure: dict) -> None:
                 "reader": j["reader"],
                 "reader_table": reader_table,
                 "reader_field": reader_column,
+                "field": j["field"],
                 "dataset": j["dataset"],
                 "dataset_column": j["column"],
                 "publisher": j["publisher"],
@@ -401,8 +437,9 @@ def _write_project(con, flow: dict, surveys: dict, structure: dict) -> None:
             ],
             columns=["survey", "field", "via", "dataset", "dataset_column", "match"],
         ),
+        # field: the reader's form field, for the map; reader_field is its column.
         "joins": pd.DataFrame(
-            joins,
+            [{k: v for k, v in j.items() if k != "field"} for j in joins],
             columns=[
                 "reader",
                 "reader_table",
@@ -417,14 +454,26 @@ def _write_project(con, flow: dict, surveys: dict, structure: dict) -> None:
     }
     for name, frame in tables.items():
         _table(con, "main", name, frame)
+
+    def side(survey: str, table: str, column: str | None, field: str) -> str:
+        if column is None:
+            return f"{_q(survey, table)}: the columns of {field}, one per instance"
+        return f"{_q(survey, table)}.{_ident(column)}"
+
     structure.update(_PROJECT)
     structure["joins"] = {
         **_PROJECT["joins"],
         "joins": [
-            f"{_q(j['reader'], j['reader_table'])}.{_ident(j['reader_field'])} = "
-            f"{_q(j['publisher'], j['publisher_table'])}."
-            f"{_ident(j['publisher_field'])}  (pulldata() through dataset "
-            f"{j['dataset']}, column {j['dataset_column']})"
+            side(j["reader"], j["reader_table"], j["reader_field"], j["field"])
+            + " = "
+            + side(
+                j["publisher"],
+                j["publisher_table"],
+                j["publisher_field"],
+                j["dataset_column"],
+            )
+            + f"  (pulldata() through dataset {j['dataset']}, column "
+            f"{j['dataset_column']})"
             for j in joins
         ],
     }
@@ -443,8 +492,20 @@ def write_database(cfg) -> Path:
     out = Path(project["output_dir"])
     flow = _load(out / "flow.json", "surveycto-flow")
     name = project["name"]
+    taken = _RESERVED | {name.lower()}
+    for s in flow["surveys"]:
+        if s["key"].lower() in taken:
+            raise ValueError(
+                f"[datasets.{s['key']}]: DuckDB names a schema or the database "
+                f"{s['key'].lower()!r} already (it ignores case); rename the survey "
+                "or [project] name"
+            )
+        taken.add(s["key"].lower())
     path = out / f"{name}.duckdb"
-    path.unlink(missing_ok=True)
+    maps = [out / f"{name}_db.json", out / f"{name}_db.sql"]
+    # A failed build leaves no database and no map of an older one.
+    for stale in [path, *maps]:
+        stale.unlink(missing_ok=True)
     con = duckdb.connect(str(path))
     # Each object's grain, key and joins, recorded as it is created.
     structure: dict[str, dict] = {}
@@ -481,14 +542,17 @@ def write_database(cfg) -> Path:
                     ],
                 }
             )
-    finally:
+    except BaseException:
         con.close()
+        path.unlink()
+        raise
+    con.close()
     order = {key: i for i, key in enumerate(structure)}
     objects.sort(key=lambda o: order[o["name"]])
-    (out / f"{name}_db.json").write_text(
+    maps[0].write_text(
         json.dumps(objects, indent=2, ensure_ascii=False), encoding="utf-8"
     )
-    (out / f"{name}_db.sql").write_text(
+    maps[1].write_text(
         render_structure(name, objects, all_columns=True) + "\n", encoding="utf-8"
     )
     return path

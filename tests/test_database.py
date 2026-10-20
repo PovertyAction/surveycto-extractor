@@ -5,6 +5,7 @@ the synthetic project (one survey, nested repeats) and the two-survey flow proje
 import json
 
 import duckdb
+import pandas as pd
 import pytest
 import synthetic_project
 from test_flow import QUESTIONS, _project
@@ -162,11 +163,11 @@ def test_a_repeat_named_like_a_table_is_refused(tmp_path):
     _graphs(cfg)
     path = cfg.DATASETS["baseline"]["questions_json"]
     questions = [
-        q if q["type"] != "repeat_count" else {**q, "repeat_group_name": "edges"}
+        q if q["type"] != "repeat_count" else {**q, "repeat_group_name": "Edges"}
         for q in QUESTIONS["baseline"]
     ]
     questions = [
-        {**q, "group_path": ["edges"]} if q["variable_name"] == "member_name" else q
+        {**q, "group_path": ["Edges"]} if q["variable_name"] == "member_name" else q
         for q in questions
     ]
     path.write_text(json.dumps(questions), "utf-8")
@@ -197,3 +198,102 @@ def test_aliases_keep_every_instance_number():
     }
     aliases = survey.coded_aliases({"x_e_1_1_3": entry, "x_e_1_2_3": entry}, [])
     assert aliases == {"x_e_1_1_3": "x_<1>_1_3", "x_e_1_2_3": "x_<1>_2_3"}
+
+
+def test_a_failed_rebuild_leaves_no_database_and_no_old_map(tmp_path):
+    cfg = _project(tmp_path)
+    _graphs(cfg)
+    _flow(cfg)
+    path = database.write_database(cfg)
+    stale = cfg.DATASETS["baseline"]["data"].with_name("baseline_long")
+    stale.mkdir()
+    pd.DataFrame({"key": ["k1"], "gone_index": [1]}).to_parquet(stale / "gone.parquet")
+    with pytest.raises(SystemExit, match="gone is no repeat of the form"):
+        database.write_database(cfg)
+    assert not path.exists()
+    assert not path.with_name("study_db.json").exists()
+    store = survey.SurveyStore(cfg.DATASETS, path.with_name("flow.json"))
+    assert store.get_structure_db().startswith("No study_db.json")
+
+
+def test_a_repeat_view_joins_the_nearest_view_above_it(tmp_path):
+    # hh has no long table (every column stayed wide): member joins submissions.
+    cfg = _project(tmp_path)
+    _graphs(cfg)
+    path = cfg.DATASETS["baseline"]["questions_json"]
+    questions = json.loads(path.read_text("utf-8"))
+    for q in questions:
+        if q["variable_name"] == "members_count":
+            q["group_path"] = ["hh"]
+        if q["variable_name"] == "member_name":
+            q["group_path"] = ["hh", "members"]
+    questions.append(_q_repeat("hh_count", "hh"))
+    path.write_text(json.dumps(questions), "utf-8")
+    long = cfg.DATASETS["baseline"]["data"].with_name("baseline_long")
+    long.mkdir()
+    pd.DataFrame(
+        {"key": ["k1"], "hh_index": [1], "members_index": [1], "member_name": ["A"]}
+    ).to_parquet(long / "members.parquet")
+    _flow(cfg)
+    objects = json.loads(
+        database.write_database(cfg).with_name("study_db.json").read_text("utf-8")
+    )
+    members = next(o for o in objects if o["name"] == "baseline.members")
+    assert members["key"] == ["key", "hh_index", "members_index"]
+    assert members["joins"] == [
+        '"baseline"."members"."key" = "baseline"."submissions"."key"  (many to one)'
+    ]
+
+
+def _q_repeat(name, repeat):
+    return {
+        "variable_name": name,
+        "type": "repeat_count",
+        "repeat_group_name": repeat,
+        "group_path": [],
+        "question_text": name,
+        "calculation": None,
+        "data_source": None,
+        "gates": [],
+        "relevance": None,
+        "choice_list": None,
+        "choices": None,
+    }
+
+
+def test_structure_messages(tmp_path):
+    cfg = _project(tmp_path)
+    _graphs(cfg)
+    flow_path = _flow(cfg)
+    database.write_database(cfg)
+    store = survey.SurveyStore(cfg.DATASETS, flow_path)
+    assert store.get_structure_db(table="submissions").startswith("No schema given")
+    data = json.loads(flow_path.read_text("utf-8"))
+    data["project"]["name"] = None
+    flow_path.write_text(json.dumps(data), "utf-8")
+    store = survey.SurveyStore(cfg.DATASETS, flow_path)
+    assert store.get_structure_db().startswith("No [project] name")
+
+
+def test_every_key_in_the_map_holds(synthetic):
+    _, path, _ = synthetic
+    objects = json.loads(path.with_name("synthetic_db.json").read_text("utf-8"))
+    con = duckdb.connect(str(path), read_only=True)
+    for o in objects:
+        table = ".".join(f'"{p}"' for p in o["name"].split("."))
+        keys = ", ".join(f'"{k}"' for k in o["key"])
+        total, distinct = con.sql(
+            f"SELECT count(*), count(DISTINCT ({keys})) FROM {table}"
+        ).fetchone()
+        assert total == distinct, o["name"]
+    con.close()
+
+
+def test_names_duckdb_already_holds_are_refused(tmp_path):
+    # DuckDB names the file's catalog after the project and ignores case.
+    cfg = _project(tmp_path)
+    _graphs(cfg)
+    _flow(cfg)
+    cfg.PROJECT["name"] = "Baseline"
+    with pytest.raises(ValueError, match=r"rename the survey or \[project\] name"):
+        database.write_database(cfg)

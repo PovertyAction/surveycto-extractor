@@ -89,7 +89,9 @@ def _pii_line(entry: dict) -> str | None:
     return f"{block['status']} ({', '.join(block['basis'])})"
 
 
-# SurveyCTO writes a character a Stata name cannot hold as "_" (-99 -> __99).
+# SurveyCTO writes a character a Stata name cannot hold as "_" (-99 -> __99). A
+# copy of xml_contract.sanitize_choice_value: this module stays standard library
+# only, since the skill ships it alone as search_survey.py.
 _NAME_UNSAFE = re.compile(r"[^A-Za-z0-9_]")
 
 
@@ -118,9 +120,9 @@ def coded_aliases(vardict: dict, questions: list[dict]) -> dict[str, str]:
         ):
             continue
         choice = survey_data.get("choices")
-        code = (entry.get("contract") or {}).get("choice_code") or (
-            choice.get("value") if isinstance(choice, dict) else var_name
-        )
+        code = (entry.get("contract") or {}).get("choice_code")
+        if code is None:
+            code = choice.get("value") if isinstance(choice, dict) else var_name
         seen = positions.setdefault(question, {})
         n = seen.setdefault(code, len(seen) + 1)
         stem = f"{question}_{_NAME_UNSAFE.sub('_', str(code))}"
@@ -2270,10 +2272,17 @@ class SurveyStore:
                 "then surveycto-duckdb."
             )
         project = self._flow["project"]["name"]
+        if not project:
+            return (
+                "No [project] name in config.toml: set it, then run surveycto-flow "
+                "and surveycto-duckdb."
+            )
         path = self._flow_path.parent / f"{project}_db.json"
         if not path.exists():
             return f"No {path.name}: run surveycto-duckdb to build {project}.duckdb."
         objects = json.loads(path.read_text(encoding="utf-8"))
+        if schema is None and table is not None:
+            return f"No schema given for table {table!r}: name its schema too."
         if schema is None:
             return render_structure_summary(project, objects)
         schemas = sorted({_db_schema(o["name"]) for o in objects})

@@ -250,8 +250,9 @@ uv run surveycto-duckdb   # <output_dir>/<name>.duckdb and its map, <name>_db.js
 `surveycto-duckdb` writes one database for the project. Per survey there is a
 `submissions` view, a view per long repeat table, and `dictionary` (with
 `pii_status`), `questions`, `choices` and `edges` tables; `main` holds the surveys,
-datasets, reads and joins from `flow.json`. Views read the parquet files, so the
-database holds no response values; rerun it after `surveycto-vardict`. The map
+datasets, reads and joins from `flow.json`. Views read the parquet files by their
+full path, so the database holds no response values and is rebuilt on each machine
+rather than shared; rerun it after `surveycto-vardict`. The map
 (`get_structure_db`) gives each table's grain, key and joins.
 
 ### 5. Query the dictionary from your AI agent
