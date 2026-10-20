@@ -54,6 +54,8 @@ Every MCP tool takes an optional `survey` (a partial match on the survey key, as
 | A choice list and the variables that use it | `get_choice_list(list_name)` | `choices LIST` |
 | Why a question is asked | `get_gate_chain(name)` | `gates NAME` |
 | What feeds, gates or constrains it, and its repeat siblings | `get_variable_neighborhood(name, depth=1)` | `neighborhood NAME [--depth N]` |
+| A group's questions in order, with each condition | `get_group(group)` | `group GROUP` |
+| Where a value comes from, back to the questions someone answered | `trace_lineage(name)` | `lineage NAME` |
 | Repeat groups: nesting, count variables, max iterations, Stata suffixes | `get_repeat_structure()` | `repeats` |
 | Survey overview | `get_survey_info()` | `info` |
 
@@ -75,6 +77,12 @@ spaCy models the `[pii]` config names. Rerun it after upgrading the toolkit.
   inputs carry sentinels into the calculate; calculated-by outputs change with it; a
   gate makes its dependants disappear; repeat siblings belong to the same instance and
   are handled together.
+- Where a value comes from: `trace_lineage`. It follows a calculate to the fields its
+  formula reads and a `pulldata()` or `search()` to the dataset column and the field
+  it is matched on, down to answered questions; a dataset's own rows come from outside
+  the form.
+- A section as the enumerator met it: `get_group`, with the group's condition, the
+  enclosing groups' and each subgroup's.
 - Reshaping, merging or aggregating across levels: `get_repeat_structure` first. It
   gives each repeat's parent, count variable and expression, max iterations, Stata
   suffix pattern and join key.

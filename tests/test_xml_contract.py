@@ -111,7 +111,12 @@ class TestParseContract:
 
     def test_pulldata_provenance(self, contract):
         node = contract.nodes["pre_score"]
-        assert node.pulldata == {"dataset": "preload", "value": "'score'", "key": "id"}
+        assert node.pulldata == {
+            "dataset": "preload",
+            "value": "'score'",
+            "key": "id",
+            "match": "/myform/name",
+        }
         assert node.data_source["kind"] == "pulldata"
 
     def test_search_data_source(self, contract):
@@ -359,7 +364,12 @@ class TestPureHelpers:
 
     def test_parse_pulldata(self):
         pd = _parse_pulldata("pulldata('roster', 'name', 'hhid', ${x})")
-        assert pd == {"dataset": "roster", "value": "'name'", "key": "hhid"}
+        assert pd == {
+            "dataset": "roster",
+            "value": "'name'",
+            "key": "hhid",
+            "match": "${x}",
+        }
         assert _parse_pulldata("today()") is None
 
     def test_parse_search(self):

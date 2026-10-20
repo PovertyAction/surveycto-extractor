@@ -265,6 +265,8 @@ The skill answers questions like:
   natural-language queries work)
 - "Why is `income_1` missing for some observations?" → `get_gate_chain`
 - "What depends on `crpsale_qty`?" → `get_variable_neighborhood`
+- "Where does `a_enum_name` come from?" → `trace_lineage` (here a `pulldata()` of
+  `baseline_enum_list`, matched on the enumerator picked from a `search()` list)
 
 It also tells the agent how to treat PII: a flagged column is used in scripts
 but its values never reach the conversation (counts and `KEY`s only), and the
@@ -287,6 +289,8 @@ directory (override with `SURVEYCTO_CONFIG`). Every tool takes an optional
 | A choice list and its users | `get_choice_list(list_name)` | `choices LIST` |
 | Why a question is asked | `get_gate_chain(name)` | `gates NAME` |
 | What feeds, gates or sits beside it | `get_variable_neighborhood(name, depth=1)` | `neighborhood NAME [--depth N]` |
+| A group's questions in order | `get_group(group)` | `group GROUP` |
+| Where a value comes from | `trace_lineage(name)` | `lineage NAME` |
 | Repeat group hierarchy | `get_repeat_structure()` | `repeats` |
 | Survey overview | `get_survey_info()` | `info` |
 

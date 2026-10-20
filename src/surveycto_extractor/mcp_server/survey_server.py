@@ -237,6 +237,32 @@ def get_repeat_structure(survey: str = "") -> str:
     return _get_store().get_repeat_structure(survey=survey or None)
 
 
+@server.tool()
+def get_group(group: str, survey: str = "") -> str:
+    """List a group's questions in form order, with their type and condition.
+
+    Shows the group's own relevance, the enclosing groups' conditions (outermost
+    first) and each subgroup's condition once, where its questions start. Use it to
+    read a section of the form as the enumerator met it.
+
+    Use the survey parameter to filter to a specific survey (partial match).
+    """
+    return _get_store().get_group(group, survey=survey or None)
+
+
+@server.tool()
+def trace_lineage(name: str, survey: str = "") -> str:
+    """Trace where a field's value comes from, step by step within the form.
+
+    A calculate leads to the fields its formula reads; a pulldata() or search() to
+    the dataset column it is read from and the field it is matched on; the chain
+    ends at the questions someone answered. Accepts a Stata column name.
+
+    Use the survey parameter to filter to a specific survey (partial match).
+    """
+    return _get_store().trace_lineage(name, survey=survey or None)
+
+
 def main() -> None:
     """Entry point for ``surveycto-mcp``: load the project and serve over stdio."""
     _get_store()

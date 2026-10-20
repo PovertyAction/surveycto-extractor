@@ -116,6 +116,18 @@ def test_instrument_day_and_phase4(sample_env, monkeypatch):
     assert questions_path.exists()
     questions = json.loads(questions_path.read_text(encoding="utf-8"))
     assert len(questions) == 236  # sample form ground truth
+    by_name = {q["variable_name"]: q for q in questions}
+    # A repeat's count sits at its parent's level: the parent's gates only.
+    consented = [{"group": "consented_grp", "relevance": "${c_consent} = 1"}]
+    assert by_name["f_hr_rpt_count"]["gates"] == consented
+    assert by_name["f_hr_fn_r"]["group_path"][-1] == "f_hr_rpt"
+    assert by_name["a_enum_name"]["data_source"] == {
+        "kind": "pulldata",
+        "dataset": "baseline_enum_list",
+        "value": "'enum_name'",
+        "key": "enum_id",
+        "match": "${a_enum_id}",
+    }
     assert (out / "household_survey_structure.txt").exists()
     assert (out / "sections").is_dir()
 

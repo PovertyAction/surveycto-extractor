@@ -101,6 +101,18 @@ class GroupStack:
         """Return all parent group relevance conditions."""
         return [g.relevance for g in self.stack if g.relevance]
 
+    def get_gates(self) -> list[dict[str, str]]:
+        """Return each enclosing group's condition with its name, outermost first.
+
+        ``get_inherited_relevance`` drops the groups without a condition, so it
+        cannot be paired with ``get_current_path``; this keeps the pairing.
+        """
+        return [
+            {"group": g.name, "relevance": g.relevance}
+            for g in self.stack
+            if g.relevance
+        ]
+
     def is_disabled(self) -> bool:
         """Check if any ancestor group has relevance=0 (disabled)."""
         return any(g.relevance == "0" for g in self.stack)

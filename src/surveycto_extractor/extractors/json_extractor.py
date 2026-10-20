@@ -11,6 +11,7 @@ import pandas as pd
 from surveycto_extractor.config_loader import load_config
 from surveycto_extractor.parsers.group_tracker import GroupStack
 from surveycto_extractor.parsers.type_parser import parse_question_type
+from surveycto_extractor.parsers.xml_contract import parse_data_source
 from surveycto_extractor.transformers.logic_converter import LogicConverter
 
 config = load_config()
@@ -506,6 +507,10 @@ class JSONExtractor:
             "appearance": appearance,
             "references": references,
             "group_path": group_path,
+            "gates": self.group_stack.get_gates(),
+            # search() / pulldata() provenance: the dataset, column and match a
+            # value is read from (trace_lineage follows it).
+            "data_source": parse_data_source(appearance, calculation),
             "stata_skip_logic": stata_skip_logic,
         }
         # Note when the choices list was narrowed by a static filter, so
@@ -598,6 +603,8 @@ class JSONExtractor:
                     "required": False,
                     "calculation": repeat_count_expr,
                     "group_path": parent_path,
+                    "gates": self.group_stack.get_gates(),
+                    "data_source": None,
                     "stata_skip_logic": stata_skip_logic,
                     "repeat_group_name": repeat_name,
                     "question_order": q_order,
