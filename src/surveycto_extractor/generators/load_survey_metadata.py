@@ -9,6 +9,7 @@ import pandas as pd
 # present) may override SENTINEL_MEANINGS; a present-but-broken config raises
 # loudly rather than silently reverting to the default recode (#5).
 from surveycto_extractor.config_loader import load_config
+from surveycto_extractor.pii import shows_values
 
 _config = load_config()
 try:
@@ -51,6 +52,9 @@ def load_survey_metadata(json_path: str) -> pd.DataFrame:
                 "choice_list": survey.get("choice_list"),
                 "group_path": survey.get("group_path"),
                 "group_relevances": survey.get("group_relevances"),
+                # Written by surveycto-vardict's PII pass; a dictionary built
+                # before it lacks the block and stops here (re-run vardict).
+                "pii_status": var_data["pii"]["status"],
             }
         )
 
@@ -83,7 +87,8 @@ def get_numeric_universe(survey_metadata: pd.DataFrame) -> pd.DataFrame:
 
     Keeps rows whose 'type' is one of: select_one, select_multiple, integer,
     decimal, calculate, calculate_here, repeat_count, date — AND that have at
-    least one non-null observation in the Stata dataset.
+    least one non-null observation in the Stata dataset — AND whose values the
+    PII gate shows (a flagged column's min, max and mean are its values).
 
     Returns a subset DataFrame with the same columns/index as the input.
     """
@@ -91,6 +96,7 @@ def get_numeric_universe(survey_metadata: pd.DataFrame) -> pd.DataFrame:
         survey_metadata["type"].isin(NUMERIC_TYPES)
         & (survey_metadata["non_null_count"] > 0)
         & (~survey_metadata["disabled"].astype(bool))
+        & survey_metadata["pii_status"].map(shows_values)
     )
     subset = survey_metadata[mask].copy()
 
@@ -786,7 +792,7 @@ def filter_truly_numeric(
 
     Prints:
         - Count of purely-numeric vars (skipped), convertible, non_convertible
-        - For each non_convertible: variable name + up to 5 example bad values
+        - For each non_convertible: variable name + count of distinct non-numeric values
 
     """
     # -----------------------------------------------------------------------
@@ -826,7 +832,7 @@ def filter_truly_numeric(
     # -----------------------------------------------------------------------
     convertible: list[str] = []
     non_convertible: list[str] = []
-    bad_examples: dict[str, list[str]] = {}
+    bad_counts: dict[str, int] = {}
 
     for var in str_vars:
         col = df[var].dropna().astype(str)
@@ -838,7 +844,7 @@ def filter_truly_numeric(
             convertible.append(var)
         else:
             non_convertible.append(var)
-            bad_examples[var] = bad.unique()[:5].tolist()
+            bad_counts[var] = bad.nunique()
 
     # -----------------------------------------------------------------------
     # 4. Print diagnostics
@@ -848,12 +854,11 @@ def filter_truly_numeric(
     print(f"  Non-convertible (drop)      : {len(non_convertible):,}")
 
     if non_convertible:
-        print("\n  Non-convertible variables (name + example values):")
+        # Counts, never values: a non-numeric entry can be anything a respondent
+        # typed.
+        print("\n  Non-convertible variables (name + distinct non-numeric values):")
         for var in non_convertible:
-            examples = ", ".join(repr(v) for v in bad_examples[var])
-            # Guard against Windows cp1252 terminal encoding issues
-            safe = examples.encode("ascii", errors="replace").decode("ascii")
-            print(f"    {var:40s}  {safe}")
+            print(f"    {var:40s}  {bad_counts[var]:,}")
 
     return convertible, non_convertible
 

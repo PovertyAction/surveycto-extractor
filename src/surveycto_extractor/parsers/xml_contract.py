@@ -18,7 +18,7 @@ of the variable dictionary:
 This is deliberately the database-side contract. `questions.json` (built by the
 extractor's Phase 2 from the XLSForm + external choices CSV) enriches each node
 with question text / choice labels / skip logic; the wide dataset realizes the
-nodes into actual columns. `surveycto-enrich` overlays this contract onto
+nodes into actual columns. `surveycto-vardict` overlays this contract onto
 the variable dictionary produced by `surveycto-vardict`.
 
 Pure stdlib (`xml.etree.ElementTree`) -- no third-party XML dependency. The
@@ -215,6 +215,16 @@ def _parse_pulldata(calc: str | None) -> dict | None:
         "value": args[1].strip(),
         "key": _unquote(args[2]),
     }
+
+
+def pulldata_columns(expr: str | None) -> list[str]:
+    """Return ``dataset.column`` for every ``pulldata()`` call in ``expr``."""
+    out = []
+    for m in re.finditer(r"(?<![\w-])pulldata\s*\(", expr or "", re.IGNORECASE):
+        args = _split_call_args(expr[m.start() :], "pulldata")
+        if args and len(args) >= 2:
+            out.append(f"{_unquote(args[0])}.{_unquote(args[1])}")
+    return out
 
 
 def _parse_search(appearance: str | None) -> dict | None:

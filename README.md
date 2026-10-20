@@ -161,8 +161,8 @@ as the authoritative, deterministic spine:
 xml_path = "data/forms/my_survey.xml"
 ```
 
-Then re-run Phase 4 (or `uv run surveycto-enrich --survey my_survey` to
-overlay without rebuilding). Each variable gains a `contract` block recording
+Then re-run Phase 4, which applies the overlay before the PII pass. Each
+variable gains a `contract` block recording
 exactly **where it comes from** — `node_path`, repeat coordinates,
 `select_multiple` choice code, and `data_source` (parsed `search()` / `pulldata()`
 provenance). Columns fuzzy matching missed are resolved with no false positives,
@@ -170,7 +170,21 @@ and select-from-file choice labels are pulled from the form's attached CSVs.
 
 This is **optional and additive**: omit `xml_path` and Phase 4 behaves exactly as
 before. It's worth saving the XForm — it is the one input that makes the mapping
-deterministic. See `surveycto-enrich`.
+deterministic.
+
+#### The PII pass
+
+Phase 4 gives every column a `pii` block (`status` + `basis`): `cleared_by_form`
+(the XLSForm marks it `publishable`), `whitelisted`, `no_hits`, `may_contain_pii`
+(Presidio found names, phones, emails or places) or `contains_pii` (device
+metadata, GPS, attachments, a blacklisted field, or a calculate reading one).
+Flagged columns show counts, never values, in the dictionary, the summary stats
+and the agent tools; their values go to `<dta stem>_pii_review.xlsx` next to the
+`.dta` for the team to verify, and choice lists read from data (the external
+choices CSV, `search()` CSVs) are withheld when they hold personal data. Review
+the workbook and settle disagreements in `[pii] whitelist` / `blacklist` (see the
+config template). Presidio needs a spaCy model per survey language, installed in
+your project with the `uv add <model wheel URL>` line the first run prints.
 
 ### 2. Use the variable graph
 

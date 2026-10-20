@@ -818,7 +818,7 @@ class SurveyStore:
 
             # XML contract — deterministic "where it comes from" provenance, present
             # only when the dictionary was enriched with a compiled-XForm contract
-            # (surveycto-enrich). Purely additive: renders nothing otherwise.
+            # (the XML overlay in surveycto-vardict). Purely additive: renders nothing otherwise.
             contract = entry.get("contract")
             if contract:
                 kind = contract.get("kind")

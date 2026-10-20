@@ -29,7 +29,7 @@
 # output_json    = "survey_documentation/my_survey/my_survey_variable_dictionary.json"
 # output_xlsx    = "survey_documentation/my_survey/my_survey_variable_dictionary.xlsx"
 # # skip_ord_dta = true
-# # Optional compiled-XForm contract overlay (deterministic mapping; see surveycto-enrich):
+# # Optional compiled-XForm contract overlay (deterministic mapping; applied by surveycto-vardict):
 # # xml_path             = "data/forms/my_survey.xml"
 # # xml_attachments_dirs = ["data/forms"]
 
@@ -49,3 +49,30 @@
 # [sentinels.meanings]                  # code -> [human label, Stata extended-missing]
 # "-99" = ["Don't know", ".d"]
 # "-88" = ["Refused to answer", ".r"]
+
+# --- PII classification (optional; these are the defaults) ------------------
+# Every column gets a PII status; flagged columns show counts, never values, in
+# everything an agent reads. Flagged values go to <dta stem>_pii_review.xlsx next
+# to the .dta for the team to verify.
+# [pii]
+# # Question or Stata column names you reviewed and cleared; a pulldata() column
+# # as dataset.column.
+# whitelist = []
+# # Names you reviewed as personal data; outranks publishable.
+# blacklist = []
+# # false: publishable fields are not cleared; they go through the type rules and Presidio.
+# trust_publishable = true
+# # true: the project holds no personal data: every column not blacklisted or
+# # collection metadata is whitelisted with basis "project"; Presidio never runs.
+# no_personal_data = false
+# # Presidio's spaCy model per language. A model must be installed in the project:
+# #   uv add https://github.com/explosion/spacy-models/releases/download/<model>-3.8.0/<model>-3.8.0-py3-none-any.whl
+# languages = { es = "es_core_news_lg", en = "en_core_web_lg" }
+# # The entities Presidio looks for, and extra ones by regex.
+# entities = ["PERSON", "PHONE_NUMBER", "EMAIL_ADDRESS", "LOCATION"]
+# id_patterns = { NATIONAL_ID = '\b\d{8,10}\b' }
+# # The lowest Presidio score that counts as a hit (bare phone numbers score 0.4).
+# score_threshold = 0.4
+# # A column with more distinct values is scanned on a sample of this size, drawn with seed.
+# max_distinct = 1000
+# seed = 0

@@ -25,9 +25,8 @@ entry carries an `xml_path` pointing at an existing XForm; otherwise this is a
 no-op and the dictionary is left exactly as Phase 4 wrote it. Fuzzy matching
 stays the default for the (common) case where no compiled XML was saved.
 
-Usage:
-    uv run surveycto-enrich --survey KEY     # one dataset
-    uv run surveycto-enrich --all            # every dataset with an xml_path
+It runs only inside `surveycto-vardict`, before the PII pass: run on its own it
+would put back the unscreened `search()` choices the pass withholds.
 
 Config (per-dataset, in config.DATASETS):
     "xml_path":            Path("forms/my_form.xml"),   # compiled XForm (enables this)
@@ -36,11 +35,9 @@ Config (per-dataset, in config.DATASETS):
 
 from __future__ import annotations
 
-import argparse
 import csv
 import json
 import re
-import sys
 from collections import Counter
 from pathlib import Path
 
@@ -276,9 +273,12 @@ def enrich_contract(
     xml_path,
     attachment_dirs=None,
     data_path=None,
+    write=True,
 ) -> dict:
     """Overlay the XML contract onto a variable_dictionary.json, in place.
 
+    With ``write=False`` the enriched dictionary is only returned: vardict writes
+    it after the PII pass, so unscreened search() choices never reach the disk.
     Operates on explicit paths so it is decoupled from config; `enrich_dataset`
     wraps this with config.DATASETS lookups.
     """
@@ -419,7 +419,7 @@ def enrich_contract(
             # re-running enrichment on an ALREADY-ENRICHED dictionary is idempotent
             # (markers + counters). Note: the Phase-4 hook writes a fresh dictionary
             # each build before enriching, so `prior` is empty there -- this branch
-            # only fires on a standalone `surveycto-enrich` re-run.
+            # only fires when enrich_contract runs twice on one dictionary.
             if prior.get("resolved_by") == "xml-heuristic":
                 entry["contract"]["resolved_by"] = "xml-heuristic"
                 n_xml_heuristic += 1
@@ -483,7 +483,10 @@ def enrich_contract(
         "formdef_version_drift": len(versions) > 1,
     }
 
-    dict_path.write_text(json.dumps(d, indent=2, ensure_ascii=False), encoding="utf-8")
+    if write:
+        dict_path.write_text(
+            json.dumps(d, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
     drift = len(versions) > 1
     print(
         f"[{dict_path.name}] enriched: "
@@ -509,17 +512,10 @@ def _dataset_xml_path(cfg: dict):
     return xp
 
 
-def enrich_dataset(dataset_name: str, cfg: dict | None = None) -> dict | None:
-    """Enrich one dataset's dictionary from its config entry. No-op without xml_path.
-
-    `cfg` may be passed by the Phase-4 caller (which already has it); otherwise it
-    is loaded from config.DATASETS.
+def enrich_dataset(dataset_name: str, cfg: dict) -> dict | None:
+    """Return one dataset's dictionary enriched from its config entry, unwritten
+    (vardict writes it after the PII pass), or None without an xml_path.
     """
-    if cfg is None:
-        from surveycto_extractor.config_loader import get_datasets
-
-        cfg = get_datasets()[dataset_name]
-
     xml_path = _dataset_xml_path(cfg)
     if xml_path is None:
         return None
@@ -535,51 +531,5 @@ def enrich_dataset(dataset_name: str, cfg: dict | None = None) -> dict | None:
         xml_path=xml_path,
         attachment_dirs=attachment_dirs,
         data_path=cfg.get("data"),
+        write=False,
     )
-
-
-def main() -> None:
-    """Overlay the compiled-XForm contract onto one or all variable dictionaries."""
-    parser = argparse.ArgumentParser(
-        description="Overlay the compiled-XForm contract onto a variable dictionary."
-    )
-    g = parser.add_mutually_exclusive_group(required=True)
-    g.add_argument(
-        "--survey", metavar="KEY", help="one dataset key from config.DATASETS"
-    )
-    g.add_argument(
-        "--all", action="store_true", help="every dataset that has an xml_path"
-    )
-    args = parser.parse_args()
-
-    from surveycto_extractor.config_loader import get_datasets
-
-    DATASETS = get_datasets()
-
-    if not DATASETS:
-        print("ERROR: config.DATASETS is empty. Add survey entries to config.toml.")
-        sys.exit(1)
-
-    if args.survey:
-        if args.survey not in DATASETS:
-            print(
-                f"ERROR: '{args.survey}' not in config.DATASETS. "
-                f"Available: {', '.join(DATASETS.keys())}"
-            )
-            sys.exit(1)
-        keys = [args.survey]
-    else:
-        keys = list(DATASETS.keys())
-
-    any_enriched = False
-    for key in keys:
-        result = enrich_dataset(key, DATASETS[key])
-        any_enriched = any_enriched or (result is not None)
-    if not any_enriched:
-        print(
-            "\nNo datasets enriched (none have a usable 'xml_path' in config.DATASETS)."
-        )
-
-
-if __name__ == "__main__":
-    main()

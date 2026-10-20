@@ -36,7 +36,6 @@ _CLI_SOURCES = {
     "surveycto-extract": "src/surveycto_extractor/cli/extract.py",
     "surveycto-vardict": "src/surveycto_extractor/cli/vardict.py",
     "surveycto-summary-stats": "src/surveycto_extractor/cli/summary_stats.py",
-    "surveycto-enrich": "src/surveycto_extractor/cli/enrich.py",
 }
 
 

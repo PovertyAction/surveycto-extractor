@@ -4,12 +4,13 @@ import argparse
 import json
 import sys
 
-from surveycto_extractor.config_loader import load_config
+from surveycto_extractor.config_loader import load_config, pii_config
 from surveycto_extractor.extractors.csv_extractor import CSVExtractor
 from surveycto_extractor.extractors.json_extractor import JSONExtractor
 from surveycto_extractor.generators.diagram_generator import DiagramGenerator
 from surveycto_extractor.generators.section_splitter import SectionSplitter
 from surveycto_extractor.parsers.survey_parser import SurveyParser
+from surveycto_extractor.pii import screen_external_lists
 from surveycto_extractor.transformers.logic_converter import clear_strip_log
 
 # config.py is per-project and gitignored; discovered from the working directory
@@ -65,6 +66,14 @@ class SurveyDocumentationSystem:
         choice_lists = parser.get_choice_lists()
         print(f"[OK] Loaded choices: {len(choice_lists)} choice lists")
 
+        # Lists from the external CSV are data: withheld lists never reach the
+        # choices CSV, questions.json or the sections.
+        choices_df, self.withheld_lists = screen_external_lists(
+            survey_df, choices_df, parser.external_lists, pii_config(config)
+        )
+        for list_name, reasons in self.withheld_lists.items():
+            print(f"[PII] withheld choice list {list_name}: {', '.join(reasons)}")
+
         return survey_df, choices_df
 
     def run_csv_phase(self, survey_df, choices_df):
@@ -80,7 +89,12 @@ class SurveyDocumentationSystem:
 
     def run_json_phase(self, survey_df, choices_df):
         """Phase 2: Extract questions JSON and generate structure diagram."""
-        json_extractor = JSONExtractor(survey_df, choices_df, self.config["output_dir"])
+        json_extractor = JSONExtractor(
+            survey_df,
+            choices_df,
+            self.config["output_dir"],
+            withheld_lists=self.withheld_lists,
+        )
         questions = json_extractor.extract_all_questions()
         json_path = json_extractor.save_json(
             questions, f"{self.survey_key}_questions.json"

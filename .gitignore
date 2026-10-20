@@ -45,6 +45,8 @@ data/
 *_survey.csv
 *_choices.csv
 *_ord.dta
+# Flagged PII values for review: written next to the .dta, never committed.
+*_pii_review.xlsx
 sections/
 sample/output/
 

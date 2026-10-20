@@ -216,7 +216,11 @@ class JSONExtractor:
     """Extract complete question metadata to JSON."""
 
     def __init__(
-        self, survey_df: pd.DataFrame, choices_df: pd.DataFrame, output_dir: Path
+        self,
+        survey_df: pd.DataFrame,
+        choices_df: pd.DataFrame,
+        output_dir: Path,
+        withheld_lists: dict[str, list[str]],
     ):
         """Initialize extractor.
 
@@ -224,9 +228,12 @@ class JSONExtractor:
             survey_df: Survey sheet DataFrame
             choices_df: Choices sheet DataFrame
             output_dir: Output directory for JSON files
+            withheld_lists: Choice lists withheld for PII, with the reasons
+                (``pii.screen_external_lists``); their questions say why.
 
         """
         self.survey_df = survey_df
+        self.withheld_lists = withheld_lists
         self.choices_df = choices_df
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -425,7 +432,7 @@ class JSONExtractor:
         # dynamically populates a select's choice list from a media-bundle
         # CSV -- so a select whose choices look like a single placeholder in
         # the XLSForm (peer rosters, enumerator lists) really has the CSV's
-        # rows as its choice universe. surveycto-enrich reads it to build the
+        # rows as its choice universe. The XML overlay (cli/enrich.py) reads it to build the
         # choice index that decodes those wide columns.
         appearance = row.get("appearance", None) or None
 
@@ -508,6 +515,8 @@ class JSONExtractor:
             question["choice_filter_applied"] = "static"
         elif choice_filter:
             question["choice_filter_applied"] = "dynamic"
+        if choice_list in self.withheld_lists:
+            question["choices_withheld"] = self.withheld_lists[choice_list]
 
         return question
 
