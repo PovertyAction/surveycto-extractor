@@ -150,6 +150,7 @@ def project_section(config) -> str:
                 "",
                 f"{len(repeats)} {groups}, one long table each in `{long}` "
                 "(`get_repeat_structure` lists them)."
+                + " A long table's columns, key and join: `get_structure_db(survey, table)`."
                 + (" Nested ones join their parent on its keys:" if nested else ""),
             ]
             if nested:

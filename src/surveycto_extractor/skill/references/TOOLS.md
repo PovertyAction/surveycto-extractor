@@ -50,7 +50,7 @@ built before the PII pass is refused: re-run `surveycto-vardict`.
 | `get_choice_list(list_name)` | `choices LIST` |
 | `get_gate_chain(name)` | `gates NAME` |
 | `get_variable_neighborhood(name, depth=1)` | `neighborhood NAME [--depth N]` |
-| `get_group(group)` | `group GROUP` |
+| `get_group(group, detail)` | `group GROUP [--detail]` |
 | `trace_lineage(name)` | `lineage NAME` |
 | `get_repeat_structure()` | `repeats` |
 | `get_survey_info()` | `info` |

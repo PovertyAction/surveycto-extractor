@@ -524,6 +524,29 @@ def test_get_group_shows_each_gate_once(tmp_path):
         _write_form(tmp_path / "c").get_group("visits")
         == "No group named 'visits'. Close: visit"
     )
+    # detail adds the label, the choice list and the calculation under each question.
+    long = "pulldata('roster', 'owner', 'hhid', ${hhid}) " + "x" * 100
+    _write_form(tmp_path / "d")
+    path = tmp_path / "d" / "docs" / "f_questions.json"
+    questions = json.loads(path.read_text("utf-8"))
+    questions[2].update(type="select_one", choice_list="visits")
+    # An unlabelled calculate carries its formula as its text: shown once.
+    questions[4]["question_text"] = questions[4]["calculation"]
+    questions[3]["calculation"] = long
+    path.write_text(json.dumps(questions), "utf-8")
+    store = srv.SurveyStore(srv.discover(tmp_path / "d"))
+    assert store.get_group("hh", detail=True).splitlines() == [
+        "[f] hh: 4 questions, asked if ${consent} = 1",
+        "  hhid (text)",
+        '      "Household ID"',
+        "  n_visits (select_one visits)  if ${hhid} != ''",
+        '      "Visits"',
+        "  -- visit: if ${n_visits} > 0",
+        "  owner (calculate) [visit]",
+        f"      = {long[:100]} [...{len(long) - 100} chars]",
+        "  greeting (calculate) [visit]",
+        "      = concat('Hi ', ${owner}, ${greeting})",
+    ]
 
 
 def test_trace_lineage_walks_calculates_and_pulldata(tmp_path):
@@ -544,12 +567,16 @@ def test_new_tools_through_the_shell_and_mcp(tmp_path, capsys, monkeypatch):
     store = _write_form(tmp_path)
     for argv, expected in (
         (["group", "hh"], store.get_group("hh")),
+        (["group", "hh", "--detail"], store.get_group("hh", detail=True)),
         (["lineage", "owner"], store.trace_lineage("owner")),
     ):
         srv.main(["--dir", str(tmp_path), *argv])
         assert capsys.readouterr().out == expected + "\n"
     monkeypatch.setattr(survey_server, "_store", store)
     assert survey_server.get_group("hh") == store.get_group("hh")
+    assert survey_server.get_group("hh", detail=True) == store.get_group(
+        "hh", detail=True
+    )
     assert survey_server.trace_lineage("owner") == store.trace_lineage("owner")
 
 

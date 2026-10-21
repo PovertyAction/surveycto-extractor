@@ -242,16 +242,19 @@ def get_repeat_structure(survey: str = "") -> str:
 
 
 @server.tool()
-def get_group(group: str, survey: str = "") -> str:
+def get_group(group: str, survey: str = "", detail: bool = False) -> str:
     """List a group's questions in form order, with their type and condition.
 
     Shows the group's own relevance, the enclosing groups' conditions (outermost
     first) and each subgroup's condition once, where its questions start. Use it to
     read a section of the form as the enumerator met it.
 
+    detail=True adds each question's label, choice list and calculation (cut
+    short): use it when starting a cleaning module on that section.
+
     Use the survey parameter to filter to a specific survey (partial match).
     """
-    return _get_store().get_group(group, survey=survey or None)
+    return _get_store().get_group(group, survey=survey or None, detail=detail)
 
 
 @server.tool()

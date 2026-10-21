@@ -18,9 +18,11 @@ section before any task; where it differs from the general advice here, it wins.
 
 The `survey-expert` MCP tools answer in one call what would otherwise take reading
 large JSON files. Every tool takes an optional `survey` (a partial match on the survey
-key). Start a module with one `lookup_variables` call on all the variables it reads:
-each call is a turn, and one batch replaces a dozen single lookups. Look a variable up
-on its own only when you need the questions around it.
+key). Each call is a turn, so start a module with two: `get_group(section,
+detail=True)` reads the section as the enumerator met it (labels, recall periods,
+choice lists, calculations), and one `lookup_variables` call on the variables it reads
+gives their sentinels, repeats and `pii`. Look a variable up on its own only when you
+need the questions around it.
 
 | Need | Tool |
 |---|---|
@@ -30,16 +32,17 @@ on its own only when you need the questions around it.
 | Why a value is missing | `get_gate_chain(name)` |
 | What feeds, gates or constrains it, and its repeat siblings | `get_variable_neighborhood(name)` |
 | Where a calculated or preloaded value comes from | `trace_lineage(name)` |
-| A section as the enumerator met it | `get_group(group)` |
+| A section as the enumerator met it, in form order | `get_group(group, detail=True)` |
 | A choice list and every variable using it | `get_choice_list(list_name)` |
 | Repeat nesting, count variables, Stata suffixes | `get_repeat_structure()` |
 | Survey and project overview | `get_survey_info()`, `get_project()` |
-| The project database's tables, before writing SQL | `get_structure_db(schema, table)` |
+| A long table's columns, key and join to its parent; the database before writing SQL | `get_structure_db(survey, table)` |
 
 The data sit next to the `.dta`: `<stem>.parquet` with every column, and
 `<stem>_long/<repeat>.parquet`, one row per repeat instance keyed by `KEY` and a
 `<repeat>_index` per enclosing repeat. Read a long table instead of reshaping the wide
-columns. Without the MCP, or for a file or field the tools do not show, see
+columns, and take its columns from `get_structure_db`, not by describing the parquet:
+the map shows a withheld list's codes by position. Without the MCP, or for a file or field the tools do not show, see
 `references/TOOLS.md`.
 
 ## How a form becomes Stata columns
