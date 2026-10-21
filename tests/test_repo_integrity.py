@@ -156,8 +156,8 @@ def test_path_building_idioms_are_not_reported():
 def test_resolution_is_case_exact():
     """A wrong-case reference is dead on Linux and must not pass on Windows."""
     disk = _on_disk()
-    assert "src/surveycto_extractor/skill/references/STATA.md" in disk
-    assert "src/surveycto_extractor/skill/references/stata.md" not in disk
+    assert "src/surveycto_extractor/skill/references/PII.md" in disk
+    assert "src/surveycto_extractor/skill/references/pii.md" not in disk
 
 
 def test_an_allowed_prefix_does_not_suppress_a_dead_sibling():

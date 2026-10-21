@@ -221,6 +221,7 @@ def test_no_flagged_value_reaches_an_agent(capsys, project):
     survey.main([*shell, "search", "staff", "visit"], store=store)
     survey.main([*shell, "repeats"], store=store)
     survey.main([*shell, "group", "contact_grp"], store=store)
+    survey.main([*shell, "group", "contact_grp", "--detail"], store=store)
     survey.main([*shell, "info"], store=store)
 
     answers = capsys.readouterr()
@@ -253,6 +254,7 @@ def test_no_flagged_value_in_mcp_answers(project, monkeypatch):
     texts.append(mcp.get_survey_info())
     texts.append(mcp.get_repeat_structure())
     texts.append(mcp.get_group("contact_grp"))
+    texts.append(mcp.get_group("contact_grp", detail=True))
     for words in ("name", "phone", "household roster", "date of birth", "staff"):
         texts.append(mcp.search_questions(words))
     for list_name in ("yesno", "hh", "roster", "staff"):

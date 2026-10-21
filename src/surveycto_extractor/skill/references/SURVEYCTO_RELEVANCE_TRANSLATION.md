@@ -644,7 +644,7 @@ assert (
 
 ## See Also
 
-- [STATA.md — SurveyCTO Skip Logic in Stata](STATA.md#surveycto-skip-logic-in-stata) — runtime pitfalls (`r(109)`, `r(111)`, `r(2000)`)
+- [skip-logic.md — SurveyCTO Skip Logic in Stata](skip-logic.md#surveycto-skip-logic-in-stata) — runtime pitfalls (`r(109)`, `r(111)`, `r(2000)`)
 - `transformers/logic_converter.py` — implementation file. The `LogicConverter.validate_translations(conditions)` method scans a list of already-converted Stata skip-logic strings and reports how many still contain untranslated SurveyCTO calls — useful for spotting converter gaps after extending the form coverage.
 - `extractors/json_extractor.py` — caller that builds the `question_types` dict
 - [`docs/surveycto_refs/expressions.md`](https://github.com/PovertyAction/surveycto-extractor/blob/main/docs/surveycto_refs/expressions.md) — in-house function-catalog primer (the converter's working reference for what each SurveyCTO function does)

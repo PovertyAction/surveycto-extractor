@@ -213,7 +213,8 @@ def render_structure_summary(project: str, objects: list[dict]) -> str:
         deepest = max((len(o["key"]) - 1 for o in repeats), default=0)
         lines += [
             "",
-            f"-- schema {schema}: submissions ({width} columns); repeat views: "
+            f"-- schema {schema}: submissions ({width} columns outside the repeat views); "
+            f"repeat views: "
             f"{len(repeats)}, nested up to {deepest} deep; description tables: "
             f"{len(tables)}",
         ]
@@ -2069,9 +2070,13 @@ class SurveyStore:
 
         return "\n".join(lines)
 
-    def get_group(self, group: str, survey: str | None = None) -> str:
+    def get_group(
+        self, group: str, survey: str | None = None, detail: bool = False
+    ) -> str:
         """List a group's questions in form order, with their type and condition:
         the group's own gate, the enclosing groups' and each subgroup's once.
+        ``detail`` adds each question's label, choice list and calculation, cut
+        short: what a cleaning module needs to know about its section.
         """
         self._check_reload()
         if self.is_empty:
@@ -2113,7 +2118,19 @@ class SurveyStore:
                         lines.append(f"  -- {g['group']}: if {g['relevance']}")
                 where = f" [{'/'.join(inner)}]" if inner else ""
                 when = f"  if {q['relevance']}" if q["relevance"] else ""
-                lines.append(f"  {q['variable_name']} ({q['type']}){where}{when}")
+                kind = q["type"]
+                if detail and q.get("choice_list"):
+                    kind += f" {q['choice_list']}"
+                lines.append(f"  {q['variable_name']} ({kind}){where}{when}")
+                if detail:
+                    # A label can span lines; one line each keeps the listing scannable.
+                    text = " ".join((q.get("question_text") or "").split())
+                    calc = " ".join((q.get("calculation") or "").split())
+                    # An unlabelled calculate carries its formula as its text.
+                    if text and text != calc:
+                        lines.append(f'      "{_trunc(text, 80)}"')
+                    if calc:
+                        lines.append(f"      = {_trunc(calc, 100)}")
             results.append("\n".join(lines))
 
         if not results:
@@ -2487,6 +2504,9 @@ def main(argv: list[str] | None = None, store: SurveyStore | None = None) -> Non
     hood.add_argument("--depth", type=int, default=1)
     group = sub.add_parser("group", help="a group's questions in order")
     group.add_argument("group")
+    group.add_argument(
+        "--detail", action="store_true", help="add labels, choice lists, calculations"
+    )
     lineage = sub.add_parser("lineage", help="where a field's value comes from")
     lineage.add_argument("name")
     sub.add_parser("repeats", help="repeat groups: nesting, counts, suffixes")
@@ -2516,7 +2536,7 @@ def main(argv: list[str] | None = None, store: SurveyStore | None = None) -> Non
     elif args.command == "neighborhood":
         out = store.get_neighborhood(args.name, depth=args.depth, survey=survey)
     elif args.command == "group":
-        out = store.get_group(args.group, survey=survey)
+        out = store.get_group(args.group, survey=survey, detail=args.detail)
     elif args.command == "lineage":
         out = store.trace_lineage(args.name, survey=survey)
     elif args.command == "repeats":

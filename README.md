@@ -277,17 +277,24 @@ From your project directory (the one with `config.toml`):
 uv run surveycto-skill
 ```
 
-This does three things:
+This does four things:
 
 1. Writes the skill into `.claude/skills/survey-expert/`: `SKILL.md`, the
-   cleaning guides under `references/`, and `search_survey.py`.
-2. Adds the `survey-expert` server (`uv run surveycto-mcp`) to `.mcp.json`,
+   cleaning and setup guides under `references/`, and `search_survey.py`.
+   `SKILL.md` opens with a `## This project` section built from your config and
+   outputs: each survey's size and PII counts, the missing-value codes found in
+   the data, every repeat group with its parent, count variable and long table,
+   and where the files are.
+2. Adds a `## Survey project` section to the project's `CLAUDE.md` when it has
+   none: the study, which survey each pipeline reads, the team's conventions, and
+   its rulings. The skill reads it before any task; fill it in with the agent
+   (`references/SETUP.md` walks through it). An existing section is never touched.
+3. Adds the `survey-expert` server (`uv run surveycto-mcp`) to `.mcp.json`,
    creating the file if needed.
-3. Installs the spaCy models your `[pii]` config names, so the PII pass runs.
+4. Installs the spaCy models your `[pii]` config names, so the PII pass runs.
 
-Rerun it after upgrading the toolkit so the skill matches the outputs. Nothing
-needs filling in: the skill is project-agnostic and reads whatever surveys the
-docs folders hold. It refuses to run inside this repository itself; to try the
+Rerun it after upgrading the toolkit or rebuilding the outputs, so the project
+section matches them. It refuses to run inside this repository itself; to try the
 MCP server on the sample here, `cp .mcp.json.example .mcp.json`.
 
 The skill answers questions like:
@@ -343,14 +350,22 @@ for the server's details.
 
 ### Cleaning guides and SurveyCTO primers
 
-The skill ships three project-agnostic guides under `references/`, which the
-agent reads before writing or reviewing cleaning code and offers as
-suggestions the people cleaning decide on:
+The skill ships project-agnostic guides under `references/`, one per cleaning
+task with the principle first and the Stata code after it. SKILL.md tells the
+agent which one to read when it reaches that step, so a session loads only the
+guides its task needs; they are suggestions the people cleaning decide on:
 
-- `CLEANING.md` — language-independent cleaning principles
-- `STATA.md` — Stata-specific patterns and guardrails
+- `missing-values.md` — sentinel codes, structural vs. response missing
+- `skip-logic.md` — zero-by-logic, skip-logic violations, short surveys
+- `aggregates.md` — totals with missing handling, consistency checks
+- `repeats-and-merges.md` — reshapes, select_multiple, deterministic joins
+- `other-specify.md` — other-specify coding, one-off corrections
+- `module-structure.md` — module layout, assertions, QC reporting
+- `stata-style.md` — Stata style, guardrails, batch mode, debugging
 - `SURVEYCTO_RELEVANCE_TRANSLATION.md` — SurveyCTO → Stata skip logic
   translation rules
+- `PII.md`, `TOOLS.md`, `SETUP.md` — PII statuses, output files and the shell
+  fallback, project setup
 
 Their source is `src/surveycto_extractor/skill/references/`. The SurveyCTO
 primers (`xlsform.md`, `expressions.md`), the converter's technical reference,
