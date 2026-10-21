@@ -141,15 +141,23 @@ def project_section(config) -> str:
                 + "."
             )
         if repeats:
+            # Only nested repeats are listed: they are the ones a join gets wrong, and
+            # get_repeat_structure gives the rest on demand.
             long = long_dir(data.with_suffix(".parquet"))
+            nested = {n: g for n, g in repeats.items() if parents.get(n)}
             lines += [
                 "",
-                f"Repeat groups; long tables in `{long}`:",
-                "",
-                "| Repeat | Inside | Max instances | Count variable | Long table rows |",
-                "|---|---|---|---|---|",
+                f"{len(repeats)} repeat groups, one long table each in `{long}` "
+                "(`get_repeat_structure` lists them)."
+                + (" Nested ones join their parent on its keys:" if nested else ""),
             ]
-            for name, group in repeats.items():
+            if nested:
+                lines += [
+                    "",
+                    "| Repeat | Inside | Max instances | Count variable | Long table rows |",
+                    "|---|---|---|---|---|",
+                ]
+            for name, group in nested.items():
                 table = long / f"{name}.parquet"
                 rows = (
                     f"{pq.read_metadata(table).num_rows:,}"
@@ -157,7 +165,7 @@ def project_section(config) -> str:
                     else "none"
                 )
                 lines.append(
-                    f"| `{name}` | {parents.get(name) or 'submission'} | "
+                    f"| `{name}` | {parents[name]} | "
                     f"{group['max_iterations']} | `{group['count_var']}` | {rows} |"
                 )
     if project.get("output_dir"):

@@ -350,14 +350,22 @@ for the server's details.
 
 ### Cleaning guides and SurveyCTO primers
 
-The skill ships three project-agnostic guides under `references/`, which the
-agent reads before writing or reviewing cleaning code and offers as
-suggestions the people cleaning decide on:
+The skill ships project-agnostic guides under `references/`, one per cleaning
+task with the principle first and the Stata code after it. SKILL.md tells the
+agent which one to read when it reaches that step, so a session loads only the
+guides its task needs; they are suggestions the people cleaning decide on:
 
-- `CLEANING.md` — language-independent cleaning principles
-- `STATA.md` — Stata-specific patterns and guardrails
+- `missing-values.md` — sentinel codes, structural vs. response missing
+- `skip-logic.md` — zero-by-logic, skip-logic violations, short surveys
+- `aggregates.md` — totals with missing handling, consistency checks
+- `repeats-and-merges.md` — reshapes, select_multiple, deterministic joins
+- `other-specify.md` — other-specify coding, one-off corrections
+- `module-structure.md` — module layout, assertions, QC reporting
+- `stata-style.md` — Stata style, guardrails, batch mode, debugging
 - `SURVEYCTO_RELEVANCE_TRANSLATION.md` — SurveyCTO → Stata skip logic
   translation rules
+- `PII.md`, `TOOLS.md`, `SETUP.md` — PII statuses, output files and the shell
+  fallback, project setup
 
 Their source is `src/surveycto_extractor/skill/references/`. The SurveyCTO
 primers (`xlsform.md`, `expressions.md`), the converter's technical reference,

@@ -349,7 +349,7 @@ def test_discover_refuses_two_dictionaries_for_one_survey(tmp_path):
 def test_install_skill_writes_the_package_copy(tmp_path):
     target = skill.install_skill(tmp_path / ".claude" / "skills" / "survey-expert")
     assert (target / "SKILL.md").exists()
-    assert (target / "references" / "CLEANING.md").exists()
+    assert (target / "references" / "missing-values.md").exists()
     copied = (target / "search_survey.py").read_bytes()
     assert copied == SURVEY_PY.read_bytes()
 

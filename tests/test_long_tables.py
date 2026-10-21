@@ -269,8 +269,9 @@ def test_skill_project_section_and_claude_md(tmp_path, monkeypatch, analyzer):
     section = skill.project_section(cfg)
     assert section.startswith("## This project: synthetic")
     assert "| `synth` | Synthetic | 3 |" in section
-    # Parents come from questions.json: job sits inside member.
-    assert "| `member` | submission | 2 | `member_count` | 3 |" in section
+    # Only nested repeats are listed (parents from questions.json): job in member.
+    assert "2 repeat groups, one long table each" in section
+    assert "| `member` |" not in section
     assert "| `job` | member |" in section
     target = skill.install_skill(tmp_path / "skill", section)
     text = (target / "SKILL.md").read_text("utf-8")
