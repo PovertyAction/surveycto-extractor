@@ -89,10 +89,17 @@ When you need distributions for many of a module's variables, use the summary st
 `sumstats_final.dta` (and `.xlsx`) in the docs folder hold `n`, mean, sd and quartiles
 for every numeric variable over the rows its skip logic asks it, with the sentinel
 codes recoded to extended missings first (`-99` to `.d`, `-88` to `.r`, per
-`[sentinels]`) so they stay out of the statistics; flagged columns get none. Read them if they exist. If not, `uv run surveycto-summary-stats --survey <key>`
-writes `<key>_summary_stats.do` next to the `.dta`, and running it in Stata produces
-them. On a wide dataset that takes a while, so for a handful of variables a
-tabulation is quicker.
+`[sentinels]`) so they stay out of the statistics; flagged columns get none. Read
+them if they exist. If not, `uv run surveycto-summary-stats --survey <key>` writes
+`<key>_summary_stats.do` next to the `.dta`, and running it in Stata produces them.
+On a wide dataset that takes a while, so for a handful of variables a tabulation is
+quicker.
+
+End a draft with **Decisions for review**: the choices you made that no recorded
+ruling settles (a recall period converted to monthly, what a skipped household gets,
+whether to reuse the form's own total), one line each with the field, what you did
+and why. Cite the ruling instead of re-listing a choice one already decides, so the
+list shortens as the rulings grow.
 
 ## References: read one when you reach its step
 
@@ -120,8 +127,10 @@ differ.
 When the user decides how to handle something (a code, a gate that never fired, a
 field the instrument mislabels), write it under `### Rulings` in the `## Survey
 project` section of `CLAUDE.md`, in their words, as soon as it is made: a decision left
-in the conversation is reopened on the next run. Rulings come from the user and the
-study's documents; never relitigate a recorded one.
+in the conversation is reopened on the next run. An item from your **Decisions for
+review** becomes a ruling only when the user accepts or corrects it; write it then, in
+their words. Rulings come from the user and the study's documents, never from your
+own choices; never relitigate a recorded one.
 
 ## Answering
 
