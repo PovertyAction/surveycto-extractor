@@ -18,12 +18,14 @@ section before any task; where it differs from the general advice here, it wins.
 
 The `survey-expert` MCP tools answer in one call what would otherwise take reading
 large JSON files. Every tool takes an optional `survey` (a partial match on the survey
-key).
+key). Start a module with one `lookup_variables` call on all the variables it reads:
+each call is a turn, and one batch replaces a dozen single lookups. Look a variable up
+on its own only when you need the questions around it.
 
 | Need | Tool |
 |---|---|
-| What a variable is: question, type, choices, skip logic, sentinels, repeat, `pii` | `lookup_variable(name, context=0)`; `context=N` adds why it is asked and the N questions around it |
-| A module's variables at once | `lookup_variables(names)` |
+| A module's variables at once: question, type, choices, skip logic, sentinels, repeat, `pii` | `lookup_variables(names)` |
+| One variable with why it is asked and the N questions around it | `lookup_variable(name, context=N)` |
 | Find questions by words or name | `search_questions(query)` |
 | Why a value is missing | `get_gate_chain(name)` |
 | What feeds, gates or constrains it, and its repeat siblings | `get_variable_neighborhood(name)` |
