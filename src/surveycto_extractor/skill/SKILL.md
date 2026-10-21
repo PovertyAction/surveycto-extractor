@@ -87,8 +87,9 @@ what you found about missing values before computing from them.
 
 When you need distributions for many of a module's variables, use the summary stats:
 `sumstats_final.dta` (and `.xlsx`) in the docs folder hold `n`, mean, sd and quartiles
-for every numeric variable over the rows its skip logic asks it; flagged columns get
-none. Read them if they exist. If not, `uv run surveycto-summary-stats --survey <key>`
+for every numeric variable over the rows its skip logic asks it, with the sentinel
+codes recoded to extended missings first (`-99` to `.d`, `-88` to `.r`, per
+`[sentinels]`) so they stay out of the statistics; flagged columns get none. Read them if they exist. If not, `uv run surveycto-summary-stats --survey <key>`
 writes `<key>_summary_stats.do` next to the `.dta`, and running it in Stata produces
 them. On a wide dataset that takes a while, so for a handful of variables a
 tabulation is quicker.
