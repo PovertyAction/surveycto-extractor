@@ -145,9 +145,10 @@ def project_section(config) -> str:
             # get_repeat_structure gives the rest on demand.
             long = long_dir(data.with_suffix(".parquet"))
             nested = {n: g for n, g in repeats.items() if parents.get(n)}
+            groups = "repeat group" if len(repeats) == 1 else "repeat groups"
             lines += [
                 "",
-                f"{len(repeats)} repeat groups, one long table each in `{long}` "
+                f"{len(repeats)} {groups}, one long table each in `{long}` "
                 "(`get_repeat_structure` lists them)."
                 + (" Nested ones join their parent on its keys:" if nested else ""),
             ]
