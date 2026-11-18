@@ -1,7 +1,7 @@
 """Dependency-acceptance probe: the MCP server smoke test.
 
-Run by the `dep-accept` harness inside each candidate worktree (see
-`.dep-accept.toml`), which invokes it as `python scripts/dep_probe_mcp.py --out
+Run by the `dependabot-review` harness inside each candidate worktree (see
+`.dependabot-review.toml`), which invokes it as `python scripts/dep_probe_mcp.py --out
 PATH` with that candidate's dependency set installed and `SURVEYCTO_CONFIG`
 pointed at the sample config. It writes a JSON object the harness diffs against
 the `main` baseline.

@@ -1,4 +1,4 @@
-# Measurement definition for the `dep-accept` harness, which decides whether an
+# Measurement definition for the `dependabot-review` harness, which decides whether an
 # automated dependency-bump PR is safe to merge. See CONTRIBUTING.md.
 #
 # The harness runs `main` as a baseline and each PR head in its own worktree and
