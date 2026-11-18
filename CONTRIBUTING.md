@@ -52,16 +52,18 @@ is only what is specific to this toolkit:
 
 | File | Role |
 |---|---|
-| `.dep-accept.toml` | what to run and what to measure (must stay committed — Dependabot branches from `main`, so this is what makes future bump PRs measurable) |
+| `.dependabot-review.toml` | what to run and what to measure (must stay committed — Dependabot branches from `main`, so this is what makes future bump PRs measurable) |
 | `scripts/dep_probe_mcp.py` | the MCP-server smoke test, which no file comparison covers |
 | `tests/test_dep_acceptance.py` | the repo invariants the harness relies on |
 
-`just accept-deps` looks for that checkout in the directory
-`~/.claude/skills/dep-accept/` and runs `scripts/accept_dep_prs.py` inside it. To
-use a checkout elsewhere, set `DEP_ACCEPT` to its **directory** (not to the script):
+`just accept-deps` runs `scripts/accept_dep_prs.py` from the directory where the
+`ipa-skills-private` Claude Code plugin keeps the skill,
+`~/.claude/plugins/marketplaces/ipa-skills-private/.claude/skills/dependabot-review/`.
+To use a checkout elsewhere, set `DEPENDABOT_REVIEW` to its **directory** (not to
+the script):
 
 ```sh
-DEP_ACCEPT=/path/to/dep-accept just accept-deps
+DEPENDABOT_REVIEW=/path/to/dependabot-review just accept-deps
 ```
 
 Two verdicts need a human:

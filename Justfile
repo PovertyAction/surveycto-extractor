@@ -6,10 +6,10 @@ set windows-shell := ["powershell.exe", "-NoLogo", "-Command"]
 venv_dir := ".venv"
 python := venv_dir + if os_family() == "windows" { "/Scripts/python.exe" } else { "/bin/python3" }
 
-# Directory of the shared `dep-accept` harness checkout, used by `accept-deps`.
-# Override with DEP_ACCEPT pointing at the directory, not at the script inside it.
+# Directory of the shared `dependabot-review` harness checkout, used by `accept-deps`.
+# Override with DEPENDABOT_REVIEW pointing at the directory, not at the script inside it.
 home_dir := env('USERPROFILE', env('HOME', '.'))
-dep_accept_dir := env('DEP_ACCEPT', home_dir / ".claude/skills/dep-accept")
+dependabot_review_dir := env('DEPENDABOT_REVIEW', home_dir / ".claude/plugins/marketplaces/ipa-skills-private/.claude/skills/dependabot-review")
 
 [doc("List recipes (default)")]
 default:
@@ -54,19 +54,19 @@ test:
     uv run pytest -q
 
 # Each PR head gets its own worktree + venv and is diffed against main on tests,
-# the sample end-to-end outputs (see .dep-accept.toml) and the MCP smoke test.
-# Pass PR numbers to narrow it. The engine is the project-agnostic `dep-accept`
+# the sample end-to-end outputs (see .dependabot-review.toml) and the MCP smoke test.
+# Pass PR numbers to narrow it. The engine is the project-agnostic `dependabot-review`
 # harness, kept outside this repo so every project shares one copy -- set
-# DEP_ACCEPT to that checkout's DIRECTORY if it is not in the default location.
+# DEPENDABOT_REVIEW to that checkout's DIRECTORY if it is not in the default location.
 #
 # `just` interpolates *ARGS unquoted, so an argument containing a space is split
 # into two. That bites on `--json` with a path under a home directory whose name
 # has a space in it. For those, call the script directly:
-#   uv run --no-project python -u "$DEP_ACCEPT/scripts/accept_dep_prs.py" \
+#   uv run --no-project python -u "$DEPENDABOT_REVIEW/scripts/accept_dep_prs.py" \
 #       --json "/some path/report.json"
 [doc("Verify the open Dependabot PRs before merging (see CONTRIBUTING.md)")]
 accept-deps *ARGS:
-    uv run --no-project python -u "{{ dep_accept_dir / 'scripts/accept_dep_prs.py' }}" {{ ARGS }}
+    uv run --no-project python -u "{{ dependabot_review_dir / 'scripts/accept_dep_prs.py' }}" {{ ARGS }}
 
 [doc("Remove the virtual environment")]
 clean:

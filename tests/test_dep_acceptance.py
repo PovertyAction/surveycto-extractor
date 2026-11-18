@@ -1,13 +1,13 @@
 """Invariants the dependency-acceptance workflow depends on.
 
-The acceptance *engine* lives in the `dep-accept` skill, not in this repo, and
-carries its own `--selftest` for its parsers. What belongs here is the handful of
+The acceptance *engine* lives in the `dependabot-review` skill, not in this repo, and
+carries its own tests for its parsers. What belongs here is the handful of
 repo-local facts that engine relies on, so a dependency PR that breaks one fails
 CI instead of slipping through green:
 
 - the hook-vs-lockfile pin parity that `.pre-commit-config.yaml` documents in a
   comment but nothing enforced (ruff, codespell);
-- `.dep-accept.toml` staying valid and in step with the real project layout.
+- `.dependabot-review.toml` staying valid and in step with the real project layout.
 """
 
 import re
@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-DEP_ACCEPT_TOML = REPO_ROOT / ".dep-accept.toml"
+CONFIG_TOML = REPO_ROOT / ".dependabot-review.toml"
 
 try:
     import tomllib
@@ -110,20 +110,20 @@ class TestDepAcceptConfig:
     def test_config_exists_and_parses(self):
         # A bot branch is cut from main, so this file has to be committed for
         # future bump PRs to be measurable at all.
-        assert DEP_ACCEPT_TOML.is_file(), (
-            ".dep-accept.toml is missing from the repo root"
+        assert CONFIG_TOML.is_file(), (
+            ".dependabot-review.toml is missing from the repo root"
         )
-        assert _load(DEP_ACCEPT_TOML)
+        assert _load(CONFIG_TOML)
 
     def test_e2e_file_sources_exist(self):
-        config = _load(DEP_ACCEPT_TOML)
+        config = _load(CONFIG_TOML)
         for dest, source in (config.get("e2e", {}).get("files") or {}).items():
             assert (REPO_ROOT / source).is_file(), (
-                f".dep-accept.toml copies {source} -> {dest}, but {source} is absent"
+                f".dependabot-review.toml copies {source} -> {dest}, but {source} is absent"
             )
 
     def test_e2e_commands_are_declared_entry_points(self):
-        config = _load(DEP_ACCEPT_TOML)
+        config = _load(CONFIG_TOML)
         scripts = set(_load(REPO_ROOT / "pyproject.toml")["project"]["scripts"])
         for argv in config.get("e2e", {}).get("commands") or []:
             assert argv[0] in scripts, (
@@ -137,14 +137,14 @@ class TestDepAcceptConfig:
         # sharper invariant unguarded: the harness declares its commands in TOML,
         # so a flag later removed from a CLI turns every candidate into the same
         # FAIL, and the run then reports nothing at all about the bump.
-        config = _load(DEP_ACCEPT_TOML)
+        config = _load(CONFIG_TOML)
         commands = config.get("e2e", {}).get("commands") or []
         assert commands, "no e2e commands declared"
         for argv in commands:
             declared = _declared_flags(argv[0])
             for flag in (a for a in argv[1:] if a.startswith("--")):
                 assert flag in declared, (
-                    f".dep-accept.toml passes {flag} to {argv[0]}, which does not "
+                    f".dependabot-review.toml passes {flag} to {argv[0]}, which does not "
                     f"declare it -- the acceptance e2e would fail for every "
                     f"candidate and measure nothing. Declared: {sorted(declared)}"
                 )
@@ -159,7 +159,7 @@ class TestDepAcceptConfig:
         )
 
     def test_probe_script_exists(self):
-        config = _load(DEP_ACCEPT_TOML)
+        config = _load(CONFIG_TOML)
         script = config.get("probe", {}).get("script")
         if script:
             assert (REPO_ROOT / script).is_file(), f"probe script {script} is absent"
@@ -170,7 +170,7 @@ class TestDepAcceptConfig:
     def test_metric_globs_target_the_configured_output_dir(self, key):
         # Every metric path must point under the sample output dir the e2e writes
         # to; a stale prefix would silently match nothing and measure nothing.
-        config = _load(DEP_ACCEPT_TOML)
+        config = _load(CONFIG_TOML)
         for pattern in config.get("metrics", {}).get(key) or []:
             assert pattern.startswith("sample/output/"), (
                 f"metrics.{key} entry {pattern!r} does not point at sample/output/"
